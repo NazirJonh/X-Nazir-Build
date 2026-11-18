@@ -816,6 +816,16 @@ inline bool paint_layer_effect_is_cpu_computed(const MaterialPaintLayer &effect)
 }
 
 /**
+ * The filter's parameters in its schema order, as the CPU composite reads them. Shared with the
+ * bake's coverage culling (`paint_layers_bake_coverage.cc`), which resolves the effect's
+ * #EffectReach from the pass plan the same numbers build; defined in `paint_layers_composite.cc`
+ * beside the fold that fills them.
+ */
+void paint_layer_effect_filter_params(
+    const MaterialPaintLayer &effect,
+    float (&r_params)[PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM]);
+
+/**
  * Whether the CPU-computed \a effect of \a row owns the map of its result: a row that no bake of its
  * own can stand in for (a Material row, whose maps are its rendered source, or an Anchor Point
  * reader, whose bake is the slice) cannot hold the effect inside its cache the way a painted row

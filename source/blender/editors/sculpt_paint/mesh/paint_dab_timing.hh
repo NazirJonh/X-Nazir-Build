@@ -93,6 +93,12 @@ enum ePaintDabTimerStage : int {
   PAINT_DAB_TIMER_ROW_BRUSH_TEXTURE,
   PAINT_DAB_TIMER_ROW_MASKS,
   /**
+   * The node-level material pre-test of the PBR image path, run once per dab over the gathered
+   * nodes. Wall time on the painting thread; it is the number that decides whether the per-node
+   * verdict is worth caching across dabs.
+   */
+  PAINT_DAB_TIMER_MATERIAL_PRETEST,
+  /**
    * Image Editor (2D) paint, all wall time on the painting thread. The Area Plane path rasterizes
    * the dab through the mesh (PREPARE, COVERAGE, FILL, AP_BLEND); the other mappings build a brush
    * image first (BRUSH_BUILD) and blend it (BRUSH_BLEND). DIRTY is the undo capture of the region
@@ -138,6 +144,7 @@ inline bool paint_dab_timer_stage_is_wall(const ePaintDabTimerStage stage)
     case PAINT_DAB_TIMER_2D_BRUSH_BLEND:
     case PAINT_DAB_TIMER_2D_IMAGE_UPDATE:
     case PAINT_DAB_TIMER_2D_REDRAW_NOTIFY:
+    case PAINT_DAB_TIMER_MATERIAL_PRETEST:
       return true;
     case PAINT_DAB_TIMER_ROW_GEOMETRY:
     case PAINT_DAB_TIMER_SOURCE_SAMPLING:
@@ -190,6 +197,8 @@ inline const char *paint_dab_timer_stage_name(const ePaintDabTimerStage stage)
       return "    rf brush tex";
     case PAINT_DAB_TIMER_ROW_MASKS:
       return "    rf masks";
+    case PAINT_DAB_TIMER_MATERIAL_PRETEST:
+      return "  material test";
     case PAINT_DAB_TIMER_2D_AP_PREPARE:
       return "2D ap prepare";
     case PAINT_DAB_TIMER_2D_AP_COVERAGE:

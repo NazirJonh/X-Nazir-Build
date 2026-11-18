@@ -34,6 +34,7 @@
 #include "BLI_task.h"
 #include "BLI_threads.h"
 #include "BLI_utildefines.h"
+#include "BLI_vector.hh"
 
 #include "atomic_ops.h"
 
@@ -6432,11 +6433,25 @@ static wmOperatorStatus texture_paint_camera_project_exec(bContext *C, wmOperato
 
   project_paint_op(&ps, lastpos, pos);
 
+  /* Whether each projected image received a pixel this projection painted; #ProjPaintImage::touch
+   * is set per painted pixel and cleared by #project_image_refresh_tagged as it consumes the
+   * regions, so it is read before the refresh. The end-of-projection full-update mark reads as
+   * "everything changed" to the paint-layer bake subscriptions, so it is left only for images the
+   * projection actually painted: a slot's image it never reached must not make every effect row
+   * reading it re-bake its whole canvas. */
+  blender::Vector<bool> image_touched;
+  image_touched.reserve(ps.image_tot);
+  for (a = 0; a < ps.image_tot; a++) {
+    image_touched.append(ps.projImages[a].touch);
+  }
+
   project_image_refresh_tagged(&ps);
 
   for (a = 0; a < ps.image_tot; a++) {
-    BKE_image_partial_update_mark_full_update(ps.projImages[a].ima);
-    WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, ps.projImages[a].ima);
+    if (image_touched[a]) {
+      BKE_image_partial_update_mark_full_update(ps.projImages[a].ima);
+      WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, ps.projImages[a].ima);
+    }
   }
 
   project_paint_end(&ps);

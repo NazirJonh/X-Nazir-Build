@@ -4248,6 +4248,77 @@ TEST_F(PaintLayersEffectTest, the_halo_matches_each_kernels_total_coverage)
   EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_NOISE, nullptr, 100, 100), 0);
 }
 
+TEST_F(PaintLayersEffectTest, every_filter_declares_its_reach)
+{
+  /* The table is a decision record, not a derivation: every value of #eMaterialPaintLayerFilter
+   * must appear with the reach the coverage culling reads. A filter added to the enum without an
+   * entry fails the loop below instead of silently classifying as a whole-map effect. */
+  struct ReachCase {
+    eMaterialPaintLayerFilter filter;
+    EffectReach reach;
+  };
+  const ReachCase cases[] = {
+      {MA_PAINT_LAYER_FILTER_INVERT, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_LEVELS, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_HSL, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_COLOR_ID, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_UV_ISLAND, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_BRIGHTNESS_CONTRAST, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_COLOR_RAMP, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_POSTERIZE, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_MATH, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_THRESHOLD, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_CLAMP, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_CURVES, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_COLOR_BALANCE, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_BLUR, EffectReach::Neighbourhood},
+      {MA_PAINT_LAYER_FILTER_SHARPEN, EffectReach::Neighbourhood},
+      {MA_PAINT_LAYER_FILTER_HIGH_PASS, EffectReach::Neighbourhood},
+      {MA_PAINT_LAYER_FILTER_EDGE_DETECT, EffectReach::Neighbourhood},
+      {MA_PAINT_LAYER_FILTER_EMBOSS, EffectReach::Neighbourhood},
+      {MA_PAINT_LAYER_FILTER_ERODE_DILATE, EffectReach::Neighbourhood},
+      {MA_PAINT_LAYER_FILTER_GLOW, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_BEVEL, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_COLOR_MATCH, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_EXPOSURE, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_DEBAND, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_NOISE, EffectReach::Pointwise},
+      {MA_PAINT_LAYER_FILTER_NORMAL_CONVERT, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_CHANNEL_MIXER, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_TRANSFORM, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_MIRROR, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_HISTOGRAM_SCAN, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_HISTOGRAM_SHIFT, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL, EffectReach::Neighbourhood},
+      {MA_PAINT_LAYER_FILTER_DROP_SHADOW, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_MASK_OUTLINE, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_FILL_AREA, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_SMOOTHSTEP, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_CONTRAST_LUMINOSITY, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_HEIGHT_ADJUST, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_PIXELATE, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_HSL_PERSPECTIVE, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_FXAA, EffectReach::Neighbourhood},
+      {MA_PAINT_LAYER_FILTER_BLUR_SLOPE, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT, EffectReach::WholeMap},
+      {MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK, EffectReach::WholeMap},
+  };
+  const float params[PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM] = {};
+  /* The enum has no count sentinel (DNA values are explicit), so the loop bound is the last filter:
+   * a filter added after it must move this bound together with its table entry. */
+  constexpr int last_filter = int(MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK);
+  for (int value = 1; value <= last_filter; value++) {
+    const auto *found = std::find_if(std::begin(cases), std::end(cases), [&](const ReachCase &c) {
+      return int(c.filter) == value;
+    });
+    ASSERT_NE(found, std::end(cases))
+        << "filter " << value << " has no declared reach; add it to this table";
+    EXPECT_EQ(BKE_paint_layers_effect_reach(eMaterialPaintLayerFilter(value), params), found->reach)
+        << "filter " << value;
+  }
+}
+
 TEST_F(PaintLayersEffectTest, the_pass_plan_matches_each_kernels_shape)
 {
   Vector<PaintLayerEffectPass> passes;

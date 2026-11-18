@@ -293,6 +293,30 @@ constexpr float MAP_ONLY_EDIT_DELAY_SECONDS = 3.0f;
 /** Whether \a layer is a row \a ma keeps a bake for (a stack row, a correction or a mask item). */
 bool bake_row_owned(Material &ma, const MaterialPaintLayer &layer);
 
+/**
+ * Whether \a layer's maps carry a tile for every object the planner last resolved. The shader may
+ * stand in only then: a missing tile would show another object's pixels.
+ */
+bool bake_tiles_ready(const Material &ma, const MaterialPaintLayer &layer);
+
+/**
+ * Whether the bake of \a layer is one map for every object. Same as
+ * #BKE_paint_layers_generator_subtree_is_shared_bakeable, which sees only the node's own subtree
+ * and so cannot know a mask effect item reads the surface through the items before it.
+ */
+bool bake_node_is_shared(const Material &ma, const MaterialPaintLayer &layer);
+
+/**
+ * Whether the mapping of \a layer is folded into its bake instead of keeping the row live: a UV
+ * remap (Mirror included) of a row that carries an enabled CPU-computed effect (Noise, Blur), or
+ * the projection of such a row (#paint_layer_row_folds_into_bake). Defined in
+ * `paint_layers_bake_hash.cc`; the coverage culling (`paint_layers_bake_coverage.cc`) asks it too,
+ * because a folded mapping moves an edit of the map to the mapped rectangle.
+ */
+bool bake_own_mapping_folds(const Material &ma,
+                            const MaterialPaintLayer &layer,
+                            const bool cpu_in_subtree);
+
 /** The bake runtime of every material, by #ID::session_uid. Hold #bake_runtime_mutex around it. */
 Map<uint32_t, BakeMaterialRuntime> &bake_runtime();
 /** Guards #bake_runtime; see its definition for the rules. */

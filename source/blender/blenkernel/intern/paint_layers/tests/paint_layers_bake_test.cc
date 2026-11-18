@@ -3176,4 +3176,324 @@ TEST_F(PaintLayersBakeTest, a_mask_effect_over_a_projected_item_bakes_one_tile_p
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Coverage culling of reported edit regions
+ * \{ */
+
+namespace {
+
+/** Mark \a region as changed in \a image's partial-update log, the way a paint writer reports its
+ * edits, on the image's first tile. */
+void bake_test_mark_region(Image &image, const rcti &region)
+{
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(&image, nullptr, &lock);
+  EXPECT_NE(ibuf, nullptr);
+  if (ibuf == nullptr) {
+    return;
+  }
+  /* The log keys its changesets by tile, so a null tile is not a valid stand-in for the first. */
+  const ImageTile *tile = BKE_image_get_tile(&image, 1001);
+  EXPECT_NE(tile, nullptr);
+  BKE_image_partial_update_mark_region(&image, tile, ibuf, &region);
+  BKE_image_release_ibuf(&image, ibuf, lock);
+}
+
+/**
+ * A map two partial-update chunks wide. The log reports an edit as the chunks it touches (256 px
+ * squares, not clamped to the image), so a region can only lie outside a half of the map when that
+ * half is a chunk of its own; the regions the culling tests read back are therefore compared as
+ * "covers the edit", not as the edit's exact rectangle.
+ */
+Image *bake_test_add_wide_image(Main &bmain, const char *name)
+{
+  const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  return BKE_image_add_generated(
+      &bmain, 512, 256, name, 32, false, IMA_GENTYPE_BLANK, color, false, false, false);
+}
+
+/**
+ * Make the right half of \a image's map transparent, so the row covers only its left half: a
+ * reported edit region on the right lies outside everything the row paints. Returns the
+ * transparent rectangle.
+ */
+rcti bake_test_clear_right_half_alpha(Image &image)
+{
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(&image, nullptr, &lock);
+  EXPECT_NE(ibuf, nullptr);
+  if (ibuf == nullptr) {
+    return rcti{0, 0, 0, 0};
+  }
+  const int width = ibuf->x;
+  const int height = ibuf->y;
+  const int half = width / 2;
+  uchar *pixels = ibuf->byte_data_for_write();
+  EXPECT_NE(pixels, nullptr);
+  if (pixels != nullptr) {
+    for (const int y : IndexRange(height)) {
+      for (int x = half; x < width; x++) {
+        pixels[(int64_t(y) * width + x) * 4 + 3] = 0;
+      }
+    }
+  }
+  BKE_image_release_ibuf(&image, ibuf, lock);
+  return rcti{half, width, 0, height};
+}
+
+}  // namespace
+
+/**
+ * A pointwise bake (Noise reads only its own texel) cannot move past the edited rectangle, so a
+ * reported region that lies outside the row's content coverage is dropped before it can mark the
+ * row stale. The same mark over a covered part of the map is kept: the culling answers "is there
+ * coverage here", not "drop what I do not recognise".
+ */
+TEST_F(PaintLayersBakeTest, an_uncovered_edit_region_is_dropped_for_a_pointwise_bake)
+{
+  Image *map = bake_test_add_wide_image(*bmain, "Row");
+  MaterialPaintLayer *row = add_paint_layer("Row", map);
+  ASSERT_NE(BKE_paint_layers_filter_add(*ma, row, MA_PAINT_LAYER_FILTER_NOISE), nullptr);
+  clear_active();
+  const rcti uncovered = bake_test_clear_right_half_alpha(*map);
+  ASSERT_GT(uncovered.xmax, uncovered.xmin);
+
+  /* Prime the journal before the subscription so its baseline drain sees the priming mark and
+   * later reports only what this test marks. */
+  bake_test_mark_region(*map, rcti{0, 0, 0, 0});
+  BKE_paint_layers_bake_subscribe(*ma, *row);
+  /* The setup's structural edits mark the material stale on their own; the culling is what this
+   * test reads. */
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_STALE;
+
+  bake_test_mark_region(*map, uncovered);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  int region[4] = {};
+  EXPECT_FALSE(BKE_paint_layers_bake_changed_region(*ma, *row, region))
+      << "a pointwise bake cannot move through an uncovered region, so it is dropped";
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_BAKE_STALE, 0)
+      << "a dropped region must not make the material stale";
+
+  /* The covered half is a real edit: the same row keeps it. */
+  const rcti covered{0, uncovered.xmin, uncovered.ymin, uncovered.ymax};
+  bake_test_mark_region(*map, covered);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  ASSERT_TRUE(BKE_paint_layers_bake_changed_region(*ma, *row, region));
+  EXPECT_LE(region[0], covered.xmin);
+  EXPECT_GE(region[1], covered.xmax);
+  EXPECT_LE(region[2], covered.ymin);
+  EXPECT_GE(region[3], covered.ymax);
+}
+
+/**
+ * A neighbourhood bake (Blur reads past the edited texel) keeps an uncovered region: a pixel edit
+ * just outside the coverage can still change the blur inside it, so dropping the region would
+ * leave the covered neighbours stale in the bake.
+ */
+TEST_F(PaintLayersBakeTest, an_uncovered_edit_region_is_kept_for_a_neighbourhood_bake)
+{
+  Image *map = add_image("Row");
+  MaterialPaintLayer *row = add_paint_layer("Row", map);
+  ASSERT_NE(BKE_paint_layers_filter_add(*ma, row, MA_PAINT_LAYER_FILTER_BLUR), nullptr);
+  clear_active();
+  const rcti uncovered = bake_test_clear_right_half_alpha(*map);
+  ASSERT_GT(uncovered.xmax, uncovered.xmin);
+
+  bake_test_mark_region(*map, rcti{0, 0, 0, 0});
+  BKE_paint_layers_bake_subscribe(*ma, *row);
+
+  bake_test_mark_region(*map, uncovered);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  int region[4] = {};
+  ASSERT_TRUE(BKE_paint_layers_bake_changed_region(*ma, *row, region))
+      << "a blur reaches past the edited rectangle, so its region is kept whole";
+  EXPECT_LE(region[0], uncovered.xmin);
+  EXPECT_GE(region[1], uncovered.xmax);
+  EXPECT_LE(region[2], uncovered.ymin);
+  EXPECT_GE(region[3], uncovered.ymax);
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_BAKE_STALE, 0);
+}
+
+/**
+ * A whole-map bake (a Color Match reads a statistic of the map) cannot be narrowed to the edited
+ * rectangle: its result spans the canvas from every texel, so an uncovered region is kept.
+ */
+TEST_F(PaintLayersBakeTest, an_uncovered_edit_region_is_kept_for_a_whole_map_effect)
+{
+  Image *map = add_image("Row");
+  MaterialPaintLayer *row = add_paint_layer("Row", map);
+  ASSERT_NE(BKE_paint_layers_filter_add(*ma, row, MA_PAINT_LAYER_FILTER_COLOR_MATCH), nullptr);
+  clear_active();
+  const rcti uncovered = bake_test_clear_right_half_alpha(*map);
+  ASSERT_GT(uncovered.xmax, uncovered.xmin);
+
+  bake_test_mark_region(*map, rcti{0, 0, 0, 0});
+  BKE_paint_layers_bake_subscribe(*ma, *row);
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_STALE;
+
+  bake_test_mark_region(*map, uncovered);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  int region[4] = {};
+  ASSERT_TRUE(BKE_paint_layers_bake_changed_region(*ma, *row, region))
+      << "a whole-map effect reads every texel, so its region is kept whole";
+  EXPECT_LE(region[0], uncovered.xmin);
+  EXPECT_GE(region[1], uncovered.xmax);
+  EXPECT_LE(region[2], uncovered.ymin);
+  EXPECT_GE(region[3], uncovered.ymax);
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_BAKE_STALE, 0);
+}
+
+/**
+ * A mapping folded into the bake (a Mirror over a row with a CPU effect) moves the edited pixel to
+ * the mapped rectangle, which the plane's rectangle cannot see: the region is kept.
+ */
+TEST_F(PaintLayersBakeTest, an_uncovered_edit_region_is_kept_for_a_folded_mapping)
+{
+  /* Only a Fill's own map supports a mapping: a painted map is written at the raw UV. */
+  Image *map = add_image("Row");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "Row", nullptr, PaintLayerPlace::Above);
+  ASSERT_TRUE(BKE_paint_layers_set_source(*ma, row, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, row, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(*ma, row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+  ASSERT_NE(BKE_paint_layers_filter_add(*ma, row, MA_PAINT_LAYER_FILTER_NOISE), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_mirror(*ma, row, MA_PAINT_LAYER_MAPPING_MIRROR_U));
+  clear_active();
+  const rcti uncovered = bake_test_clear_right_half_alpha(*map);
+  ASSERT_GT(uncovered.xmax, uncovered.xmin);
+
+  bake_test_mark_region(*map, rcti{0, 0, 0, 0});
+  BKE_paint_layers_bake_subscribe(*ma, *row);
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_STALE;
+
+  bake_test_mark_region(*map, uncovered);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  int region[4] = {};
+  ASSERT_TRUE(BKE_paint_layers_bake_changed_region(*ma, *row, region))
+      << "a folded mapping moves the edit to the mapped rectangle, so the region is kept";
+  EXPECT_LE(region[0], uncovered.xmin);
+  EXPECT_GE(region[1], uncovered.xmax);
+  EXPECT_LE(region[2], uncovered.ymin);
+  EXPECT_GE(region[3], uncovered.ymax);
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_BAKE_STALE, 0);
+}
+
+/**
+ * A projected row reads its map through the surface: the bake pixels an edit moves live in the
+ * frame's space, which the plane's rectangle cannot see, so the region is kept.
+ */
+TEST_F(PaintLayersBakeTest, an_uncovered_edit_region_is_kept_for_a_projection)
+{
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "Projected", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_source(*ma, row, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  Image *map = add_image("Projected");
+  add_channel(*row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map);
+  ASSERT_TRUE(
+      BKE_paint_layers_projection_set_space(*ma, row, MA_PAINT_LAYER_MAPPING_SPACE_TRIPLANAR));
+  clear_active();
+  const rcti uncovered = bake_test_clear_right_half_alpha(*map);
+  ASSERT_GT(uncovered.xmax, uncovered.xmin);
+
+  bake_test_mark_region(*map, rcti{0, 0, 0, 0});
+  BKE_paint_layers_bake_subscribe(*ma, *row);
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_STALE;
+
+  bake_test_mark_region(*map, uncovered);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  int region[4] = {};
+  ASSERT_TRUE(BKE_paint_layers_bake_changed_region(*ma, *row, region))
+      << "a projection reads through the surface, so the plane's rectangle cannot narrow it";
+  EXPECT_LE(region[0], uncovered.xmin);
+  EXPECT_GE(region[1], uncovered.xmax);
+  EXPECT_LE(region[2], uncovered.ymin);
+  EXPECT_GE(region[3], uncovered.ymax);
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_BAKE_STALE, 0);
+}
+
+/**
+ * The coverage plane is the row's content map, not whichever source reported the edit: a region of
+ * another of the row's images has no rectangle in the plane's pixel space to test, so it is kept.
+ */
+TEST_F(PaintLayersBakeTest, an_edit_region_of_another_image_is_kept)
+{
+  Image *base = add_image("Base");
+  Image *roughness = add_image("Roughness");
+  MaterialPaintLayer *row = add_paint_layer("Row", base, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  add_channel(*row, PAINT_MATERIAL_CHANNEL_ROUGHNESS, roughness);
+  ASSERT_NE(BKE_paint_layers_filter_add(*ma, row, MA_PAINT_LAYER_FILTER_NOISE), nullptr);
+  clear_active();
+  const rcti uncovered = bake_test_clear_right_half_alpha(*roughness);
+  ASSERT_GT(uncovered.xmax, uncovered.xmin);
+
+  bake_test_mark_region(*roughness, rcti{0, 0, 0, 0});
+  BKE_paint_layers_bake_subscribe(*ma, *row);
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_STALE;
+
+  bake_test_mark_region(*roughness, uncovered);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  int region[4] = {};
+  ASSERT_TRUE(BKE_paint_layers_bake_changed_region(*ma, *row, region))
+      << "the coverage plane is another image, so the region cannot be tested against it";
+  EXPECT_LE(region[0], uncovered.xmin);
+  EXPECT_GE(region[1], uncovered.xmax);
+  EXPECT_LE(region[2], uncovered.ymin);
+  EXPECT_GE(region[3], uncovered.ymax);
+}
+
+/**
+ * A mask item that bakes a CPU effect owns its grey: its coverage is the mask it reads, which this
+ * consumer does not walk to, so every region is kept (the plane stays #BakeCoveragePlane::Ignore).
+ */
+TEST_F(PaintLayersBakeTest, an_edit_region_of_a_mask_effect_item_is_kept)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));
+  Image *mask = bake_test_add_ramp_image(*bmain, "Mask");
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *row, *mask), nullptr);
+  MaterialPaintLayer *blur = bake_test_add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_BLUR);
+  clear_active();
+
+  bake_test_mark_region(*mask, rcti{0, 0, 0, 0});
+  BKE_paint_layers_bake_subscribe(*ma, *blur);
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_STALE;
+
+  const rcti edited{1, 3, 2, 5};
+  bake_test_mark_region(*mask, edited);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  int region[4] = {};
+  ASSERT_TRUE(BKE_paint_layers_bake_changed_region(*ma, *blur, region))
+      << "a mask effect item keeps every region of its input";
+  EXPECT_LE(region[0], edited.xmin);
+  EXPECT_GE(region[1], edited.xmax);
+  EXPECT_LE(region[2], edited.ymin);
+  EXPECT_GE(region[3], edited.ymax);
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_BAKE_STALE, 0);
+}
+
+/**
+ * A row removed while its regions wait for the re-lock: the coverage lookup (Phase 2) misses, the
+ * regions fall through to the re-lock (Phase 3), and the drain must not crash. The interleaving is
+ * played by removing the row between two drains, the closest a public sequence can get to the gap
+ * between the phases.
+ */
+TEST_F(PaintLayersBakeTest, a_row_removed_before_the_regions_are_applied_does_not_crash)
+{
+  Image *map = add_image("Row");
+  MaterialPaintLayer *row = add_paint_layer("Row", map);
+  ASSERT_NE(BKE_paint_layers_filter_add(*ma, row, MA_PAINT_LAYER_FILTER_NOISE), nullptr);
+  clear_active();
+  bake_test_mark_region(*map, rcti{0, 0, 0, 0});
+  BKE_paint_layers_bake_subscribe(*ma, *row);
+  const bUUID marker = row->marker;
+
+  bake_test_mark_region(*map, rcti{1, 2, 1, 2});
+  ASSERT_TRUE(BKE_paint_layers_remove(*ma, row));
+  /* The drain looks the row up again for its coverage (Phase 2); with the row gone that lookup
+   * misses, and the pending region must not crash the re-lock (Phase 3) or resurrect the row. */
+  EXPECT_EQ(BKE_paint_layers_find(*ma, marker), nullptr);
+  BKE_paint_layers_bake_notice_changes(*ma);
+}
+
+/** \} */
+
 }  // namespace blender::bke::tests

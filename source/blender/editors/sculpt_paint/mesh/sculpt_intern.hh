@@ -999,6 +999,22 @@ struct StrokeCache {
   bool paint_mask_sampler_resolved = false;
 
   /**
+   * Whether any dab of this stroke actually kept a paint row of the active material's own canvas
+   * (brush reach, material filter and face selection all passed for it, see
+   * #SCULPT_do_paint_brush_image). A stroke that ends without it ran entirely over faces the
+   * active material is not assigned to: nothing painted, nothing to bake, and the stroke end says
+   * so instead of leaving the miss silent.
+   */
+  bool image_paint_hit = false;
+
+  /**
+   * Whether any dab of this stroke reached the mesh at all (a non-empty node mask). Used only to
+   * word the stroke-end report: #image_paint_hit stays false both when the brush missed the mesh
+   * and when it hit faces of another material, and only the second deserves the material wording.
+   */
+  bool image_paint_nodes_seen = false;
+
+  /**
    * Effective paint state for the stroke, resolved once in #stroke_cache_init. The paint-path
    * branches read these instead of #StrokeToggleSettings.invert, which the Erase brush reuses
    * with a different meaning; the invert flag itself is left to the non-paint branches (normal

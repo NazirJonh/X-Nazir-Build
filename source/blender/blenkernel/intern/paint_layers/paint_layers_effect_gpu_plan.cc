@@ -303,17 +303,10 @@ void BKE_paint_layers_effect_pass_plan(eMaterialPaintLayerFilter filter,
   }
 }
 
-int BKE_paint_layers_effect_halo(eMaterialPaintLayerFilter filter,
-                                 const float *params,
-                                 const int width,
-                                 const int height)
+/** The plan's halo: its reaches folded per axis, the larger total. Shared by the public halo and
+ * the coverage reach so a kind can only be classified one way. */
+static int effect_plan_halo(Span<PaintLayerEffectPass> passes)
 {
-  /* One rule decides the halo: the plan. Folding its reaches per axis gives the same numbers the
-   * kernels' coverage gave, and keeps the halo, the per-pass regions and the reach of the kinds
-   * still to come growing from the same numbers, instead of three places reading the same
-   * parameters. */
-  Vector<PaintLayerEffectPass> passes;
-  BKE_paint_layers_effect_pass_plan(filter, params, width, height, passes);
   int reach_x = 0;
   int reach_y = 0;
   for (const PaintLayerEffectPass &pass : passes) {
@@ -325,6 +318,33 @@ int BKE_paint_layers_effect_halo(eMaterialPaintLayerFilter filter,
     }
   }
   return std::max(reach_x, reach_y);
+}
+
+int BKE_paint_layers_effect_halo(eMaterialPaintLayerFilter filter,
+                                 const float *params,
+                                 const int width,
+                                 const int height)
+{
+  /* One rule decides the halo: the plan. Folding its reaches per axis gives the same numbers the
+   * kernels' coverage gave, and keeps the halo, the per-pass regions and the reach of the kinds
+   * still to come growing from the same numbers, instead of three places reading the same
+   * parameters. */
+  Vector<PaintLayerEffectPass> passes;
+  BKE_paint_layers_effect_pass_plan(filter, params, width, height, passes);
+  return effect_plan_halo(passes);
+}
+
+EffectReach BKE_paint_layers_effect_reach(eMaterialPaintLayerFilter filter, const float *params)
+{
+  /* The plan's one-texel size bound only clamps a radius upwards to one, so it classifies every
+   * kind without measuring a canvas. An empty plan is a kind the plan does not describe (a
+   * whole-map pass such as a Color Match) and never counts as pointwise. */
+  Vector<PaintLayerEffectPass> passes;
+  BKE_paint_layers_effect_pass_plan(filter, params, 1, 1, passes);
+  if (passes.is_empty()) {
+    return EffectReach::WholeMap;
+  }
+  return effect_plan_halo(passes) == 0 ? EffectReach::Pointwise : EffectReach::Neighbourhood;
 }
 
 /**

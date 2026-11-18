@@ -1216,6 +1216,24 @@ struct MaterialPaintFilter {
                                                            face_materials[face_i];
     return face_material_index == active_material_index;
   }
+
+  /**
+   * Whether any UV primitive of \a pixel_node belongs to the active material. Same face/material
+   * selection as #uv_primitive_matches, so the node-level pre-test and the per-row filter cannot
+   * drift apart when the selection rule changes.
+   */
+  bool node_has_matching_primitive(const PixelNode &pixel_node) const
+  {
+    if (!use_filter) {
+      return true;
+    }
+    for (const int primitive_index : pixel_node.uv_primitives.tri_indices.index_range()) {
+      if (uv_primitive_matches(pixel_node, primitive_index)) {
+        return true;
+      }
+    }
+    return false;
+  }
 };
 
 /**
@@ -2538,6 +2556,13 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
   if (cache.image_paint_targets.is_empty()) {
     return;
   }
+  /* Distinguishes, for the stroke-end report only, "the brush never reached the mesh" (empty
+   * node mask: brush off the surface, zero strength, layer mask or face selection emptied every
+   * row) from "it reached faces of another material". The material-specific wording is only
+   * honest in the latter case. Never gates bake planning. */
+  if (!node_mask.is_empty()) {
+    cache.image_paint_nodes_seen = true;
+  }
   /* After the early return, so the total only covers applications that are counted as dabs. */
   const ed::sculpt_paint::PaintDabTimer dab_total_timer(
       ed::sculpt_paint::PAINT_DAB_TIMER_DAB_TOTAL);
@@ -2640,6 +2665,15 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
    * one empty #Array per node in it on every dab. */
   Array<Array<RowFactorCache>> node_factor_caches(node_mask.size());
   bool factor_caches_valid = false;
+
+  /* Node-level material pre-test: a gathered node none of whose faces belongs to the active
+   * material paints nothing (the row filter below would drop every row of it), so its whole UV
+   * work is skipped. Indexed by PBVH node index; computed once per dab for the first target that
+   * needs it and reset when the pixel encoding rebuilds. Leaves are material-coherent below the
+   * split depth cap, but the test makes no assumption about that: it keeps a node that carries
+   * ANY matching face, and a mixed cap leaf's foreign rows are still dropped per row. */
+  BitVector<> node_material_hit;
+  bool node_material_hit_valid = false;
 
   /* Layout keys are not cheap: #BKE_paint_pixels_layout_key_get acquires and releases every tile's
    * #ImBuf to read its dimensions. Both the rebuild check and the channel-grouping test below need
@@ -2758,6 +2792,7 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
       /* The pixel-node encoding changed, so any cached factors from a previous channel this
        * dab no longer line up with it. The reusable row arrays belong to the old layout too. */
       factor_caches_valid = false;
+      node_material_hit_valid = false;
       for (Array<RowFactorCache> &stale : node_factor_caches) {
         stale = Array<RowFactorCache>();
       }
@@ -2767,6 +2802,35 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
 
     PixelData &pixel_data = *pbvh.pixels_;
     MutableSpan<PixelNode> pixel_nodes = pixel_data.nodes;
+
+    /* The node-level material pre-test, against this dab's gathered nodes. Faces of other
+     * materials are silently dropped by the row filter either way; this only decides whether the
+     * node is worth its UV work at all.
+     *
+     * The verdict can only change with the topology or the material assignment, so it could be
+     * cached per node across dabs (keyed by the pixel layout key). It is not, until
+     * #PAINT_DAB_TIMER_MATERIAL_PRETEST measures more than 0.2 ms per dab: the timer is here to
+     * decide that with numbers instead of intuition. */
+    if (material_filter.use_filter && !node_material_hit_valid) {
+      /* Rebuilt from scratch: after a pixel-encoding rebuild the old bits name other nodes, and a
+       * stale set bit would keep dead work alive. */
+      const ed::sculpt_paint::PaintDabTimer pretest_timer(
+          ed::sculpt_paint::PAINT_DAB_TIMER_MATERIAL_PRETEST);
+      node_material_hit = BitVector<>(pixel_nodes.size(), false);
+      node_mask.foreach_index([&](const int i) {
+        if (material_filter.node_has_matching_primitive(pixel_nodes[i])) {
+          node_material_hit[i].set();
+        }
+      });
+      node_material_hit_valid = true;
+    }
+    /* Skips a node the pre-test dropped: the material filter would give it no row anyway. It is a
+     * predicate rather than a filtered #IndexMask because every loop below indexes
+     * #node_factor_caches by the positional `pos` of the full #node_mask; a smaller mask would
+     * shift those positions. */
+    const auto node_skipped_by_material = [&](const int i) {
+      return material_filter.use_filter && !node_material_hit[i];
+    };
 
     /* Normal needs the tangent-basis path and Alpha acts as a stroke mask rather than as ordinary
      * channel payload; neither can share the plain multi-destination pass. */
@@ -2862,6 +2926,9 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
      * parallel node loop would mutate those maps while other threads read them. */
     {
       node_mask.foreach_index([&](const int i) {
+        if (node_skipped_by_material(i)) {
+          return;
+        }
         for (const PaintChannelWriteDest &dest : dests) {
           fetch_image_buffers(*dest.image_data, nodes[i], pixel_nodes[i]);
         }
@@ -2873,6 +2940,9 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
        * size is the reference) and before the threaded factor pass only reads them. */
       if (mask_sampler != nullptr) {
         node_mask.foreach_index([&](const int i) {
+          if (node_skipped_by_material(i)) {
+            return;
+          }
           for (const UDIMTilePixels &tile : pixel_nodes[i].tiles) {
             if (const ImBuf *painted = image_data.buffers.lookup_default(tile.tile_number, nullptr))
             {
@@ -2887,6 +2957,9 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
       }
       node_mask.foreach_index(
           [&](const int i, const int pos) {
+            if (node_skipped_by_material(i)) {
+              return;
+            }
             node_factor_caches[pos] = compute_paint_row_factors(ss,
                                                                 pixel_data,
                                                                 positions,
@@ -2905,10 +2978,31 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
           },
           exec_mode::grain_size(1));
       factor_caches_valid = true;
+      /* The stroke touched the active material's own faces if any node's row-factor pass kept a
+       * row: brush reach, material filter and face selection all passed for it. A stroke whose
+       * every dab comes out empty ran over faces the material is not assigned to only. */
+      if (!cache.image_paint_hit) {
+        for (const Array<RowFactorCache> &tile_caches : node_factor_caches) {
+          bool node_hit = false;
+          for (const RowFactorCache &tile_cache : tile_caches) {
+            if (!tile_cache.valid_rows.is_empty()) {
+              node_hit = true;
+              break;
+            }
+          }
+          if (node_hit) {
+            cache.image_paint_hit = true;
+            break;
+          }
+        }
+      }
     }
     {
       node_mask.foreach_index(
           [&](const int i, const int pos) {
+            if (node_skipped_by_material(i)) {
+              return;
+            }
             for (const PaintChannelWriteDest &dest : dests) {
               push_undo_bounds(*dest.image_data, pixel_nodes[i], node_factor_caches[pos]);
             }
@@ -2918,6 +3012,9 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
     {
       node_mask.foreach_index(
           [&](const int i, const int pos) {
+            if (node_skipped_by_material(i)) {
+              return;
+            }
             if (!group_write) {
               apply_paint_channel(image_data,
                                   *brush,
@@ -2988,6 +3085,9 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
 
     {
       node_mask.foreach_index([&](const int i) {
+        if (node_skipped_by_material(i)) {
+          return;
+        }
         PixelNode &pixel_node = pixel_nodes[i];
         /* #mark_image_dirty consumes the dirty state: it clears #PixelNode::flags.dirty and every
          * tile's dirty region. Grouped destinations share this one node, so later calls would

@@ -7,12 +7,15 @@
  */
 
 #include "paint_image_curve_patch_raster.hh"
+#include "paint_image_written_bounds.hh"
 
+#include <algorithm>
 #include <cfloat>
 #include <cstdint>
 #include <cstdio>
 #include <optional>
 
+#include "BLI_enumerable_thread_specific.hh"
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
 #include "BLI_math_color.h"
@@ -427,23 +430,23 @@ static Vector<RasterTarget> resolve_targets(bContext *C,
   return targets;
 }
 
-static void blend_tile_region(const TileRegion &region,
-                               ImBuf &ibuf,
-                               const Image &image,
-                               const int tile_number,
-                               const CurvePatchItem &patch,
-                               const CurvePatchTextureBinding &texture,
-                              const CurvePatchStrokeContext &ctx,
-                              const Brush &brush,
-                              const RasterTarget &target,
-                              const material::ChannelUvSampler *channel_sources,
-                              const float3 &dab_color_jitter,
-                              ImagePool &tex_pool,
-                              const float2 &tile_uv_origin,
-                              const int2 &tile_resolution,
-                              const float2 &ref_tile_uv_origin,
-                              const int2 &ref_tile_resolution,
-                              const char mirror_pass)
+static WrittenBounds blend_tile_region(const TileRegion &region,
+                                       ImBuf &ibuf,
+                                       const Image &image,
+                                       const int tile_number,
+                                       const CurvePatchItem &patch,
+                                       const CurvePatchTextureBinding &texture,
+                                       const CurvePatchStrokeContext &ctx,
+                                       const Brush &brush,
+                                       const RasterTarget &target,
+                                       const material::ChannelUvSampler *channel_sources,
+                                       const float3 &dab_color_jitter,
+                                       ImagePool &tex_pool,
+                                       const float2 &tile_uv_origin,
+                                       const int2 &tile_resolution,
+                                       const float2 &ref_tile_uv_origin,
+                                       const int2 &ref_tile_resolution,
+                                       const char mirror_pass)
 {
   /* Whether this canvas takes its RGB from the RIBBON's own texture. Normal packs a direction and
    * a scalar channel carries one value, so neither can. Mirrors the 3D `target_paints_color`. */
@@ -488,12 +491,14 @@ static void blend_tile_region(const TileRegion &region,
 
   const int row_count = region.y1 - region.y0;
   const int width = region.x1 - region.x0;
+  threading::EnumerableThreadSpecific<WrittenBounds> written_tls;
   threading::parallel_for(IndexRange(row_count), 1, [&](const IndexRange row_range) {
     /* The sampler is per-iteration, but the thread id it receives also selects the per-thread
      * node-tree exec stack in #RE_texture_evaluate and the per-thread RNG. Those live in the
      * shared #Tex, not in the sampler, so a constant id would let every worker mutate slot 0
      * at once. */
     const int thread_id = BLI_task_parallel_thread_id(nullptr);
+    WrittenBounds &written = written_tls.local();
     /* One row's worth of pixels waiting for the batched color conversion above. */
     Vector<int> pending_i;
     Vector<float3> pending_rgb;
@@ -680,6 +685,7 @@ static void blend_tile_region(const TileRegion &region,
             const float src_arr[4] = {paint_rgb.x, paint_rgb.y, paint_rgb.z, alpha};
             IMB_blend_color_float(
                 float_data + 4 * coord, float_data + 4 * coord, src_arr, target.blend);
+            written.add(x_px, y_px);
           }
           else {
             const float src_f[4] = {paint_rgb.x, paint_rgb.y, paint_rgb.z, alpha};
@@ -687,6 +693,7 @@ static void blend_tile_region(const TileRegion &region,
             rgba_float_to_uchar(src, src_f);
             IMB_blend_color_byte(
                 byte_data + 4 * coord, byte_data + 4 * coord, src, target.blend);
+            written.add(x_px, y_px);
           }
         }
         else if (is_float) {
@@ -694,11 +701,13 @@ static void blend_tile_region(const TileRegion &region,
           const float src_arr[4] = {src.x, src.y, src.z, src.w};
           IMB_blend_color_float(
               float_data + 4 * coord, float_data + 4 * coord, src_arr, target.blend);
+          written.add(x_px, y_px);
         }
         else {
           uchar src[4];
           image_curve_patch_blend_src_byte(paint_rgb, alpha, byte_colorspace, src);
           IMB_blend_color_byte(byte_data + 4 * coord, byte_data + 4 * coord, src, target.blend);
+          written.add(x_px, y_px);
         }
       }
 
@@ -740,6 +749,7 @@ static void blend_tile_region(const TileRegion &region,
           uchar src[4];
           rgba_float_to_uchar(src, col_f);
           IMB_blend_color_byte(byte_data + 4 * coord, byte_data + 4 * coord, src, target.blend);
+          written.add(region.x0 + pending_i[k], y_px);
         }
         pending_i.clear();
         pending_rgb.clear();
@@ -748,6 +758,13 @@ static void blend_tile_region(const TileRegion &region,
       }
     }
   });
+
+  /* The union of what the parallel rows wrote, for the caller's dirty / partial-update marking. */
+  WrittenBounds written;
+  for (const WrittenBounds &local : written_tls) {
+    written.merge(local);
+  }
+  return written;
 }
 
 }  // namespace
@@ -839,6 +856,11 @@ void image_curve_patch_raster_draw(bContext *C, ImageCurvePatchSession &session)
     }
     const ImageCurvePatchSession::RefTile &ref_tile = session.ref_tiles[patch_i];
 
+    /* Whether this patch's blend actually wrote any pixel of any target: only then does an image
+     * reach the notifier loop below, and only the written rectangles reach the partial-update
+     * log. */
+    bool patch_written = false;
+
     /* Reference-tile UV bounds, expanded to every UDIM tile they overlap (spec §9). */
     const float2 bounds_uv_min = image_curve_patch_ref_px_to_uv(
         bounds.min, ref_tile.uv_origin, ref_tile.resolution);
@@ -902,25 +924,27 @@ void image_curve_patch_raster_draw(bContext *C, ImageCurvePatchSession &session)
         /* One map for every canvas: #PaintTileMap is keyed by #Image, so a channel that joins or
          * leaves the target set between restamps is still captured and restored correctly.
          * #ED_image_paint_tile_push only captures a tile the first time it sees it, so a region
-         * an earlier symmetry pass or an earlier patch already touched is a harmless no-op here. */
+         * an earlier symmetry pass or an earlier patch already touched is a harmless no-op here.
+         * The push stays ahead of the blend -- it captures the before-state -- so a blend that
+         * ends up writing nothing leaves tiles behind holding identical content; harmless. */
         push_undo_tiles_for_region(region, *session.tiles, *target.image, *ibuf, iuser);
-        blend_tile_region(region,
-                          *ibuf,
-                          *target.image,
-                          tile.tile_number,
-                          patch,
-                          session.doc.texture,
-                          ctx,
-                          *brush,
-                          target,
-                          channel_sources ? &*channel_sources : nullptr,
-                          dab_color_jitter,
-                          tex_pool,
-                          tile_uv_origin,
-                          tile_resolution,
-                          ref_tile.uv_origin,
-                          ref_tile.resolution,
-                          char(pass));
+        const WrittenBounds written = blend_tile_region(region,
+                                                        *ibuf,
+                                                        *target.image,
+                                                        tile.tile_number,
+                                                        patch,
+                                                        session.doc.texture,
+                                                        ctx,
+                                                        *brush,
+                                                        target,
+                                                        channel_sources ? &*channel_sources : nullptr,
+                                                        dab_color_jitter,
+                                                        tex_pool,
+                                                        tile_uv_origin,
+                                                        tile_resolution,
+                                                        ref_tile.uv_origin,
+                                                        ref_tile.resolution,
+                                                        char(pass));
         /* Deliberately NOT `ED_imapaint_dirty_region()`. Half of what that does is push the
          * "before" tiles into the IN-FLIGHT image undo step, which it reaches through
          * `ED_image_paint_tile_map_get()` -- and this session holds no such step by design: it
@@ -932,11 +956,18 @@ void image_curve_patch_raster_draw(bContext *C, ImageCurvePatchSession &session)
          * partial-update system which pixels changed. The `imapaintpartial` rectangle
          * `ED_imapaint_dirty_region()` also accumulates belongs to `PAINT_OT_image_paint`'s stroke,
          * which clears and consumes it; a patch never does either, so feeding it only left a stale
-         * dirty rect behind for the next real stroke. */
-        BKE_image_mark_dirty(target.image, ibuf);
-        rcti updated_region;
-        BLI_rcti_init(&updated_region, region.x0, region.x1, region.y0, region.y1);
-        BKE_image_partial_update_mark_region(target.image, &tile, ibuf, &updated_region);
+         * dirty rect behind for the next real stroke.
+         *
+         * The marking runs only over what the blend actually wrote, and only when it wrote: a
+         * stamp whose every texel the selection or an empty sample zeroed would otherwise leave a
+         * full-footprint change in the partial-update log, which the paint-layer bake
+         * subscriptions read as a pixel edit and answer with a whole-canvas effect re-bake. */
+        if (!written.is_empty()) {
+          const rcti written_region = written.as_exclusive_rcti();
+          BKE_image_mark_dirty(target.image, ibuf);
+          BKE_image_partial_update_mark_region(target.image, &tile, ibuf, &written_region);
+          patch_written = true;
+        }
       }
 
       BKE_image_release_ibuf(target.image, ibuf, nullptr);
@@ -945,7 +976,7 @@ void image_curve_patch_raster_draw(bContext *C, ImageCurvePatchSession &session)
     }
 
     for (const RasterTarget &target : targets) {
-      if (notified_images.add(target.image)) {
+      if (patch_written && notified_images.add(target.image)) {
         /* Per canvas: a channel map the editor is not displaying still has to reach the
          * viewport's material preview, and the notifier carries which image changed. A live
          * restamp runs on every mouse move, so it reports #NA_PAINTING like the 2D paint stroke

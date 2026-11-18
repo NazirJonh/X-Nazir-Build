@@ -430,6 +430,13 @@ template<size_t N> static void composite_filter_params(const MaterialPaintLayer 
   }
 }
 
+void paint_layer_effect_filter_params(
+    const MaterialPaintLayer &effect,
+    float (&r_params)[PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM])
+{
+  composite_filter_params(effect, r_params);
+}
+
 /**
  * Describe \a row's generator in \a channel: the line and ramp of a Gradient, the pattern, the
  * placement and the colour band of the others, the channel's scalar ends and, for an

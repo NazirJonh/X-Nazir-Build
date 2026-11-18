@@ -404,6 +404,17 @@ struct ImagePaintState {
   int material_extra_states_num;
 
   /**
+   * Whether any redraw of this state's image wrote pixels during the stroke. The stroke-end
+   * full-update mark reads it: the paint-layer bake subscriptions treat a full-update mark as
+   * "everything changed", so a state whose image the stroke never touched must not leave one
+   * behind, or every effect row reading that image re-bakes its whole canvas for nothing.
+   *
+   * No default initializer: #ImagePaintState is created with #MEM_new_zeroed, which requires a
+   * trivially default-constructible type.
+   */
+  bool stroke_had_redraw;
+
+  /**
    * Clone Stamp: layer/channel targets and their ImBuf locks for this stroke, built on the first
    * dab. Owned here -- the 2D path must release its own locks rather than relying on another
    * module's stroke-done hook to notice them.
@@ -5385,6 +5396,7 @@ static void paint_2d_redraw_single(const bContext *C, ImagePaintState *s, bool f
 
   std::optional<PaintDabTimer> notify_timer;
   if (had_redraw) {
+    s->stroke_had_redraw = true;
     notify_timer.emplace(PAINT_DAB_TIMER_2D_REDRAW_NOTIFY);
     /* Notify every editor showing this image (not just the current region), so a channel
      * painted while a different image is displayed elsewhere still gets a live update signal. */
@@ -5399,7 +5411,13 @@ static void paint_2d_redraw_single(const bContext *C, ImagePaintState *s, bool f
   }
 
   if (final) {
-    if (s->image && !(s->sima && s->sima->lock)) {
+    /* The per-event regions are already in the partial-update log (#imapaint_image_update
+     * writes them); this end-of-stroke mark is the catch-all for anything a region mark could
+     * miss. It is left for a stroke that actually wrote pixels of this image, and dropped when
+     * none did: the mark reads as "everything changed" to the paint-layer bake subscriptions,
+     * which would re-bake every effect row reading this image whole-canvas even when the stroke
+     * only ran on faces of another material (or on a different channel's map). */
+    if (s->image && !(s->sima && s->sima->lock) && s->stroke_had_redraw) {
       BKE_image_partial_update_mark_full_update(s->image);
     }
 

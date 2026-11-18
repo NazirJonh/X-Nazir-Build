@@ -464,6 +464,7 @@ if(WITH_GTESTS)
     tests/paint_image_select_region_tests.cc
     tests/paint_image_select_tile_bound_tests.cc
     tests/paint_material_source_correction_test.cc
+    tests/paint_image_written_bounds_test.cc
     mesh/paint_image_uv_geom_tests.cc
     mesh/paint_image_uv_symmetry_tests.cc
     mesh/sculpt_boundary_tests.cc

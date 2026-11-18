@@ -52,6 +52,7 @@
 #include "IMB_interp.hh"
 
 #include "paint_clone_stroke.hh"
+#include "paint_image_written_bounds.hh"
 
 #include "mesh/paint_material_source.hh"
 
@@ -894,9 +895,11 @@ void clone_stroke_apply_dab(CloneStrokeRuntime *runtime,
       continue;
     }
 
-    bool wrote_any = false;
-    rcti written_region;
-    BLI_rcti_init_minmax(&written_region);
+    /* Per-target write state, indexed alongside #active. A channel whose every texel was skipped
+     * (transparent source texel, blend result below the threshold) must not be marked dirty or
+     * published, and its written rectangle lives in its OWN buffer's pixel space -- the channels
+     * of a layer do not necessarily share one canvas. */
+    Vector<WrittenBounds, PAINT_MATERIAL_CHANNEL_NUM> written(active.size());
     /* Per-target memo of the undo tile captured last, so a run of texels inside one tile costs a
      * comparison instead of a map lookup. Indexed alongside #active. */
     Vector<int2, PAINT_MATERIAL_CHANNEL_NUM> last_tile(active.size(), int2(-1, -1));
@@ -934,7 +937,6 @@ void clone_stroke_apply_dab(CloneStrokeRuntime *runtime,
 
         const int tx = px >> ED_IMAGE_UNDO_TILE_BITS;
         const int ty = py >> ED_IMAGE_UNDO_TILE_BITS;
-        bool wrote_here = false;
 
         for (const int target_i : active.index_range()) {
           CloneChannelTarget &target = *active[target_i];
@@ -1003,31 +1005,28 @@ void clone_stroke_apply_dab(CloneStrokeRuntime *runtime,
             last_tile[target_i] = int2(tx, ty);
           }
           clone_write_pixel_to_ibuf(ibuf, px, py, blended);
-          wrote_here = true;
-        }
-
-        if (wrote_here) {
-          const int written_px[2] = {px, py};
-          BLI_rcti_do_minmax_v(&written_region, written_px);
-          wrote_any = true;
+          written[target_i].add(px, py);
         }
       }
     }
 
-    if (wrote_any) {
+    for (const int target_i : active.index_range()) {
+      if (written[target_i].is_empty()) {
+        continue;
+      }
+      CloneChannelTarget &target = *active[target_i];
       /* One mark per dab per target (not per pixel): the composite cache recomposites on
        * partial-update-log changes, and a whole-image tag per texel would rebuild the canvas
        * for every texel of every dab. The dirty flag alone only says the image needs saving --
        * the GPU texture and the material composite both refresh off the partial-update log, so
        * the touched rectangle has to be published there or the stroke stays invisible. */
-      written_region.xmax += 1;
-      written_region.ymax += 1;
-      for (CloneChannelTarget *target : active) {
-        BKE_image_mark_dirty(target->image, target->ibuf);
-        for (ImageTile &tile : target->image->tiles) {
-          BKE_image_partial_update_mark_region(
-              target->image, &tile, target->ibuf, &written_region);
-        }
+      const rcti written_region = written[target_i].as_exclusive_rcti();
+      BKE_image_mark_dirty(target.image, target.ibuf);
+      /* Publish only the tile this target actually wrote. `image->tiles` can hold several UDIM
+       * tiles, and stamping one tile's pixel rectangle into all of them invented edits that never
+       * happened -- which the bake subscriptions read as pixel changes on every tile. */
+      if (const ImageTile *tile = BKE_image_get_tile_from_iuser(target.image, &target.iuser)) {
+        BKE_image_partial_update_mark_region(target.image, tile, target.ibuf, &written_region);
       }
     }
   }

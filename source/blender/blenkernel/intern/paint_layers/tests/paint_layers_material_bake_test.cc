@@ -27,7 +27,12 @@
 #include "BKE_paint_layers_edit.hh"
 #include "BKE_wm_runtime.hh"
 
+#include "BLI_index_range.hh"
+#include "BLI_rect.h"
 #include "BLI_uuid.h"
+
+#include "IMB_imbuf.hh"
+#include "IMB_imbuf_types.hh"
 
 #include "NOD_socket.hh"
 
@@ -182,6 +187,47 @@ class PaintLayersMaterialBakeTest : public PaintLayersGenerateTest {
 
 static constexpr int base_color_roughness[] = {PAINT_MATERIAL_CHANNEL_BASE_COLOR,
                                                PAINT_MATERIAL_CHANNEL_ROUGHNESS};
+
+/** Mark \a region as changed in \a image's partial-update log, as a paint writer does. */
+void material_test_mark_region(Image &image, const rcti &region)
+{
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(&image, nullptr, &lock);
+  EXPECT_NE(ibuf, nullptr);
+  if (ibuf == nullptr) {
+    return;
+  }
+  /* The log keys its changesets by tile, so a null tile is not a valid stand-in for the first. */
+  const ImageTile *tile = BKE_image_get_tile(&image, 1001);
+  EXPECT_NE(tile, nullptr);
+  BKE_image_partial_update_mark_region(&image, tile, ibuf, &region);
+  BKE_image_release_ibuf(&image, ibuf, lock);
+}
+
+/** Make the right half of \a image transparent; returns the cleared rectangle. */
+rcti material_test_clear_right_half_alpha(Image &image)
+{
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(&image, nullptr, &lock);
+  EXPECT_NE(ibuf, nullptr);
+  if (ibuf == nullptr) {
+    return rcti{0, 0, 0, 0};
+  }
+  const int width = ibuf->x;
+  const int height = ibuf->y;
+  const int half = width / 2;
+  uchar *pixels = ibuf->byte_data_for_write();
+  EXPECT_NE(pixels, nullptr);
+  if (pixels != nullptr) {
+    for (const int y : IndexRange(height)) {
+      for (int x = half; x < width; x++) {
+        pixels[(int64_t(y) * width + x) * 4 + 3] = 0;
+      }
+    }
+  }
+  BKE_image_release_ibuf(&image, ibuf, lock);
+  return rcti{half, width, 0, height};
+}
 
 TEST_F(PaintLayersMaterialBakeTest, the_source_hash_follows_values_and_not_locations)
 {
@@ -2044,6 +2090,111 @@ TEST_F(PaintLayersOwnedEffectTest, the_graph_lays_the_map_and_a_toggle_is_a_valu
   EXPECT_TRUE(BKE_paint_layers_values_sync(*ma));
   EXPECT_TRUE(paint_layers::paint_layers_maps_sync(*ma, *bmain));
   EXPECT_EQ(image_reader_count(*ma->paint_layers_tree, result), 1);
+}
+
+/**
+ * A Material row's coverage can be a live image (its source's Alpha output). A region outside the
+ * covered part is still kept: the row re-renders its source whole, so the culling must not narrow
+ * it to the plane's rectangle.
+ */
+TEST_F(PaintLayersMaterialBakeTest, an_edit_outside_a_material_rows_coverage_is_kept)
+{
+  Material *textured = BKE_material_add(bmain, "AlphaTexture");
+  principled_source_set_up(*textured, /*graphs=*/false);
+  Image *texture = add_image("Cutout");
+  texture_link(*textured, *texture, "Alpha", "Alpha");
+  MaterialPaintLayer *row = add_material_row(*textured);
+  ASSERT_NE(row, nullptr);
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+
+  const rcti uncovered = material_test_clear_right_half_alpha(*texture);
+  ASSERT_GT(uncovered.xmax, uncovered.xmin);
+  material_test_mark_region(*texture, rcti{0, 0, 0, 0});
+  BKE_paint_layers_bake_subscribe(*ma, *row);
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_STALE;
+
+  material_test_mark_region(*texture, uncovered);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  int region[4] = {};
+  ASSERT_TRUE(BKE_paint_layers_bake_changed_region(*ma, *row, region))
+      << "a Material row re-renders its source whole, so the plane cannot narrow it";
+  EXPECT_LE(region[0], uncovered.xmin);
+  EXPECT_GE(region[1], uncovered.xmax);
+  EXPECT_LE(region[2], uncovered.ymin);
+  EXPECT_GE(region[3], uncovered.ymax);
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_BAKE_STALE, 0);
+}
+
+/**
+ * A CPU effect on a Material row owns its result: it bakes apart, and its own subscription reports
+ * its edits. The row's bake still re-renders the source whole, so a region on it is never culled
+ * by the effect's reach.
+ */
+TEST_F(PaintLayersMaterialBakeTest, a_material_row_whose_effect_owns_its_result_keeps_every_region)
+{
+  Material *textured = BKE_material_add(bmain, "AlphaTexture");
+  principled_source_set_up(*textured, /*graphs=*/false);
+  Image *texture = add_image("Cutout");
+  texture_link(*textured, *texture, "Alpha", "Alpha");
+  MaterialPaintLayer *row = add_material_row(*textured);
+  ASSERT_NE(row, nullptr);
+  MaterialPaintLayer *effect = BKE_paint_layers_filter_add(*ma, row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_NE(effect, nullptr);
+  EXPECT_TRUE(paint_layer_effect_owns_result(*ma, *row, *effect));
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+
+  const rcti uncovered = material_test_clear_right_half_alpha(*texture);
+  ASSERT_GT(uncovered.xmax, uncovered.xmin);
+  material_test_mark_region(*texture, rcti{0, 0, 0, 0});
+  BKE_paint_layers_bake_subscribe(*ma, *row);
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_STALE;
+
+  material_test_mark_region(*texture, uncovered);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  int region[4] = {};
+  ASSERT_TRUE(BKE_paint_layers_bake_changed_region(*ma, *row, region))
+      << "an owning effect has its own subscription; the row's regions stay whole";
+  EXPECT_LE(region[0], uncovered.xmin);
+  EXPECT_GE(region[1], uncovered.xmax);
+  EXPECT_LE(region[2], uncovered.ymin);
+  EXPECT_GE(region[3], uncovered.ymax);
+}
+
+/**
+ * A source whose Alpha is a plain zero covers nothing: every reported region lies outside it, so
+ * no region may mark the row stale and start a whole-canvas re-bake.
+ */
+TEST_F(PaintLayersMaterialBakeTest, an_edit_of_a_material_row_that_covers_nothing_is_dropped)
+{
+  Material *plain = BKE_material_add(bmain, "PlainZero");
+  principled_source_set_up(*plain, /*graphs=*/false);
+  /* A map in the source tree, so the row has a subscription with regions to report. */
+  Image *map = add_image("SourceMap");
+  texture_link(*plain, *map, "Base Color");
+  bNode *principled = principled_of(*plain);
+  ASSERT_NE(principled, nullptr);
+  bNodeSocket *alpha = bke::node_find_socket(*principled, SOCK_IN, "Alpha"_ustr);
+  ASSERT_NE(alpha, nullptr);
+  static_cast<bNodeSocketValueFloat *>(alpha->default_value)->value = 0.0f;
+  BKE_paint_layers_source_material_hash_forget(*plain);
+
+  MaterialPaintLayer *row = add_material_row(*plain);
+  ASSERT_NE(row, nullptr);
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+  const PaintLayerMaterialCoverage coverage = paint_layer_material_coverage_source(*ma, *row);
+  ASSERT_EQ(coverage.kind, PaintLayerMaterialCoverageKind::LiveConstant);
+  ASSERT_FLOAT_EQ(coverage.constant, 0.0f);
+
+  material_test_mark_region(*map, rcti{0, 0, 0, 0});
+  BKE_paint_layers_bake_subscribe(*ma, *row);
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_STALE;
+
+  material_test_mark_region(*map, rcti{1, 4, 1, 4});
+  BKE_paint_layers_bake_notice_changes(*ma);
+  int region[4] = {};
+  EXPECT_FALSE(BKE_paint_layers_bake_changed_region(*ma, *row, region))
+      << "a row that covers nothing cannot be moved by any region";
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_BAKE_STALE, 0);
 }
 
 /** \} */

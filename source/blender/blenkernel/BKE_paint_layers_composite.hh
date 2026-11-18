@@ -16,6 +16,7 @@
  * GPU graph and this one a CPU stack.
  */
 
+#include <cstdint>
 #include <memory>
 #include <utility>
 
@@ -602,6 +603,28 @@ int BKE_paint_layers_effect_halo(eMaterialPaintLayerFilter filter,
                                  const float *params,
                                  const int width,
                                  const int height);
+
+/** How far an edit of an effect's input reaches in the effect's output. */
+enum class EffectReach : int8_t {
+  /** One output texel reads one input texel: an edit moves the result inside the edited rect. */
+  Pointwise,
+  /** A neighbourhood kernel reads past the edited texel, so its result moves around it too. */
+  Neighbourhood,
+  /** No pass plan describes the kind (a whole-map pass such as a Color Match): the result spans
+   * the whole map. */
+  WholeMap,
+};
+
+/**
+ * \a filter's reach with \a params in the schema order, from the same pass plan
+ * #BKE_paint_layers_effect_pass_plan and #BKE_paint_layers_effect_halo read. The one answer for the
+ * bake's coverage culling: a pointwise effect's bake cannot move past an edited rectangle, while a
+ * neighbourhood or whole-map one may. A kind the plan does not describe is #EffectReach::WholeMap,
+ * which keeps every region; a plan whose every pass has no reach is #EffectReach::Pointwise. The
+ * plan's size arguments only bound its radius clamp, which clamps upwards to one, so the answer
+ * does not depend on a canvas and is computed from a one-texel bound.
+ */
+EffectReach BKE_paint_layers_effect_reach(eMaterialPaintLayerFilter filter, const float *params);
 
 /**
  * The dispatch rectangle of every pass of \a passes, in order, into \a r_rects (one entry per

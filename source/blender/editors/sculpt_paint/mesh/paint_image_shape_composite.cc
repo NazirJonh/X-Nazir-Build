@@ -21,6 +21,7 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "BLI_enumerable_thread_specific.hh"
 #include "BLI_index_range.hh"
 #include "BLI_listbase_wrapper.hh"
 #include "BLI_math_base.hh"
@@ -68,6 +69,7 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 
+#include "../paint_image_written_bounds.hh"
 #include "../shapes/paint_shape_render.hh"
 #include "../shapes/paint_shape_texture.hh"
 #include "paint_material_blend.hh"
@@ -1406,7 +1408,8 @@ static void tile_composite_pixels(CompositeTile &tile,
                                   const ShapeCoverage &cov,
                                   const ShapeBlendContext &ctx,
                                   const float2 &tile_offset_px,
-                                  Image *image)
+                                  Image *image,
+                                  WrittenBounds &r_written)
 {
   /* Lock-free per-tile view of the selection weights: the per-pixel #BKE_image_paint_selection_
    * blend_sample_bilinear call re-resolves the masks (and takes the blend-mask mutex) for every
@@ -1433,6 +1436,10 @@ static void tile_composite_pixels(CompositeTile &tile,
                                                                   ctx.mask_shape_index) :
                                       float4x4::identity();
 
+  /* Pixels this strip actually stores. #ShapeCoverage's rectangle is the rasterized bounding
+   * box and includes the transparent corners of a round stamp; the partial-update log must carry
+   * only what changed. Accumulated per thread and merged into \a r_written. */
+  threading::EnumerableThreadSpecific<WrittenBounds> written_tls;
   threading::parallel_for(
       IndexRange(cov.rect.ymin, cov.rect.ymax - cov.rect.ymin),
       32,
@@ -1485,9 +1492,14 @@ static void tile_composite_pixels(CompositeTile &tile,
             float4 dst = composite_pixel_load(tile, px, y);
             shape_blend_pixel(dst, ctx, sample, factor, p);
             composite_pixel_store(tile, px, y, dst);
+            written_tls.local().add(px, y);
           }
         }
       });
+
+  for (const WrittenBounds &local : written_tls) {
+    r_written.merge(local);
+  }
 }
 
 /** \} */
@@ -1525,6 +1537,9 @@ bool shape_composite_into(const Span<ShapeTarget> targets,
     rcti region;
     /** Pixel size of this tile (channel maps of one material may differ from each other). */
     int2 tile_size;
+    /** Union of the pixels the write pass actually stored. Narrower than #region, which is the
+     * shapes' bounding box. */
+    WrittenBounds written;
   };
   Vector<TileWrite> writes;
 
@@ -1559,7 +1574,8 @@ bool shape_composite_into(const Span<ShapeTarget> targets,
       ImBuf *backup = push_undo ?
                           shape_tile_backup_init(target.image, target.iuser, itile->tile_number) :
                           nullptr;
-      writes.append(TileWrite{target, itile->tile_number, backup, region, int2(ibuf->x, ibuf->y)});
+      writes.append(TileWrite{
+          target, itile->tile_number, backup, region, int2(ibuf->x, ibuf->y), WrittenBounds{}});
     }
   }
   if (writes.is_empty()) {
@@ -1784,7 +1800,8 @@ bool shape_composite_into(const Span<ShapeTarget> targets,
                                   coverage,
                                   member.ctx,
                                   tile_offset_px,
-                                  member.write->target.image);
+                                  member.write->target.image,
+                                  member.write->written);
           }
         }
       };
@@ -1835,7 +1852,8 @@ bool shape_composite_into(const Span<ShapeTarget> targets,
                                 coverage,
                                 acquired[0].ctx,
                                 tile_offset_px,
-                                write.target.image);
+                                write.target.image,
+                                write.written);
         }
       };
 
@@ -1899,10 +1917,18 @@ bool shape_composite_into(const Span<ShapeTarget> targets,
    * the next redraw -- the pattern of every other pixel-writing tool in this fork (see
    * paint_image_select_gradient.cc). */
   for (const TileWrite &write : writes) {
+    /* Only what the write pass actually stored reaches the log. #write.region is the shapes'
+     * bounding box: a stamp whose every texel the selection, the mask source or zero coverage
+     * dropped, or the transparent corners of a round stamp, would otherwise be published as
+     * changed pixels and answered with an effect re-bake covering the whole footprint. */
+    if (write.written.is_empty()) {
+      continue;
+    }
+    const rcti written_region = write.written.as_exclusive_rcti();
     tile_mark_region(write.target.image,
                      write.target.iuser,
                      write.tile_number,
-                     write.region,
+                     written_region,
                      push_undo);
   }
   for (const ShapeTarget &target : targets) {

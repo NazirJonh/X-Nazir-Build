@@ -10848,10 +10848,21 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
   /* The maps this PBR image stroke wrote: their Outliner-stack thumbnails have to refresh once the
    * brush is lifted. Collect them before the stroke caches go. */
   Vector<Image *> painted_images;
+  /* Whether this stroke painted a PBR image canvas at all, whether its brush reached the mesh, and
+   * whether any of its dabs actually wrote a pixel of its target (see #StrokeCache::image_paint_hit
+   * and #StrokeCache::image_paint_nodes_seen). Read before the caches go. */
+  bool image_stroke = false;
+  bool image_nodes_seen = false;
+  bool image_hit = false;
   for (Object *object_ptr : objects) {
     SculptSession *object_ss = object_ptr->runtime->sculpt_session;
     if (object_ss == nullptr || object_ss->cache == nullptr) {
       continue;
+    }
+    if (!object_ss->cache->image_paint_targets.is_empty()) {
+      image_stroke = true;
+      image_nodes_seen |= object_ss->cache->image_paint_nodes_seen;
+      image_hit |= object_ss->cache->image_paint_hit;
     }
     for (const auto &target : object_ss->cache->image_paint_targets) {
       if (target.data != nullptr && target.data->image != nullptr &&
@@ -10871,6 +10882,21 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
 
   /* Clear status bar message set during stroke. */
   ED_workspace_status_text(this->evil_C, nullptr);
+
+  /* A PBR image stroke whose brush reached the mesh but never wrote a pixel of its target ran
+   * entirely over faces the active material is not assigned to: nothing painted, nothing to bake
+   * (the bake subscriptions stay quiet, so the planner has nothing to answer for). Say so instead
+   * of leaving the miss silent. A stroke that never reached the mesh at all (brush off the surface,
+   * zero strength, layer mask or face selection emptied every row) gets no material wording, since
+   * the material is not what stopped it.
+   *
+   * A one-shot report rather than a status-bar message: `done` clears the stroke's status text
+   * just above, and a diagnostic result belongs in the Info editor as well. */
+  if (image_stroke && image_nodes_seen && !image_hit && !is_cancel && stroke_started) {
+    BKE_report(CTX_wm_reports(this->evil_C),
+               RPT_INFO,
+               RPT_("Stroke painted no pixels on the active material"));
+  }
 
   const bool insert_mesh_success = !is_cancel && stroke_started && brush &&
                                    brush_uses_insert_mesh(*brush) && !ss.vdm_stamps.is_empty();

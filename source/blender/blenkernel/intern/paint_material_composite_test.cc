@@ -3472,7 +3472,7 @@ TEST_F(PaintLayersCompositeTest, the_wrap_moves_the_stack_hash_only_while_the_ma
   EXPECT_NE(stack_hash(), repeated);
 }
 
-TEST_F(PaintLayersCompositeTest, the_mirror_axes_and_center_move_the_stack_hash_while_the_mapping_applies)
+TEST_F(PaintLayersCompositeTest, a_refused_mirror_on_a_correction_leaves_the_stack_hash_alone)
 {
   MaterialPaintLayer *bottom = add_paint_layer("Bottom",
                                                add_solid_image("Bottom", 4, 0, 0, 0, 255));
@@ -3486,17 +3486,9 @@ TEST_F(PaintLayersCompositeTest, the_mirror_axes_and_center_move_the_stack_hash_
   };
   const uint64_t plain = stack_hash();
 
-  ASSERT_TRUE(
+  /* Only a Mirror effect folds; the mapping of a row has no Mirror to move the hash. */
+  EXPECT_FALSE(
       BKE_paint_layers_mapping_set_mirror(*ma, correction, MA_PAINT_LAYER_MAPPING_MIRROR_U));
-  const uint64_t folded = stack_hash();
-  EXPECT_NE(folded, plain);
-
-  const float center[2] = {0.25f, 0.5f};
-  ASSERT_TRUE(BKE_paint_layers_mapping_set_mirror_center(*ma, correction, center));
-  EXPECT_NE(stack_hash(), folded);
-
-  /* A mapping switched off reads the map as it is, whatever the fold stored. */
-  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, correction, false));
   EXPECT_EQ(stack_hash(), plain);
 }
 

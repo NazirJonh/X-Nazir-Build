@@ -4127,6 +4127,12 @@ int16_t BKE_paint_layers_mapping_mirror_axes_get(const MaterialPaintLayer &layer
 
 bool BKE_paint_layers_mapping_mirror_enabled_get(const MaterialPaintLayer &layer)
 {
+  /* Only a Mirror effect folds: a row's own mapping (a Fill) leaves the fold to the effect, which
+   * works with every projection. Stale bits of an older file on such a row therefore read as off,
+   * which keeps every consumer (CPU, graph, shader, bake hash) in step without a versioning pass. */
+  if (!paint_layer_owns_mirror_fold(layer)) {
+    return false;
+  }
   return (layer.mapping.flag & MA_PAINT_LAYER_MAPPING_MIRROR_ENABLED) != 0;
 }
 
@@ -4145,12 +4151,8 @@ bool BKE_paint_layers_mapping_mirror_applies(const Material &ma, const MaterialP
 bool BKE_paint_layers_mapping_mirror_available(const Material &ma, const MaterialPaintLayer &layer)
 {
   /* A Mirror effect row is all fold: its mapping's axes and center are its whole parameter set,
-   * so the Mirror UI is what edits it. Every other row keeps the rule it had. */
-  if (paint_layer_kind_transforms_input(layer)) {
-    return layer.kind_subtype == MA_PAINT_LAYER_FILTER_MIRROR;
-  }
-  return layer.source == MA_PAINT_LAYER_SOURCE_CONSTANT &&
-         BKE_paint_layers_mapping_supported(ma, layer);
+   * so the Mirror UI is what edits it. No other row folds: the Mirror effect does it for them. */
+  return paint_layer_owns_mirror_fold(layer) && BKE_paint_layers_mapping_supported(ma, layer);
 }
 
 bool BKE_paint_layers_mapping_set_mirror(Material &ma, MaterialPaintLayer *layer, int16_t axes)
@@ -4160,7 +4162,7 @@ bool BKE_paint_layers_mapping_set_mirror(Material &ma, MaterialPaintLayer *layer
   }
   /* A foreign bit is dropped rather than refused, so a caller may pass a raw flag word. */
   axes = mirror_axes_drop_orphans(axes & MIRROR_AXES_ALL);
-  if (axes != 0 && !BKE_paint_layers_mapping_supported(ma, *layer)) {
+  if (axes != 0 && !BKE_paint_layers_mapping_mirror_available(ma, *layer)) {
     return false;
   }
   const int16_t current = BKE_paint_layers_mapping_mirror_get(*layer);
@@ -4185,9 +4187,17 @@ bool BKE_paint_layers_mapping_set_mirror_axes(Material &ma, MaterialPaintLayer *
   if (!paint_layer_owned(ma, layer)) {
     return false;
   }
-  /* Orphan direction bits stay stored: a direction picked before its axis is switched on must
-   * survive until the axis is. */
   axes &= MIRROR_AXES_ALL;
+  /* Clearing is always allowed, as in #BKE_paint_layers_mapping_set_mirror; storing axes is not.
+   * RNA writes this word bit by bit (mapping_mirror_u/v/_negative), so a script, a driver or an
+   * animation could otherwise park Mirror bits on a row that reads them as off, which the hashes of
+   * the raw flag would then see. */
+  if (axes != 0 && !BKE_paint_layers_mapping_mirror_available(ma, *layer)) {
+    return false;
+  }
+  /* Orphan direction bits stay stored: a direction picked before its axis is switched on must
+   * survive until the axis is. Only a row that owns the fold gets here, so no other row keeps
+   * bits nothing reads. */
   if (axes == BKE_paint_layers_mapping_mirror_axes_get(*layer)) {
     return true;
   }
@@ -4209,7 +4219,7 @@ bool BKE_paint_layers_mapping_set_mirror_enabled(Material &ma,
   if (enabled == BKE_paint_layers_mapping_mirror_enabled_get(*layer)) {
     return true;
   }
-  if (enabled && !BKE_paint_layers_mapping_supported(ma, *layer)) {
+  if (enabled && !BKE_paint_layers_mapping_mirror_available(ma, *layer)) {
     return false;
   }
   if (enabled) {
@@ -4237,13 +4247,22 @@ bool BKE_paint_layers_mapping_set_mirror_center(Material &ma,
   if (!isfinite(center[0]) || !isfinite(center[1])) {
     return false;
   }
+  /* Only a transform effect reads the field: a Mirror folds around it, a Transform Mapping turns
+   * around it as its pivot (#BKE_paint_layers_set_transform_pivot). Every other row's mapping has
+   * no fold and no pivot, so a center written there would be read by nothing but the raw hashes;
+   * refused rather than stored, the way the axes are (#BKE_paint_layers_mapping_set_mirror_axes). */
+  if (!paint_layer_kind_transforms_input(*layer)) {
+    return false;
+  }
   if (layer->mapping.mirror_center[0] == center[0] &&
       layer->mapping.mirror_center[1] == center[1])
   {
     return true;
   }
   copy_v2_v2(layer->mapping.mirror_center, center);
-  /* The center is a value the fold nodes read, like the offset. */
+  /* The center is a value the fold nodes read, like the offset. The field is shared: a Transform
+   * Mapping keeps its pivot in it (#BKE_paint_layers_set_transform_pivot), so a later cleanup must
+   * not drop it as unused on the kinds that do not fold. */
   BKE_paint_layers_tag_value_edited(ma);
   return true;
 }

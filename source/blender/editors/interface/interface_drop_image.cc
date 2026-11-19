@@ -2156,7 +2156,7 @@ class CurvePatchSlotChannelDropTarget : public ui::DropTargetInterface {
     return false;
   }
 
-  std::string drop_tooltip(const ui::DragInfo &drag_info) const override
+  std::string drop_tooltip(const ui::DragInfo & /*drag_info*/) const override
   {
     /* The target lookup only succeeds for a channel inside this brush's list, so the index is
      * always a valid #eMaterialPaintChannel here. */

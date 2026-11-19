@@ -2129,6 +2129,11 @@ CompositeMappingChain composite_mapping_chain_build(
       continue;
     }
     chain.steps[chain.steps_num++] = CompositeMappingTransform(step);
+    /* A tangent-space Normal follows every step that moved its read point, not only the row's own
+     * mapping: a row that remaps nothing (an identity Repeat mapping) still folds through its
+     * Mirror effect, whose step owes the vector the same covariant flip the graph's side-sign
+     * vector gives it (#BKE_paint_layers_input_transforms_get sets the step's flag). */
+    chain.tangent_normal = chain.tangent_normal || step.tangent_normal;
   }
   if (mapping.enabled && chain.steps_num < CompositeMappingChain::MAX_STEPS) {
     chain.steps[chain.steps_num++] = CompositeMappingTransform(mapping);

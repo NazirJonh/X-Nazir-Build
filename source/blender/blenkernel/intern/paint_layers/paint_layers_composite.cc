@@ -232,6 +232,9 @@ static void composite_mapping_describe(const Material &ma,
   copy_v2_v2(out.offset, row.mapping.offset);
   copy_v2_v2(out.scale, row.mapping.scale);
   out.rotation = row.mapping.rotation;
+  /* A content row never owns the fold: the axes here are always off, and the center is read only
+   * alongside them. The fold is the Mirror effect's own step (see
+   * #composite_transform_step_numbers_get). */
   out.mirror_axes = BKE_paint_layers_mapping_mirror_get(row);
   BKE_paint_layers_mapping_mirror_center_get(row, out.mirror_center);
   out.tangent_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
@@ -284,8 +287,8 @@ static void composite_transform_step_numbers_get(const MaterialPaintLayer &effec
                                                  PaintMaterialCompositeMapping &step)
 {
   if (effect.kind_subtype == MA_PAINT_LAYER_FILTER_MIRROR) {
-    /* The fold alone is the step: a Mirror reads its mapping's axes and center and nothing
-     * else, and its read repeats, the way the row mapping's Mirror does. */
+    /* The fold alone is the step: a Mirror reads its mapping's axes and center and nothing else,
+     * and its read repeats: those two are its whole parameter set, so it has no wrap. */
     step.mirror_axes = BKE_paint_layers_mapping_mirror_get(effect);
     step.mirror_center[0] = effect.mapping.mirror_center[0];
     step.mirror_center[1] = effect.mapping.mirror_center[1];

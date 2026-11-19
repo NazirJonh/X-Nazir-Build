@@ -111,7 +111,7 @@ static bool bake_row_has_cpu_effect(const MaterialPaintLayer &layer)
 
 /**
  * Whether the mapping of \a layer is folded into its bake instead of keeping the row live: a UV
- * remap (Mirror included) of a row that carries an enabled CPU-computed effect (Noise, Blur), or the
+ * remap of a row that carries an enabled CPU-computed effect (Noise, Blur), or the
  * projection of such a row (#paint_layer_row_folds_into_bake). Such a row has no live form, so it
  * shows only once baked and substituted, and the CPU composite the bake renders from applies the
  * mapping itself; the substituted group has no mapping inputs, so it is not applied twice. An
@@ -126,19 +126,12 @@ bool bake_own_mapping_folds(const Material &ma,
                             const bool cpu_in_subtree)
 {
   if (BKE_paint_layers_projection_applies(ma, layer)) {
-    /* A Mirror on a projected row is a step of the projected read (the CPU resample and the
-     * graph), so it never keeps the row live; #bake_hash_projection_fold hashes its axes and
-     * center. A nested row folds along with the bake it is rendered in. */
+    /* The mapping of a projected row is a step of the projected read (the CPU resample and the
+     * graph), so it never keeps the row live; #bake_hash_projection_fold hashes its numbers. A
+     * nested row folds along with the bake it is rendered in. */
     return paint_layer_node_folds_into_bake(ma, layer, cpu_in_subtree);
   }
   if (!BKE_paint_layers_mapping_remaps(ma, layer)) {
-    return false;
-  }
-  /* A Mirror is folded only where the effects are cached with the row; a source or an Anchor Point
-   * reader keeps it live as it always did. */
-  if (BKE_paint_layers_mapping_mirror_get(layer) != 0 &&
-      (bake_row_keeps_effects_apart(layer) || !bake_row_has_cpu_effect(layer)))
-  {
     return false;
   }
   if (BKE_paint_layers_mapping_is_identity(layer)) {
@@ -162,6 +155,27 @@ static bool bake_effect_transforms_fold(const MaterialPaintLayer &layer)
 }
 
 /**
+ * The mapping flags of \a layer as the hash reads them: a row without a Mirror fold of its own has
+ * the Mirror bits cleared. Every reader already treats them as off there
+ * (#BKE_paint_layers_mapping_mirror_enabled_get), so a stale bit of an older file -- or one a
+ * script parked on a Fill before the setters refused it -- must not make two visually equal rows
+ * hash apart and force a re-bake. Masking keeps the DNA untouched; an explicit clearing pass at
+ * load (variant A) is still being discussed with the maintainer, and this mask stays correct either
+ * way.
+ */
+static int16_t bake_hash_mapping_flag(const MaterialPaintLayer &layer)
+{
+  constexpr int16_t mirror_bits =
+      MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_V |
+      MA_PAINT_LAYER_MAPPING_MIRROR_U_NEGATIVE | MA_PAINT_LAYER_MAPPING_MIRROR_V_NEGATIVE |
+      MA_PAINT_LAYER_MAPPING_MIRROR_ENABLED;
+  if (paint_layer_owns_mirror_fold(layer)) {
+    return layer.mapping.flag;
+  }
+  return int16_t(layer.mapping.flag & ~mirror_bits);
+}
+
+/**
  * The numbers of a projected row that its bake holds: the frame and the mapping the projection is
  * read through. The mesh and the material slots behind the frame belong to the tile identity.
  */
@@ -181,9 +195,8 @@ static uint64_t bake_hash_projection_fold(uint64_t h, const MaterialPaintLayer &
   h = bake_hash_mix(h, uint8_t(frame.axis));
   h = bake_hash_mix(h, uint16_t(frame.flag));
   h = bake_hash_mix(h, uint16_t(layer.mapping.space));
-  h = bake_hash_mix(h, uint16_t(layer.mapping.flag));
+  h = bake_hash_mix(h, uint16_t(bake_hash_mapping_flag(layer)));
   h = bake_hash_mix(h, uint16_t(layer.mapping.wrap));
-  h = bake_hash_mix(h, uint8_t(BKE_paint_layers_mapping_mirror_get(layer)));
   for (const float value : layer.mapping.offset) {
     h = bake_hash_float(h, value);
   }
@@ -298,12 +311,6 @@ static uint64_t bake_hash_layer(uint64_t h,
       h = bake_hash_float(h, layer.mapping.scale[1]);
       h = bake_hash_float(h, layer.mapping.rotation);
       h = bake_hash_mix(h, uint16_t(BKE_paint_layers_mapping_wrap_get(layer)));
-      /* Only a mirrored row adds to the hash, so a bake saved before keeps its value. */
-      if (const int mirror = BKE_paint_layers_mapping_mirror_get(layer)) {
-        h = bake_hash_mix(h, uint8_t(mirror));
-        h = bake_hash_float(h, layer.mapping.mirror_center[0]);
-        h = bake_hash_float(h, layer.mapping.mirror_center[1]);
-      }
     }
     /* A projected row with a CPU effect holds the frame and the mapping in its cache. Reached only
      * while #PAINT_LAYERS_BAKE_PROJECTED_EFFECT is on, so the hash of every other row is as it was.
@@ -325,7 +332,7 @@ static uint64_t bake_hash_layer(uint64_t h,
        layer.role == MA_PAINT_LAYER_ROLE_MASK_ITEM))
   {
     h = bake_hash_mix(h, uint16_t(layer.mapping.space));
-    h = bake_hash_mix(h, uint16_t(layer.mapping.flag));
+    h = bake_hash_mix(h, uint16_t(bake_hash_mapping_flag(layer)));
     h = bake_hash_mix(h, uint16_t(layer.mapping.wrap));
     h = bake_hash_float(h, layer.mapping.offset[0]);
     h = bake_hash_float(h, layer.mapping.offset[1]);
@@ -472,7 +479,7 @@ static uint64_t bake_hash_layer(uint64_t h,
         BKE_paint_layers_mapping_remaps(ma, effect))
     {
       h = bake_hash_mix(h, uint16_t(effect.mapping.space));
-      h = bake_hash_mix(h, uint16_t(effect.mapping.flag));
+      h = bake_hash_mix(h, uint16_t(bake_hash_mapping_flag(effect)));
       h = bake_hash_mix(h, uint16_t(BKE_paint_layers_mapping_wrap_get(effect)));
       h = bake_hash_mix(h, uint8_t(BKE_paint_layers_mapping_mirror_get(effect)));
       h = bake_hash_float(h, effect.mapping.offset[0]);

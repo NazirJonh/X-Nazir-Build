@@ -945,8 +945,10 @@ ImBuf *composite_resample_projected(const ImBuf *src,
       return nullptr;
     }
   }
-  /* The transform effects' steps, then the row's Mirror fold below; the rest of the row's own
-   * mapping stays the UV adjust of #composite_projection_uv_wrap, which runs after them. */
+  /* The transform effects' steps, then the reading row's own fold below; the rest of the row's own
+   * mapping stays the UV adjust of #composite_projection_uv_wrap, which runs after them. The fold
+   * is nonzero only when the projected row is the Mirror effect itself: a content row's own mapping
+   * has no Mirror of its own. */
   CompositeMappingChain steps_chain;
   for (const PaintMaterialCompositeMapping &step : input_steps) {
     if (steps_chain.steps_num == CompositeMappingChain::MAX_STEPS) {
@@ -955,12 +957,12 @@ ImBuf *composite_resample_projected(const ImBuf *src,
     steps_chain.steps[steps_chain.steps_num++] = CompositeMappingTransform(step);
   }
   if (mapping.mirror_axes != 0 && steps_chain.steps_num < CompositeMappingChain::MAX_STEPS) {
-    /* The row's own Mirror is one more step on the map coordinate, after the effects' steps and
-     * before the row's UV adjust: the order the UV path folds in (effects, then the row's fold,
-     * rotate, scale, offset). Going through the chain gives it the Cube cell-local fold and the
-     * Normal's covariant flip the effects' Mirror already has. The step carries the fold only (the
-     * rest of the mapping stays #composite_projection_uv_wrap's, so nothing applies twice) and
-     * repeats, like an effect's Mirror. */
+    /* The projected Mirror effect's fold is one more step on the map coordinate, after any effects'
+     * steps and before the row's UV adjust: the order the UV path folds in. Going through the chain
+     * gives it the Cube cell-local fold and the Normal's covariant flip an effect's Mirror already
+     * has. The step carries the fold only (the rest of the mapping stays
+     * #composite_projection_uv_wrap's, so nothing applies twice) and repeats, like the fold a
+     * content row reads through its effect. */
     PaintMaterialCompositeMapping fold;
     fold.mirror_axes = mapping.mirror_axes;
     copy_v2_v2(fold.mirror_center, mapping.mirror_center);

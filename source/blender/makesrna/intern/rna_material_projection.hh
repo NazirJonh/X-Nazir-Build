@@ -742,16 +742,16 @@ void rna_def_material_paint_layer_projection(StructRNA *srna)
                            "What the row's maps do outside the unit UV square after the mapping");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
-  /* Mirror: fold the maps around mirror_center. Read-only predicate first, then the axes and the
-   * center. The fold reads the map through |uv - center| + center per folded axis, so what either
-   * side shows, both sides show, and painting one side updates the other in real time through the
-   * generated graph and the GPU composite. */
+  /* Mirror: a Transform effect that folds what its owner shows around mirror_center. The fold reads
+   * the owner's UV through |uv - center| + center per folded axis, so what either side shows, both
+   * sides show, and painting one side updates the other in real time through the generated graph
+   * and the GPU composite. Only the effect owns the fold; a content row's own mapping has none. */
   prop = RNA_def_property(srna, "mapping_mirror_applies", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_funcs(
       prop, "rna_MaterialPaintLayer_mapping_mirror_applies_get", nullptr);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(
-      prop, "Mirror Applies", "Whether the enabled Mirror fold reaches what the row shows");
+      prop, "Mirror Applies", "Whether the enabled fold reaches what the effect's owner shows");
 
   prop = RNA_def_property(srna, "mapping_mirror_enabled", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_funcs(prop,
@@ -759,7 +759,7 @@ void rna_def_material_paint_layer_projection(StructRNA *srna)
                                  "rna_MaterialPaintLayer_mapping_mirror_enabled_set");
   RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_mapping_mirror_editable");
   RNA_def_property_ui_text(
-      prop, "Mirror", "Switch the Mirror fold on or off; its axes and center are kept");
+      prop, "Mirror", "Switch the Mirror effect's fold on or off; its axes and center are kept");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "mapping_mirror_u", PROP_BOOLEAN, PROP_NONE);
@@ -767,9 +767,10 @@ void rna_def_material_paint_layer_projection(StructRNA *srna)
                                  "rna_MaterialPaintLayer_mapping_mirror_u_get",
                                  "rna_MaterialPaintLayer_mapping_mirror_u_set");
   RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_mapping_mirror_editable");
-  RNA_def_property_ui_text(prop,
-                           "Mirror U",
-                           "Fold the row's maps along U: both sides of the center show the same");
+  RNA_def_property_ui_text(
+      prop,
+      "Mirror U",
+      "Fold what the effect's owner shows along U: both sides of the center read the same");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "mapping_mirror_v", PROP_BOOLEAN, PROP_NONE);
@@ -777,9 +778,10 @@ void rna_def_material_paint_layer_projection(StructRNA *srna)
                                  "rna_MaterialPaintLayer_mapping_mirror_v_get",
                                  "rna_MaterialPaintLayer_mapping_mirror_v_set");
   RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_mapping_mirror_editable");
-  RNA_def_property_ui_text(prop,
-                           "Mirror V",
-                           "Fold the row's maps along V: both sides of the center show the same");
+  RNA_def_property_ui_text(
+      prop,
+      "Mirror V",
+      "Fold what the effect's owner shows along V: both sides of the center read the same");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "mapping_mirror_u_negative", PROP_BOOLEAN, PROP_NONE);

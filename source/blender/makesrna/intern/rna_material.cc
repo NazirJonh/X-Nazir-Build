@@ -2371,15 +2371,18 @@ static int rna_MaterialPaintLayer_mapping_mirror_editable(const PointerRNA *ptr,
   if (ma == nullptr) {
     return 0;
   }
-  /* The same rule as the mapping's own toggle: once an axis folds it stays switchable off even
-   * after its map is gone. */
-  if (BKE_paint_layers_mapping_mirror_get(*layer) != 0 ||
-      BKE_paint_layers_mapping_supported(*ma, *layer))
+  /* The Mirror properties edit a fold only the Mirror effect owns
+   * (#paint_layer_owns_mirror_fold): its mapping is always supported
+   * (see #BKE_paint_layers_mapping_mirror_available), and every other row reads the bits as off
+   * and has its writes refused, so the properties stay read-only there rather than silently
+   * discarding a script's write. */
+  if (BKE_paint_layers_is_transform_effect(*layer) &&
+      layer->kind_subtype == MA_PAINT_LAYER_FILTER_MIRROR)
   {
     return PROP_EDITABLE;
   }
   if (r_info != nullptr) {
-    *r_info = N_("Row reads no repeatable map; assign an image to a Fill first");
+    *r_info = N_("Only the Mirror effect owns the fold; add a Mirror effect to the row");
   }
   return 0;
 }
@@ -2390,11 +2393,14 @@ static int rna_MaterialPaintLayer_mapping_mirror_center_editable(const PointerRN
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
   PointerRNA ptr_mutable = *ptr;
   Material *ma = rna_paint_layer_material(&ptr_mutable, layer);
-  /* The center is a value of a row that maps something, folded or not: placing the point before a
-   * Mirror axis is switched on is the natural order, and the fold then starts where it was put.
-   * The placement operators resolve the same predicate, so what they can write is what this
-   * offers. */
-  if (ma != nullptr && BKE_paint_layers_mapping_applies(*ma, *layer)) {
+  /* The center is a value of a row that reads it: a Mirror effect's fold or a Transform Mapping's
+   * pivot. Placing the point before a Mirror axis is switched on is the natural order, and the fold
+   * then starts where it was put; the placement operators resolve the same predicate, so what they
+   * can write is what this offers. Every other row's setter refuses the field, so it stays
+   * read-only there instead of silently discarding the write. */
+  if (ma != nullptr && BKE_paint_layers_is_transform_effect(*layer) &&
+      BKE_paint_layers_mapping_applies(*ma, *layer))
+  {
     return PROP_EDITABLE;
   }
   if (r_info != nullptr) {
@@ -2403,7 +2409,7 @@ static int rna_MaterialPaintLayer_mapping_mirror_center_editable(const PointerRN
   return 0;
 }
 
-/* Mirror: fold the row's maps around mirror_center on the enabled axes. */
+/* Mirror: the effect folds what its owner shows around mirror_center on the enabled axes. */
 
 static bool rna_MaterialPaintLayer_mapping_mirror_applies_get(PointerRNA *ptr)
 {

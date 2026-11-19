@@ -1497,44 +1497,25 @@ PaintLayersTreeBuilder::ProjectionSteps PaintLayersTreeBuilder::projection_steps
   bNode *group_input = projection_group_input(tree);
   bNode &start = is_cube ? *cube_local : uv;
   bNodeSocket *uv_out = socket_out(start, "Vector");
-  /* The row's own Mirror is one more step after the effects' steps and before the row's UV adjust
-   * (#projection_uv_mapped), the CPU's #composite_resample_projected order. Like an effect's
-   * Mirror it rides this chain, so Cube folds inside the picked cell and a Normal takes the side
-   * signs; the row's offset, scale and rotation stay the UV adjust's, so nothing applies twice. */
-  bNodeSocket *row_center_socket = projection_effect_value_socket(
-      group_input, mapping_mirror_center_inputs_, row);
-  const int16_t row_mirror_axes = (row_center_socket != nullptr &&
-                                   BKE_paint_layers_mapping_mirror_applies(ma_, row)) ?
-                                      BKE_paint_layers_mapping_mirror_get(row) :
-                                      int16_t(0);
-  if ((effects.is_empty() && row_mirror_axes == 0) || group_input == nullptr || uv_out == nullptr) {
+  if (effects.is_empty() || group_input == nullptr || uv_out == nullptr) {
     return result;
   }
   NodeOutput source = {&start, uv_out};
-  /* \a effect is null for the row's own Mirror step. */
-  const auto step_add = [&](const MaterialPaintLayer *effect) {
-    bNodeSocket *center_socket = row_center_socket;
-    int16_t mirror_axes = row_mirror_axes;
-    if (effect != nullptr) {
-      center_socket = projection_effect_value_socket(
-          group_input, mapping_mirror_center_inputs_, *effect);
-      mirror_axes = (center_socket != nullptr) ? BKE_paint_layers_mapping_mirror_get(*effect) :
-                                                 int16_t(0);
-    }
+  /* Only a Mirror effect folds, so a row's own mapping adds no step here. */
+  const auto step_add = [&](const MaterialPaintLayer &effect) {
+    bNodeSocket *center_socket = projection_effect_value_socket(
+        group_input, mapping_mirror_center_inputs_, effect);
+    const int16_t mirror_axes = (center_socket != nullptr) ?
+                                    BKE_paint_layers_mapping_mirror_get(effect) :
+                                    int16_t(0);
     const MappingChain chain = mapping_chain_add(
         tree,
         *source.node,
         *source.socket,
         group_input,
-        (effect != nullptr) ?
-            projection_effect_value_socket(group_input, mapping_offset_inputs_, *effect) :
-            nullptr,
-        (effect != nullptr) ?
-            projection_effect_value_socket(group_input, mapping_scale_inputs_, *effect) :
-            nullptr,
-        (effect != nullptr) ?
-            projection_effect_value_socket(group_input, mapping_rotation_inputs_, *effect) :
-            nullptr,
+        projection_effect_value_socket(group_input, mapping_offset_inputs_, effect),
+        projection_effect_value_socket(group_input, mapping_scale_inputs_, effect),
+        projection_effect_value_socket(group_input, mapping_rotation_inputs_, effect),
         group_input,
         center_socket,
         mirror_axes);
@@ -1553,11 +1534,8 @@ PaintLayersTreeBuilder::ProjectionSteps PaintLayersTreeBuilder::projection_steps
     r_nodes.append(chain.rotate);
     source = {chain.mapping, chain_out};
 
-    /* The step clips on its own output, the coordinate the next step (or the row's adjust) reads.
-     * The row's Mirror step repeats: the row's own wrap is applied by its Image Texture. */
-    const NodeOutput inside = (effect != nullptr) ?
-                                  this->mapping_clip_inside_add(tree, *effect, source, r_nodes) :
-                                  NodeOutput{};
+    /* The step clips on its own output, the coordinate the next step (or the row's adjust) reads. */
+    const NodeOutput inside = this->mapping_clip_inside_add(tree, effect, source, r_nodes);
     if (inside.node != nullptr) {
       result.clip = (result.clip.node != nullptr) ?
                         projection_math(
@@ -1565,17 +1543,14 @@ PaintLayersTreeBuilder::ProjectionSteps PaintLayersTreeBuilder::projection_steps
                         inside;
     }
     ProjectionSteps::Step step;
-    step.effect = effect;
+    step.effect = &effect;
     if (chain.side_sign != nullptr) {
       step.side_sign = {chain.side_sign_node, chain.side_sign};
     }
     result.steps.append(step);
   };
   for (const MaterialPaintLayer *effect : effects) {
-    step_add(effect);
-  }
-  if (row_mirror_axes != 0) {
-    step_add(nullptr);
+    step_add(*effect);
   }
   if (is_cube && source.node != cube_local) {
     /* Back to the atlas: `atlas + (stepped - local) * cell`, per component, where `atlas` is the
@@ -1722,16 +1697,10 @@ MapRead PaintLayersTreeBuilder::map_read_apply(bNodeTree &tree,
           *color.node,
           *color.socket,
           steps_group_input,
-          /* The row's Mirror step (no effect) has no rotation or scale: only its side signs. */
-          (step.effect != nullptr) ?
-              projection_effect_value_socket(
-                  steps_group_input, mapping_rotation_inputs_, *step.effect) :
-              nullptr,
+          projection_effect_value_socket(
+              steps_group_input, mapping_rotation_inputs_, *step.effect),
           steps_group_input,
-          (step.effect != nullptr) ?
-              projection_effect_value_socket(
-                  steps_group_input, mapping_scale_inputs_, *step.effect) :
-              nullptr,
+          projection_effect_value_socket(steps_group_input, mapping_scale_inputs_, *step.effect),
           step.side_sign.node,
           step.side_sign.socket,
           made,

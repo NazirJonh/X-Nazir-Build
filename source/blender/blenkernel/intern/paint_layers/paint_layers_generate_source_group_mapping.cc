@@ -310,8 +310,8 @@ static void source_group_image_textures_repeat(bNodeTree &tree)
 /**
  * Insert the row mapping in front of every UV output that feeds anything: each Texture Coordinate
  * node and every UV Map node with no layer named (the active UV; other named layers are the
- * source's own and stay untouched). The chain is the row's Mirror fold when \a mirror_axes folds
- * an axis, then `Vector Rotate` then `Mapping`, so the UVs go through the fold in the canvas UV
+ * source's own and stay untouched). The chain is the Mirror fold when \a mirror_axes folds
+ * an axis (nonzero only when the row is the Mirror effect itself), then `Vector Rotate` then `Mapping`, so the UVs go through the fold in the canvas UV
  * and then `S * R * uv + offset`. The transform effects of \a effects sit ahead of the row's own
  * chain, first in the list closest to the UV reader, each driven by its own wrapper inputs: a
  * Transform Mapping by its offset, scale and rotation, a Mirror by its center with the axes baked
@@ -559,7 +559,8 @@ bool source_group_mapping_present(const bNodeTree &tree)
  * The row-mapping half of a mapped level: inputs (the row's own and one set per transform
  * effect), implicit UVs, Repeat, and the chains. Returns whether a chain was actually inserted,
  * so a source with no UV reader is not treated as mapped by the clip factor or the Normal remap.
- * \a mirror_axes names the axes the row's Mirror folds; the chain then reads the fold center from
+ * \a mirror_axes names the axes the row's Mirror fold runs on (nonzero only for the Mirror
+ * effect row); the chain then reads the fold center from
  * the wrapper's fourth input. \a effects are the row's transform effects whose mapping remaps, in
  * list order, each with its own inputs and its chain ahead of the row's own.
  */

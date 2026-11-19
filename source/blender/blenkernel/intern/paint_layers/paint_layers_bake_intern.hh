@@ -312,7 +312,7 @@ bool bake_node_is_shared(const Material &ma, const MaterialPaintLayer &layer);
 
 /**
  * Whether the mapping of \a layer is folded into its bake instead of keeping the row live: a UV
- * remap (Mirror included) of a row that carries an enabled CPU-computed effect (Noise, Blur), or
+ * remap of a row that carries an enabled CPU-computed effect (Noise, Blur), or
  * the projection of such a row (#paint_layer_row_folds_into_bake). Defined in
  * `paint_layers_bake_hash.cc`; the coverage culling (`paint_layers_bake_coverage.cc`) asks it too,
  * because a folded mapping moves an edit of the map to the mapped rectangle.

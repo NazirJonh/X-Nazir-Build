@@ -1684,8 +1684,12 @@ class LAYER_MATERIAL_PT_mapping_advanced(LayerMaterialButtonsPanel, Panel):
 class LAYER_MATERIAL_PT_mapping_mirror(LayerMaterialButtonsPanel, Panel):
     """Mirror fold of the Mapping panel: a subpanel whose header checkbox switches it on or off.
 
-    Off by default. The axes and the center are kept while it is off, so switching it back on
-    restores them.
+    Shown only for the Mirror effect row, the one row that owns the fold: the effect folds what its
+    owner shows, so a content row's own mapping has no Mirror of its own. Off by default. The axes
+    and the center are kept while it is off, so switching it back on restores them.
+
+    The poll is the Python mirror of ``paint_layer_owns_mirror_fold`` (paint_layers_intern.hh),
+    which the setters, the getters and the bake hash resolve; keep both in sync.
     """
 
     bl_idname = "LAYER_MATERIAL_PT_mapping_mirror"
@@ -1696,8 +1700,8 @@ class LAYER_MATERIAL_PT_mapping_mirror(LayerMaterialButtonsPanel, Panel):
     @classmethod
     def poll(cls, context):
         row = LAYER_MATERIAL_PT_mapping._shown_row(context)
-        # A Transform Mapping effect keeps its pivot in the mirror center: the fold is not its own.
-        return row is not None and not (row.is_transform_effect and row.filter_type == 'TRANSFORM')
+        # Only the Mirror effect folds; a row's own mapping (a Fill) has no Mirror of its own.
+        return row is not None and row.is_transform_effect and row.filter_type == 'MIRROR'
 
     def draw_header(self, context):
         row = LAYER_MATERIAL_PT_mapping._shown_row(context)

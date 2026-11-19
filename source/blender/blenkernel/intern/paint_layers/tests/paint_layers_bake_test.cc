@@ -3118,6 +3118,36 @@ TEST_F(PaintLayersBakeTest, a_mask_effect_without_a_projected_item_keeps_its_sha
   EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
 }
 
+/**
+ * An older file could carry Mirror bits on a row that never owned the fold; before the setters
+ * refused them, a script could park them there too. Every reader treats them as off, so they must
+ * not make a visually equal row hash apart and force a re-bake.
+ */
+TEST_F(PaintLayersBakeTest, stale_mirror_bits_in_a_fill_row_do_not_move_the_bake_hash)
+{
+  /* The projection fold is where a content row's raw mapping flag reaches the hash. */
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "Projected", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_source(*ma, row, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  add_channel(*row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("Projected"));
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(*ma, row, MA_PAINT_LAYER_MAPPING_SPACE_BOX));
+  ASSERT_NE(BKE_paint_layers_filter_add(*ma, row, MA_PAINT_LAYER_FILTER_NOISE), nullptr);
+  ASSERT_TRUE(paint_layer_row_folds_into_bake(*ma, *row));
+  clear_active();
+
+  uint32_t clean[2];
+  BKE_paint_layers_bake_hash(*ma, *row, clean);
+
+  /* Written straight into the DNA: how a file from before the fold moved to the effect reads. */
+  row->mapping.flag |= MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_V |
+                       MA_PAINT_LAYER_MAPPING_MIRROR_U_NEGATIVE |
+                       MA_PAINT_LAYER_MAPPING_MIRROR_ENABLED;
+  uint32_t stale[2];
+  BKE_paint_layers_bake_hash(*ma, *row, stale);
+  EXPECT_EQ(clean[0], stale[0]);
+  EXPECT_EQ(clean[1], stale[1]);
+}
+
 TEST_F(PaintLayersBakeTest, a_mask_effect_over_a_projected_item_waits_for_objects)
 {
   MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));
@@ -3344,7 +3374,7 @@ TEST_F(PaintLayersBakeTest, an_uncovered_edit_region_is_kept_for_a_whole_map_eff
 }
 
 /**
- * A mapping folded into the bake (a Mirror over a row with a CPU effect) moves the edited pixel to
+ * A mapping folded into the bake (a rotation over a row with a CPU effect) moves the edited pixel to
  * the mapped rectangle, which the plane's rectangle cannot see: the region is kept.
  */
 TEST_F(PaintLayersBakeTest, an_uncovered_edit_region_is_kept_for_a_folded_mapping)
@@ -3357,7 +3387,8 @@ TEST_F(PaintLayersBakeTest, an_uncovered_edit_region_is_kept_for_a_folded_mappin
   ASSERT_TRUE(
       BKE_paint_layers_channel_set_image(*ma, row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
   ASSERT_NE(BKE_paint_layers_filter_add(*ma, row, MA_PAINT_LAYER_FILTER_NOISE), nullptr);
-  ASSERT_TRUE(BKE_paint_layers_mapping_set_mirror(*ma, row, MA_PAINT_LAYER_MAPPING_MIRROR_U));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, row, true));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_rotation(*ma, row, 0.5f));
   clear_active();
   const rcti uncovered = bake_test_clear_right_half_alpha(*map);
   ASSERT_GT(uncovered.xmax, uncovered.xmin);

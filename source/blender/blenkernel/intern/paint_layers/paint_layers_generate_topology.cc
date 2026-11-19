@@ -165,9 +165,10 @@ static void mapping_wrap_hash_mix(uint64_t &hash, const Material &ma, const Mate
 static constexpr uint64_t MAPPING_MIRROR_CHAIN_VERSION = 3;
 
 /**
- * Mix which axes the row's Mirror folds into \a hash: nothing while the mapping does not apply,
- * the axis mask otherwise. The fold's nodes and its per-texel Normal flip exist per axis, so the
- * axes are structure; the center is a value the fold reads and never moves the hash.
+ * Mix which axes the row's Mirror fold runs on into \a hash: nothing while the mapping does not
+ * apply, the axis mask otherwise (nonzero only when the row is the Mirror effect itself). The
+ * fold's nodes and its per-texel Normal flip exist per axis, so the axes are structure; the center
+ * is a value the fold reads and never moves the hash.
  */
 static void mapping_mirror_hash_mix(uint64_t &hash, const Material &ma, const MaterialPaintLayer &row)
 {

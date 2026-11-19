@@ -851,7 +851,7 @@ class PaintLayersTreeBuilder {
     /** The product of the steps' wrap-Clip factors; empty when no step clips. */
     NodeOutput clip;
     struct Step {
-      /** The transform effect of the step; null for the row's own Mirror step. */
+      /** The transform effect of the step. */
       const MaterialPaintLayer *effect = nullptr;
       /** The fold's side signs, empty when the step folds nothing. */
       NodeOutput side_sign;
@@ -861,8 +861,7 @@ class PaintLayersTreeBuilder {
 
   /**
    * Run \a uv (one face UV or the single-sample UV of the projected \a row, after tiling) through
-   * the chains of the row's transform effects, in list order, then the row's own Mirror fold (a
-   * step without an effect), the steps the CPU resample applies
+   * the chains of the row's transform effects, in list order, the steps the CPU resample applies
    * to the map coordinate before the row's own UV adjust (#projection_uv_mapped). Cube runs them on
    * the picked cell's local UV (#ProjectionNodes::cube_local) and returns to the atlas. The values ride the effects' group inputs, the chains are made per
    * call (a Box face has a chain of its own). \a r_nodes receives what was made.

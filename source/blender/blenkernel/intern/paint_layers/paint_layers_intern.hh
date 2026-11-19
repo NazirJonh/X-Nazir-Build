@@ -340,6 +340,19 @@ inline bool paint_layer_transform_moves(const MaterialPaintLayer &item)
 }
 
 /**
+ * Whether \a layer owns the Mirror fold: it is the Mirror effect itself. The fold belongs to that
+ * effect alone -- it works with every projection, so a content row's own mapping leaves the fold to
+ * it -- and a stale bit an older file holds on such a row reads as off
+ * (#BKE_paint_layers_mapping_mirror_enabled_get). One statement for the setters, the getters and
+ * the bake hash, so a new transform kind cannot make them disagree.
+ */
+inline bool paint_layer_owns_mirror_fold(const MaterialPaintLayer &layer)
+{
+  return paint_layer_kind_transforms_input(layer) &&
+         layer.kind_subtype == MA_PAINT_LAYER_FILTER_MIRROR;
+}
+
+/**
  * Whether the mask item \a item is a transform effect that moves the grey the mask has built up to
  * it. It acts in UV only: the Decal frame of a content effect walks the surface of the painted
  * object, which a mask grey computed on the canvas has no access to (see

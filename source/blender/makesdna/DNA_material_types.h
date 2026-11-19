@@ -1643,17 +1643,20 @@ enum eMaterialPaintLayerMappingFlag : int16_t {
    */
   MA_PAINT_LAYER_MAPPING_SCALE_UNLOCKED = 1 << 1,
   /**
-   * Mirror the row's maps along U: the map is read through the fold
+   * Mirror along U: the row's maps are read through the fold
    * `u' = |u - mirror_center.x| + mirror_center.x` before the transform, so what either side of
-   * the center shows, both sides show. The per-texel sign of `u - mirror_center.x` also flips the
-   * U component of a tangent-space Normal, the way a negative scale does.
+   * the center shows, both sides show. The fold belongs to the Mirror effect row alone: bits a
+   * file written earlier parks on any other row read as off. The per-texel sign of
+   * `u - mirror_center.x` also flips the U component of a tangent-space Normal, the way a negative
+   * scale does.
    */
   MA_PAINT_LAYER_MAPPING_MIRROR_U = 1 << 3,
   /** Mirror along V: the fold and the Normal flip of #MA_PAINT_LAYER_MAPPING_MIRROR_U, on V. */
   MA_PAINT_LAYER_MAPPING_MIRROR_V = 1 << 4,
   /**
-   * The Mirror fold is switched on. The axes above and the center are only read while this is set,
-   * so switching Mirror off keeps what was configured. Zeroed rows start with Mirror off.
+   * The Mirror fold is switched on. The axes above and the center are only read while this is set
+   * on the Mirror effect row, so switching Mirror off keeps what was configured. Zeroed rows start
+   * with Mirror off; a set bit on any other row reads as off.
    */
   MA_PAINT_LAYER_MAPPING_MIRROR_ENABLED = 1 << 5,
   /**
@@ -1711,7 +1714,8 @@ struct MaterialPaintLayerMapping {
   char _pad[6] = {};
   /**
    * The UV point the Mirror fold (#MA_PAINT_LAYER_MAPPING_MIRROR_U / _V) reflects around, on every
-   * folded axis at once. Read only while a mirror flag is set; (0.5, 0.5) is where a fresh row
+   * folded axis at once. Read only while a mirror flag is set on the Mirror effect row: a Transform
+   * Mapping keeps its pivot in the field instead; (0.5, 0.5) is where a fresh row
    * starts. A future mapping space defines its own center meaning; the flags stay per axis either
    * way.
    */

@@ -465,7 +465,8 @@ struct MappingChain {
   bNode *rotate = nullptr;
   bNode *mapping = nullptr;
   /**
-   * The Vector Math nodes of the row's Mirror fold, empty when the row folds nothing. They sit
+   * The Vector Math nodes of the row's Mirror fold, empty when the row folds nothing (only the
+   * Mirror effect row does). They sit
    * between the UV source and #rotate and read the fold center from \a center_socket.
    */
   Vector<bNode *> fold_nodes;
@@ -517,7 +518,8 @@ MappingChain mapping_chain_add(bNodeTree &tree,
  * Add the covariant remap of an encoded tangent-space normal read from \a color_socket: decode,
  * flip by the sign of the scale, rotate back, encode. \a rotation and \a scale are the sockets
  * that drive the row transform (null scale is the identity). \a side_sign / \a side_sign_node,
- * when non-null, are the row's Mirror fold side-sign vector and its owner: the decoded normal
+ * when non-null, are the row's Mirror fold side-sign vector and its owner (the fold belongs to the
+ * Mirror effect the row reads through): the decoded normal
  * multiplies by it before the scale flip, which turns the component along each folded axis per
  * texel, on the side of the fold center the texel reads from. The nodes made are appended to
  * \a r_made, unplaced. \return the encoded output, or null with nothing left in \a tree.
@@ -861,7 +863,8 @@ bNodeSocket *source_group_side_sign_find(bNodeTree &tree, bNode **r_node);
 
 /**
  * Make \a tree one mapped level: the value inputs, the implicit UV wiring and the chain in front
- * of every UV reader. \a mirror_axes names the axes the row's Mirror folds, which decides whether
+ * of every UV reader. \a mirror_axes names the axes the row's Mirror fold runs on (nonzero only
+ * for the Mirror effect row), which decides whether
  * the chain grows the fold's nodes beside the transform. \return whether a chain was inserted, so
  * a level without a UV reader is not treated as mapped.
  */

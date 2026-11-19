@@ -189,7 +189,8 @@ struct SourceGroupBuild {
   /** Whether the row applies its UV mapping (or carries a remapping transform effect), so every
    * level carries the mapping chain. */
   bool mapped;
-  /** The axes the row's Mirror folds, so every mapped level grows the fold's nodes. */
+  /** The axes the row's Mirror fold runs on (nonzero only for the Mirror effect row), so every
+   * mapped level grows the fold's nodes. */
   int16_t mirror_axes;
   /** The row's transform effects whose mapping remaps, in list order: their chains sit ahead of
    * the row's own, each driven by its own wrapper inputs. */
@@ -328,7 +329,8 @@ static void source_group_normal_output_add(const bNode &principled,
       /* The row mapping moved the texture's read point, so the encoded vectors follow it: remap
        * them with this level's mapping rotation and scale-sign before exposing the Color. A
        * colour that does not read the moved UV (Generated coordinates, a named UV Map) stays.
-       * The row's Mirror fold, when it folds an axis, turns the component along it per texel. */
+       * The Mirror fold, when it folds an axis (only the Mirror effect row's own does), turns
+       * the component along it per texel. */
       bNode *group_input = source_group_group_input_ensure(tree);
       if (group_input != nullptr) {
         bNodeSocket *rotation = source_group_mapping_input_socket(

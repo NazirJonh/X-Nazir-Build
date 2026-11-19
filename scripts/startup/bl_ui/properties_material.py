@@ -33,6 +33,8 @@ from bl_ui.properties_material_paint_layers import (
     draw_material_smart_asset_expose,
     draw_material_smart_asset_rows,
     draw_material_effect_image_slot,
+    draw_material_layer_fill_source,
+    draw_material_layer_source_row,
     draw_material_update_now,
     material_layer_visible_channels,
 )
@@ -990,9 +992,13 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
         # Outliner stack, beside its opacity.
         layout.prop(layer, "blend_type", text="Blend")
         self._draw_opacity_lock(layout, layer, overview)
+        # The Maps | Material switch sits in one place for both sources it flips, above the source
+        # block it selects: a Fill's channel maps and values, or a material the row reads.
+        if layer.source in {'CONSTANT', 'MATERIAL'}:
+            layout.separator()
+            draw_material_layer_fill_source(layout, layer)
         # A Material row owns no channel records: it lays what its source material shows.
         if layer.source == 'MATERIAL':
-            layout.separator()
             # The ID Browser popover: a grid with the Material asset libraries, instead of a plain
             # search list. A Material row always reads a material, so the built-in unlink and the
             # user count are left out; the pointer's own poll and setter refuse a cycle.
@@ -1005,6 +1011,10 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             )
             if layer.material is None:
                 layout.label(text="No source material", icon='ERROR')
+            else:
+                # Whole material, or one stack row of it (a dynamic decal configured where it is
+                # built): the narrowed reference, its update setting and its state.
+                draw_material_layer_source_row(layout, context, layer)
             return
         # A generator is procedural: its kind, parameters and ramp replace the map controls. A
         # Gradient keeps its own panel; every other pattern draws the schema of its kind.
@@ -1425,7 +1435,11 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
             layout.prop(row, "mapping_enabled", text="UV Adjust")
             self._draw_mapping_transform(layout, row, "UV Wrap")
 
-            if row.mapping_enabled and row.source == 'MATERIAL':
+            # Only a live whole-material row reads the source's graph through its UV wrapper: a
+            # canvas row reads its baked maps like a Fill reads a texture, so the note has no say
+            # there, and neither has the source's main-shader-path limit.
+            if (row.mapping_enabled and row.source == 'MATERIAL' and
+                    row.material_scope == 'MATERIAL' and row.material_canvas_mode == 'LIVE'):
                 # The wrapper moves the active UV layer (TexCoord UV and open Image Textures) of the
                 # source tree and of the groups on the path to its Principled BSDF; a coordinate-driven
                 # procedural texture, a named UV Map node and a group beside that path keep their own input.
@@ -1905,7 +1919,14 @@ class LAYER_MATERIAL_PT_source_surface(LayerMaterialButtonsPanel, Panel):
         item = cls._shown_mask_item(context, owner, layer)
         # A mask correction that reads a material is edited here as a Material layer is.
         subject = item if item is not None else layer
-        return subject.source == 'MATERIAL' and subject.material is not None
+        if subject.source != 'MATERIAL' or subject.material is None:
+            return False
+        # A stack row narrowed to one stack row of its source edits its reference in the Layer
+        # panel: the source's Surface graph is not what it reads. A mask item narrowed the same way
+        # has no other panel, so it is shown here with the same controls.
+        if item is None and subject.material_scope == 'ROW':
+            return False
+        return True
 
     def draw(self, context):
         layout = self.layout
@@ -1922,6 +1943,13 @@ class LAYER_MATERIAL_PT_source_surface(LayerMaterialButtonsPanel, Panel):
             col = layout.column(align=True)
             col.label(text="Source Channel")
             col.prop(item, "mask_source_channel", expand=True)
+            layout.separator()
+            # A mask item has no Layer panel section of its own, so the scope switch, the update
+            # setting and the status are drawn here for it. A narrowed one reads one stack row of its
+            # source, and no Surface graph follows.
+            draw_material_layer_source_row(layout, context, subject)
+            if subject.material_scope == 'ROW':
+                return
             layout.separator()
         source = subject.material
         if source.library is not None:
@@ -2018,7 +2046,10 @@ class LAYER_MATERIAL_PT_bake(LayerMaterialButtonsPanel, Panel):
         subject = item if item is not None else layer
 
         layout.prop(subject, "bake_mode", text="Mode")
-        layout.prop(subject, "bake_size_preset", text="Size")
+        # A canvas Material row's resolution is its Canvas Size, in the source block: the generic
+        # bake size is not what its canvas is made at, so the control here would do nothing.
+        if not (subject.source == 'MATERIAL' and subject.material_is_canvas):
+            layout.prop(subject, "bake_size_preset", text="Size")
 
         issue = subject.bake_object_issue
         if issue != 'OK':

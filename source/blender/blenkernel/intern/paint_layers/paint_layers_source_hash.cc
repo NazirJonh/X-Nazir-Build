@@ -37,6 +37,7 @@
 #include "DNA_node_types.h"
 
 #include "paint_layers_generate_intern.hh"
+#include "paint_layers_hash_intern.hh"
 #include "paint_layers_intern.hh"
 
 namespace blender {
@@ -818,6 +819,90 @@ static SourceMemoMap<SourceChannelGraphAnswer, true> &source_channel_graph_memo(
   return memo;
 }
 
+/**
+ * The content hash of one stack row of a narrowed Material row
+ * (#BKE_paint_layers_source_row_content_hash), asked per redraw for every visible row and per
+ * render pass for the plan. Its walk reads the owner's stack DNA, which no node-tree signal
+ * covers, so the memo does not live by a signal: an entry holds the row it was made from, the stack
+ * that owns it and the stack's first/last links -- a stack restored by an undo or a load, re-ordered
+ * or re-owned answers with different memory, and the entry is made again; the pointers are only ever
+ * compared, never dereferenced. What moves the content in place -- an edit of the row or of anything
+ * under it -- goes through #BKE_paint_layers_tag_edited / #BKE_paint_layers_tag_value_edited, which
+ * drop the memo wholesale (#BKE_paint_layers_source_row_hash_memo_drop) as part of the edit, so no
+ * editor or script path has to remember to; the start of every render pass drops it as well, where
+ * the plan has to read the stack as it is now.
+ *
+ * Guarded by #source_hash_memo_mutex(), like the other memos, and registered in the same registry,
+ * so the per-material forget of a freed owner reaches it too.
+ */
+class SourceRowContentMemoMap final : public SourceMemoMapBase {
+ public:
+  struct Entry {
+    /** The stack row the hash was made from, null for a marker that named nothing. */
+    const MaterialPaintLayer *referenced = nullptr;
+    /** The stack the row was found in, and its first/last links. A different stack, or one whose
+     * ends moved, means the same address may be a different row after an undo, a load or a
+     * re-order -- the pointer is only compared, never dereferenced. */
+    const Material *owner = nullptr;
+    const void *first = nullptr;
+    const void *last = nullptr;
+    uint64_t hash = 0;
+  };
+
+  SourceRowContentMemoMap()
+  {
+    source_memo_registry().append(this);
+  }
+
+  const Entry *lookup(const Material &owner, const UUID &marker) const
+  {
+    const Map<UUID, Entry> *entries = rows_.lookup_ptr(owner.id.session_uid);
+    if (entries == nullptr) {
+      return nullptr;
+    }
+    const Entry *entry = entries->lookup_ptr(marker);
+    if (entry == nullptr || entry->owner != &owner ||
+        entry->first != owner.paint_layers.first || entry->last != owner.paint_layers.last)
+    {
+      return nullptr;
+    }
+    return entry;
+  }
+
+  void add_overwrite(const Material &owner,
+                     const UUID &marker,
+                     const MaterialPaintLayer *referenced,
+                     const uint64_t hash)
+  {
+    rows_.lookup_or_add_default(owner.id.session_uid)
+        .add_overwrite(marker,
+                       Entry{referenced,
+                             &owner,
+                             owner.paint_layers.first,
+                             owner.paint_layers.last,
+                             hash});
+  }
+
+  void remove(const uint32_t owner_uid) override
+  {
+    rows_.remove(owner_uid);
+  }
+
+  void clear_and_shrink() override
+  {
+    rows_ = Map<uint32_t, Map<UUID, Entry>>();
+  }
+
+ private:
+  Map<uint32_t, Map<UUID, Entry>> rows_;
+};
+
+static SourceRowContentMemoMap &source_row_content_memo()
+{
+  static SourceRowContentMemoMap memo;
+  return memo;
+}
+
 uint64_t BKE_paint_layers_source_structure_hash_cached(const Material &ma)
 {
   if (ma.nodetree == nullptr) {
@@ -1012,6 +1097,107 @@ bool BKE_paint_layers_source_group_wrappable(const Material &source)
 bool BKE_paint_layers_source_reads_uv(const Material &source)
 {
   return source_resolve_entry(source).reads_uv;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Narrowed source row hash
+ *
+ * The content hash a #MA_PAINT_LAYER_MATERIAL_SCOPE_ROW Material row reads: one stack row of the
+ * source, its subtree hashed the way a bake of that row would be made. The brush's layer source
+ * (`brush_layer_source.cc`), whose narrowing of one material is the oldest form of this, reads the
+ * same fold (#BKE_paint_layers_source_row_content_fold) from here, so the two keys cannot drift
+ * apart; kept beside the other source hashes so the regen point and the render stamp read one
+ * formula.
+ * \{ */
+
+/**
+ * Mapping values of \a row and everything under it.
+ *
+ * The row-bake hash deliberately ignores them: a mapped row stays live and is never baked by the
+ * planner. A narrowed source bakes the row's content with its mapping applied, so for this hash a
+ * moved slider has to move the key.
+ *
+ * No cycle guard, on purpose: the walk follows only the owner's own stack, and a nested Material
+ * row contributes its source's node-tree hash (#BKE_paint_layers_source_material_tree_hash_cached,
+ * which carries its own visited set over the group trees) without ever descending into that
+ * source's stack. A chain of narrowed rows across materials -- or a material cycle a hand-made file
+ * could encode, which the source-issue poll refuses to make -- therefore cannot loop here.
+ */
+static uint64_t source_row_mapping_hash(const Material &owner,
+                                        const MaterialPaintLayer &row,
+                                        uint64_t hash)
+{
+  if (row.material != nullptr) {
+    /* A nested Material row's own bake hash only names its source; the source's graph and values
+     * are what its content actually is. */
+    hash = bake_hash_mix(hash, BKE_paint_layers_source_material_tree_hash_cached(*row.material));
+  }
+  if (BKE_paint_layers_mapping_remaps(owner, row)) {
+    hash = bake_hash_float(hash, row.mapping.offset[0]);
+    hash = bake_hash_float(hash, row.mapping.offset[1]);
+    hash = bake_hash_float(hash, row.mapping.scale[0]);
+    hash = bake_hash_float(hash, row.mapping.scale[1]);
+    hash = bake_hash_float(hash, row.mapping.rotation);
+    hash = bake_hash_mix(hash, uint64_t(row.mapping.space));
+    hash = bake_hash_mix(hash, uint64_t(row.mapping.flag));
+    hash = bake_hash_mix(hash, uint64_t(BKE_paint_layers_mapping_wrap_get(row)));
+    hash = bake_hash_float(hash, row.mapping.mirror_center[0]);
+    hash = bake_hash_float(hash, row.mapping.mirror_center[1]);
+  }
+  for (const MaterialPaintLayer &effect : row.effects) {
+    hash = source_row_mapping_hash(owner, effect, hash);
+  }
+  for (const MaterialPaintLayer &item : row.mask_stack) {
+    hash = source_row_mapping_hash(owner, item, hash);
+  }
+  for (const MaterialPaintLayer &child : row.children) {
+    hash = source_row_mapping_hash(owner, child, hash);
+  }
+  return hash;
+}
+
+void BKE_paint_layers_source_row_hash_memo_drop()
+{
+  std::lock_guard lock(source_hash_memo_mutex());
+  source_row_content_memo().clear_and_shrink();
+}
+
+uint64_t BKE_paint_layers_source_row_content_fold(const Material &owner,
+                                                  const MaterialPaintLayer &row)
+{
+  uint32_t hash[2];
+  BKE_paint_layers_bake_hash(owner, row, hash);
+  return source_row_mapping_hash(owner, row, (uint64_t(hash[1]) << 32) | uint64_t(hash[0]));
+}
+
+uint64_t BKE_paint_layers_source_row_content_hash(const Material &source, const bUUID &marker)
+{
+  const MaterialPaintLayer *row = BKE_paint_layers_source_row_find(source, marker);
+  {
+    std::lock_guard lock(source_hash_memo_mutex());
+    if (const SourceRowContentMemoMap::Entry *memo = source_row_content_memo().lookup(
+            source, UUID(marker));
+        memo != nullptr && memo->referenced == row)
+    {
+      return memo->hash;
+    }
+  }
+  uint64_t full = 0;
+  if (row != nullptr) {
+    full = BKE_paint_layers_source_row_content_fold(source, *row);
+    /* The marker itself folds in: two rows of one subtree can carry the same description, and a
+     * reference switched between them has to move the hash. */
+    full = bake_hash_mix(full, UUID(marker).hash());
+  }
+  /* A marker that resolves to nothing keeps the zero: it names no content, the "no bake possible"
+   * state the way the brush's source reads a dead marker. The walk runs without the lock on
+   * purpose -- it is expensive, and a concurrent reader may compute the same answer meanwhile;
+   * both store the same value, so the repeated work is harmless. */
+  std::lock_guard lock(source_hash_memo_mutex());
+  source_row_content_memo().add_overwrite(source, UUID(marker), row, full);
+  return full;
 }
 
 /** \} */

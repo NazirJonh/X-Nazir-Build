@@ -726,10 +726,34 @@ def _brush_source_row_items(_self, _context):
     return _brush_source_row_cache
 
 
-def _brush_source_row_collect(rows, depth, items):
+def _source_row_collect(rows, depth, items):
+    """The stack rows of \\a rows with their folder children, depth-indented, as search-popup items.
+
+    Corrections and mask items are not rows of the stack, so the walk (which only descends into
+    children) never offers them. The brush's row search and the narrowed Material row's share it.
+    """
     for row in rows:
         items.append((row.marker, "{}{}".format("    " * depth, row.name), ""))
-        _brush_source_row_collect(row.children, depth + 1, items)
+        _source_row_collect(row.children, depth + 1, items)
+
+
+def find_layer_by_marker(rows, marker, include_corrections=False):
+    """The layer whose marker is \\a marker, wherever it hangs: a row of the stack, a folder's
+    child, and -- with \\a include_corrections -- a correction of a row or a mask item. The subject
+    a search popup names back, and the row a status line reads.
+    """
+    for row in rows:
+        if row.marker == marker:
+            return row
+        found = find_layer_by_marker(row.children, marker, include_corrections)
+        if found is not None:
+            return found
+        if include_corrections:
+            for sub in (row.effects, row.mask_stack):
+                found = find_layer_by_marker(sub, marker, True)
+                if found is not None:
+                    return found
+    return None
 
 
 class PAINT_OT_brush_layer_source_row_search(Operator):
@@ -795,7 +819,84 @@ class PAINT_OT_brush_layer_source_row_search(Operator):
             return {'CANCELLED'}
         _brush_source_row_cache.clear()
         if owner is not None and owner.is_layered:
-            _brush_source_row_collect(owner.paint_layers, 0, _brush_source_row_cache)
+            _source_row_collect(owner.paint_layers, 0, _brush_source_row_cache)
+        context.window_manager.invoke_search_popup(self)
+        return {'CANCELLED'}
+
+
+# Material Layer source (a Material row narrowed to one stack row) ##########################
+
+# The rows offered by the open search popup. Kept at module level because the enum items callback
+# has to return strings that stay alive, and the popup is built after #invoke has returned -- the
+# same scheme the brush's search runs on.
+_mat_source_row_cache = []
+# (material name, library path or None, marker) of the Material row whose source row the open popup
+# names. Identities, not wrappers: the popup runs outside the button, and undo can move the DNA
+# between #invoke and #execute.
+_mat_source_row_target = None
+
+
+def _mat_source_row_items(_self, _context):
+    return _mat_source_row_cache
+
+
+class MATERIAL_OT_paint_layer_source_row_search(Operator):
+    """Pick the stack row a narrowed Material layer reads, by searching the source material's rows"""
+    bl_idname = "material.paint_layer_source_row_search"
+    bl_label = "Select Source Row"
+    bl_options = {'INTERNAL'}
+    bl_property = "row"
+
+    row: bpy.props.EnumProperty(name="Row", items=_mat_source_row_items)
+
+    def execute(self, context):
+        # The popup runs outside the button that opened it, so the layer is looked up again from
+        # the identities #invoke stored (the same reason the brush's search keeps them). The
+        # material is resolved by name and library together: two materials can carry one name when
+        # they come from different libraries, and the popup named the one it was opened for.
+        global _mat_source_row_target
+        target = _mat_source_row_target
+        _mat_source_row_target = None
+        if target is None or not self.row:
+            return {'CANCELLED'}
+        name, library_path, marker = target
+        ma = bpy.data.materials.get((name, library_path))
+        layer = None if ma is None else find_layer_by_marker(ma.paint_layers, marker, True)
+        if layer is None:
+            return {'CANCELLED'}
+        if layer.source != 'MATERIAL':
+            self.report({'WARNING'}, "The row no longer reads a material")
+            return {'CANCELLED'}
+        # Picking a row of the source only means something in the ROW scope. Set it through RNA
+        # so its setter runs (and tags the row), and before the marker -- the scope setter clears
+        # a marker when leaving ROW, not when entering it.
+        layer.material_scope = 'ROW'
+        layer.material_row_marker = self.row
+        return {'FINISHED'}
+
+    def invoke(self, context, _event):
+        global _mat_source_row_target
+        # A UI that edits a layer the stack does not consider active (a correction, a mask item)
+        # points at it through this context pointer; the button on the active row sets none.
+        target = getattr(context, "material_paint_layer_source_target", None)
+        if target is not None:
+            owner_ma = target.id_data
+            layer = target
+        else:
+            owner_ma = getattr(context, "material", None)
+            layer = owner_ma.paint_layers.active if owner_ma is not None and owner_ma.is_layered \
+                else None
+        if layer is None or layer.source != 'MATERIAL' or layer.material is None:
+            return {'CANCELLED'}
+        _mat_source_row_target = (
+            owner_ma.name,
+            owner_ma.library.filepath if owner_ma.library else None,
+            layer.marker,
+        )
+        _mat_source_row_cache.clear()
+        # The same walk the brush's search offers: the source's rows with their folder children,
+        # depth-indented (see #_source_row_collect).
+        _source_row_collect(layer.material.paint_layers, 0, _mat_source_row_cache)
         context.window_manager.invoke_search_popup(self)
         return {'CANCELLED'}
 
@@ -1325,6 +1426,7 @@ classes = (
     MATERIAL_OT_paint_layer_object_mask_toggle,
     MATERIAL_OT_paint_layer_object_mask_refresh_tiles,
     MATERIAL_OT_paint_layer_decal_import_decal_master,
+    MATERIAL_OT_paint_layer_source_row_search,
     PAINT_OT_brush_layer_source_row_search,
     PAINT_IDF_layer_material,
     PAINT_IDF_curve_patch_brush,

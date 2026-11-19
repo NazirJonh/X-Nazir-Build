@@ -133,6 +133,11 @@ bool paint_layer_material_source_group_channel(const Material &ma,
                                                const MaterialPaintLayer &row,
                                                const int channel)
 {
+  /* A canvas row has no live group: its maps are the render it was made from, whatever the source's
+   * graph could wrap (see #BKE_paint_layers_material_row_is_canvas). */
+  if (BKE_paint_layers_material_row_is_canvas(row)) {
+    return false;
+  }
   if (!paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_SOURCE) || row.material == nullptr ||
       row.material->nodetree == nullptr || channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM ||
       (channel != PAINT_MATERIAL_CHANNEL_ALPHA && material_channel_filtered(ma, row, channel)) ||
@@ -169,6 +174,16 @@ PaintLayerMaterialSource paint_layer_material_channel_source(const Material &ma,
       row.material->nodetree == nullptr || channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM ||
       channel == PAINT_MATERIAL_CHANNEL_ALPHA || material_channel_filtered(ma, row, channel))
   {
+    return out;
+  }
+  /* A canvas row resolves to its maps alone: the render it was made from is all it lays, before
+   * and after the first one (see #BKE_paint_layers_material_bake_render_row). */
+  if (BKE_paint_layers_material_row_is_canvas(row)) {
+    Image *baked = nullptr;
+    if (paint_layer_row_material_map(ma, row, channel, &baked)) {
+      out.kind = PaintLayerMaterialSourceKind::Baked;
+      out.image = baked;
+    }
     return out;
   }
   const std::shared_ptr<const MaterialSourceResolve> resolve = BKE_paint_layers_source_resolve(
@@ -217,6 +232,18 @@ PaintLayerMaterialCoverage paint_layer_material_coverage_source(const Material &
   {
     return out;
   }
+  /* A canvas row's coverage is its own maps': the render hands its content coverage back, and
+   * nothing of the source's transparency is resolved here. */
+  if (BKE_paint_layers_material_row_is_canvas(row)) {
+    if (paint_layer_row_material_shown(ma, row) && row.bake->coverage != nullptr) {
+      out.kind = PaintLayerMaterialCoverageKind::Baked;
+      out.image = row.bake->coverage;
+    }
+    else {
+      out.kind = PaintLayerMaterialCoverageKind::Pending;
+    }
+    return out;
+  }
   const std::shared_ptr<const MaterialSourceResolve> resolve = BKE_paint_layers_source_resolve(
       *row.material);
   constexpr int alpha = PAINT_MATERIAL_CHANNEL_ALPHA;
@@ -254,6 +281,25 @@ PaintLayerMaterialCoverage paint_layer_material_coverage_source(const Material &
   return out;
 }
 
+Image *paint_layer_material_canvas_image(const Material &ma,
+                                         const MaterialPaintLayer &row,
+                                         const int channel)
+{
+  /* The role decides which map is the canvas: a mask item keeps its grey in the one channel its
+   * bake was rendered into ("effect item reads the grey its bake holds"; the Base Color channel
+   * unless the item was given another), a row and a correction read the channel they were asked
+   * for. Everything else -- the shown test, the bake's ownership -- is the map test every Material
+   * row shares. */
+  const int canvas_channel = (row.role == MA_PAINT_LAYER_ROLE_MASK_ITEM) ?
+                                 paint_layer_mask_source_channel(row) :
+                                 channel;
+  Image *image = nullptr;
+  if (paint_layer_row_material_map(ma, row, canvas_channel, &image)) {
+    return image;
+  }
+  return nullptr;
+}
+
 bool paint_layer_row_reads_source(const Material &ma,
                                   const MaterialPaintLayer &row,
                                   const int channel)
@@ -284,9 +330,17 @@ bool paint_layer_correction_reads_source(const Material &ma,
     return false;
   }
   const PaintLayerMaterialCoverage coverage = paint_layer_material_coverage_source(ma, effect);
-  return ELEM(coverage.kind,
-              PaintLayerMaterialCoverageKind::Full,
-              PaintLayerMaterialCoverageKind::LiveConstant);
+  if (ELEM(coverage.kind,
+           PaintLayerMaterialCoverageKind::Full,
+           PaintLayerMaterialCoverageKind::LiveConstant))
+  {
+    return true;
+  }
+  /* A canvas correction's coverage is the map its render made, not the source's transparency
+   * resolved live: it lays where its bake holds a coverage, reading like a Fill correction's own
+   * map does (see #paint_layer_material_coverage_source). */
+  return coverage.kind == PaintLayerMaterialCoverageKind::Baked &&
+         BKE_paint_layers_material_row_is_canvas(effect);
 }
 
 int paint_layer_mask_source_channel(const MaterialPaintLayer &item)
@@ -313,9 +367,16 @@ bool paint_layer_mask_reads_source(const Material &ma, const MaterialPaintLayer 
     return false;
   }
   const PaintLayerMaterialCoverage coverage = paint_layer_material_coverage_source(ma, item);
-  return ELEM(coverage.kind,
-              PaintLayerMaterialCoverageKind::Full,
-              PaintLayerMaterialCoverageKind::LiveConstant);
+  if (ELEM(coverage.kind,
+           PaintLayerMaterialCoverageKind::Full,
+           PaintLayerMaterialCoverageKind::LiveConstant))
+  {
+    return true;
+  }
+  /* A canvas mask item reads the grey its bake holds, with the coverage the same bake made: it
+   * lays where its bake holds both (see #paint_layer_material_coverage_source). */
+  return coverage.kind == PaintLayerMaterialCoverageKind::Baked &&
+         BKE_paint_layers_material_row_is_canvas(item);
 }
 
 bool BKE_paint_layers_material_channel_needs_render(const Material &ma,
@@ -333,6 +394,17 @@ bool BKE_paint_layers_material_channel_needs_render(const Material &ma,
       channel != paint_layer_mask_source_channel(row) && channel != PAINT_MATERIAL_CHANNEL_ALPHA)
   {
     return false;
+  }
+  /* A canvas row renders every channel it takes part in: its content is rendered whatever the
+   * source's graph resolves there, and its coverage comes along from the same render rather than
+   * an Alpha map of its own. Where that render runs decides how the alpha arrives: a narrowed
+   * row's synchronous render folds the coverage out of the channels it renders
+   * (#BKE_paint_layers_material_bake_render_row), so the alpha needs no map of its own; a FULL row
+   * renders through the source-graph job, whose alpha target is the row's coverage map. */
+  if (BKE_paint_layers_material_row_is_canvas(row)) {
+    return BKE_paint_layers_material_row_narrowed(row) ?
+               channel != PAINT_MATERIAL_CHANNEL_ALPHA :
+               true;
   }
   const std::shared_ptr<const MaterialSourceResolve> resolve = BKE_paint_layers_source_resolve(
       *row.material);
@@ -381,6 +453,33 @@ uint64_t paint_layer_material_live_signature(const Material &ma, const MaterialP
 {
   uint64_t h = 1469598103934665603ull;
   const auto mix = [&](const uint64_t value) { h = h * 1000003u ^ value; };
+  if (BKE_paint_layers_material_row_is_canvas(row)) {
+    /* A canvas row lays only its maps: its group has no source shape to follow, so the signature
+     * names the scope and the reference alone. The subtree's content moves the row's source hash
+     * instead, which re-renders the maps; the graph reads them through the same images, so a
+     * rebuild would wire the same nodes back in.
+     *
+     * Why the content hash of the reference is not folded in and this is still complete: a source
+     * edit fans out over every layered material in #bmain
+     * (#BKE_paint_layers_source_material_consumers, called from the editor's material update), the
+     * debounce of the ones that follow automatically is armed, and their tick re-renders the
+     * canvas rows from #bmain -- whether or not any evaluated copy of the consumer is alive. A
+     * consumer nobody evaluates gets its maps made fresh the moment something asks for one, since
+     * the render path never consults a depsgraph. No shape move can ride along on a content move
+     * either: the channel set a canvas row's group reads is the same whatever the source
+     * supplies (every channel but the alpha renders), and the maps it reads are the same
+     * datablocks re-filled in place, so the group the generator builds is the group it had. */
+    mix(0x5100u + uint64_t(row.material_scope));
+    mix(UUID(row.material_row_marker).hash());
+    if (row.bake != nullptr && row.bake->coverage != nullptr) {
+      /* The coverage map is read through a node the keyed map sync does not cover (the sync writes
+       * the colour maps' pointers, not the coverage one). A coverage map replaced by a render -- a
+       * new canvas shape makes a new datablock -- is therefore a rebuild, not a pointer write, or
+       * the group would keep reading the map the row no longer holds. */
+      mix(row.bake->coverage->id.session_uid);
+    }
+    return h;
+  }
   if (row.role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
     /* Two channels of the same kind of source (both plain values, say) differ in nothing else, but
      * the group inputs are named by the channel, so the generated graph does. */

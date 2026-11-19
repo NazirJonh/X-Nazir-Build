@@ -47,8 +47,8 @@ struct Main;
 struct MaterialPaintChannelInfo;
 
 /**
- * The map of \a layer in \a channel at \a size, made when it is missing or of another size or
- * format.
+ * The map of \a layer in \a channel at \a size (and \a height tall, when the canvas is not square),
+ * made when it is missing or of another size or format.
  *
  * \param floatbuf: keep the values as float. A map of the wrong format cannot be reused: the pixel
  *                  writers index one buffer or the other, and a byte map read as float (or back)
@@ -56,6 +56,9 @@ struct MaterialPaintChannelInfo;
  * \param object_num: the objects the map serves; non-zero makes it a UDIM map.
  * \param tile_numbers: the UDIM tiles a tiled map has to hold. Empty means the single-tile scheme,
  *                      1001 + index for each object (see #PaintLayersBakeTarget::uv_tiles).
+ * \param height: the map's height, or zero for the square \a size. A canvas Material row with a
+ *                 non-square canvas hands its canvas height here; the value buffers the writers
+ *                 take are laid out at the map's own width and height.
  */
 Image *bake_service_image(Main &bmain,
                           MaterialPaintLayer &layer,
@@ -64,7 +67,8 @@ Image *bake_service_image(Main &bmain,
                           bool is_color,
                           bool floatbuf,
                           int object_num,
-                          Span<int> tile_numbers = {});
+                          Span<int> tile_numbers = {},
+                          int height = 0);
 
 /** One render of an object's tile block: a UV tile and the image tile it is written to. */
 struct PaintLayersBakeTilePair {

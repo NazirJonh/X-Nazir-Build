@@ -108,6 +108,22 @@ namespace blender {
  * they do not, the old maps keep showing until the new ones land.
  * \{ */
 
+/**
+ * The content hash what \a layer's maps reflect of its source: the source whole for a FULL row
+ * (its node trees, remembered against the cheap update signal), the referenced row's subtree for a
+ * ROW one. Zero when the row reads no material or its marker names nothing.
+ */
+static uint64_t material_row_source_hash(const MaterialPaintLayer &layer)
+{
+  if (layer.material == nullptr) {
+    return 0;
+  }
+  if (BKE_paint_layers_material_row_narrowed(layer)) {
+    return BKE_paint_layers_source_row_content_hash(*layer.material, layer.material_row_marker);
+  }
+  return BKE_paint_layers_source_material_tree_hash_cached(*layer.material);
+}
+
 bool paint_layer_row_material_shown(const Material &ma, const MaterialPaintLayer &layer)
 {
   if (layer.bake == nullptr || layer.material == nullptr ||
@@ -214,11 +230,30 @@ bool BKE_paint_layers_material_row_stale(const Material &ma, const MaterialPaint
   if (layer.bake == nullptr || layer.material == nullptr) {
     return true;
   }
-  const uint64_t full = BKE_paint_layers_source_material_tree_hash_cached(*layer.material);
+  const uint64_t full = material_row_source_hash(layer);
   uint32_t current[2];
   bake_source_hash_split(full, current);
   if (current[0] == 0 && current[1] == 0) {
     return true;
+  }
+  if (BKE_paint_layers_material_row_is_canvas(layer)) {
+    /* A canvas row has no Normal-only form: the render covers the source's whole content (the
+     * referenced row's for a narrowed one, the whole material's otherwise), so a source that moved
+     * on is stale against the maps whatever the row's channels are. A pixel edit of what the
+     * render reads is the subscription's answer. */
+    if (current[0] != layer.bake->source_hash[0] || current[1] != layer.bake->source_hash[1]) {
+      return true;
+    }
+    std::lock_guard lock(bake_runtime_mutex());
+    const BakeMaterialRuntime *runtime = bake_runtime().lookup_ptr(ma.id.session_uid);
+    if (runtime != nullptr) {
+      for (const BakeLayerSubscription &entry : runtime->layers) {
+        if (BLI_uuid_equal(entry.marker, layer.marker) && entry.changed) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
   /* The stamp always holds the full hash, whatever state the editor is in, so closing an Image
    * Editor does not make a row look edited. A full hash that moved is still no reason to render
@@ -261,11 +296,14 @@ void BKE_paint_layers_material_bake_stamp_get(const Material &ma,
                                               uint32_t r_source_hash[2])
 {
   BKE_paint_layers_bake_hash(ma, layer, r_hash);
-  const uint64_t full = layer.material != nullptr ?
-                            BKE_paint_layers_source_material_tree_hash_cached(*layer.material) :
-                            0;
+  const uint64_t full = material_row_source_hash(layer);
   bake_source_hash_split(full, r_source_hash);
   if (full == 0) {
+    return;
+  }
+  if (BKE_paint_layers_material_row_is_canvas(layer)) {
+    /* A canvas render has no Normal half: the row's whole content is one render, so there is
+     * nothing to remember against a partial start. */
     return;
   }
   /* What the Normal reads at the start of the render, kept against the full hash it goes with:
@@ -345,6 +383,15 @@ bool BKE_paint_layers_material_row_due(const Material &ma, const MaterialPaintLa
   if (!BKE_paint_layers_material_row_needs_render(ma, layer)) {
     return false;
   }
+  /* A row that follows its source manually waits for the Update Now button: an out-of-date source
+   * only marks the row stale for the status line, and no automatic render follows. A row with no
+   * maps yet keeps the rule its bake mode gives it: its first render is not an update of anything.
+   */
+  if (layer.source_refresh == MA_PAINT_LAYER_SOURCE_REFRESH_MANUAL &&
+      paint_layer_row_material_shown(ma, layer))
+  {
+    return false;
+  }
   /* Maps of preview quality are current for an edited row as long as they are of the side the
    * material asks for now, and due to be replaced once it is left or that side changed. Maps of the
    * row's own size are never replaced by a preview before an edit asks for one. */
@@ -377,6 +424,55 @@ bool BKE_paint_layers_material_row_due(const Material &ma, const MaterialPaintLa
   return true;
 }
 
+PaintLayerSourceStatus BKE_paint_layers_material_source_status(const Material &ma,
+                                                              const MaterialPaintLayer &layer)
+{
+  if (layer.source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
+    return MA_PAINT_LAYER_SOURCE_STATUS_OK;
+  }
+  /* Only a marker that named a row and no longer resolves is "gone". A narrowed row that has not
+   * picked a reference yet names nothing to be gone: the panel asks for a row instead. */
+  if (layer.material != nullptr && BKE_paint_layers_material_row_narrowed(layer) &&
+      !BLI_uuid_is_nil(layer.material_row_marker) &&
+      BKE_paint_layers_source_row_find(*layer.material, layer.material_row_marker) == nullptr)
+  {
+    return MA_PAINT_LAYER_SOURCE_STATUS_SOURCE_GONE;
+  }
+  if (BKE_paint_layers_material_canvas_refused(ma, layer)) {
+    return MA_PAINT_LAYER_SOURCE_STATUS_TOO_LARGE;
+  }
+  /* A row with no maps yet has nothing to be behind: its first render is pending, not stale, and
+   * "Source changed" here would warn on every freshly added correction. A row that names no source
+   * has nothing to compare against either; the panel has its own state for that. */
+  if (layer.material == nullptr || layer.bake == nullptr) {
+    return MA_PAINT_LAYER_SOURCE_STATUS_OK;
+  }
+  if (BKE_paint_layers_bake_scheduled_get(ma)) {
+    return MA_PAINT_LAYER_SOURCE_STATUS_UPDATING;
+  }
+  if (BKE_paint_layers_material_row_stale(ma, layer)) {
+    return MA_PAINT_LAYER_SOURCE_STATUS_STALE;
+  }
+  return MA_PAINT_LAYER_SOURCE_STATUS_OK;
+}
+
+const char *BKE_paint_layers_material_source_status_text(const PaintLayerSourceStatus status)
+{
+  switch (status) {
+    case MA_PAINT_LAYER_SOURCE_STATUS_OK:
+      return "";
+    case MA_PAINT_LAYER_SOURCE_STATUS_UPDATING:
+      return "Updating...";
+    case MA_PAINT_LAYER_SOURCE_STATUS_STALE:
+      return "Source changed";
+    case MA_PAINT_LAYER_SOURCE_STATUS_TOO_LARGE:
+      return "Canvas too large";
+    case MA_PAINT_LAYER_SOURCE_STATUS_SOURCE_GONE:
+      return "The source row is gone";
+  }
+  return "";
+}
+
 bool BKE_paint_layers_material_row_preview_active(const Material &ma,
                                                   const MaterialPaintLayer &layer)
 {
@@ -385,17 +481,146 @@ bool BKE_paint_layers_material_row_preview_active(const Material &ma,
          BKE_paint_layers_preview_wanted(ma);
 }
 
+/* The side a canvas Material row's canvas is capped at, below the 8192 the planner's own renders
+ * are capped at: a canvas row's synchronous render (a narrowed row's, and any canvas row until its
+ * render moves off the main thread) composites the source's maps and reads the source's memoized
+ * resolve on the main thread, and holds the UI for its whole allocation and fill. Three float
+ * buffers go with a 4096 render (the RGBA colour, the coverage the composite folds into and the
+ * common coverage), so 4096 costs a few hundred megabytes where 8192 would cost over two GiB.
+ *
+ * The one ceiling of a canvas row: every consumer reads it through
+ * #BKE_paint_layers_material_canvas_max_side, so raising it is a change here alone, and the callers
+ * do not move. Raise it only together with moving the canvas render to the job path -- a render
+ * above 4096 must not hold the main thread (see #BKE_paint_layers_material_bake_render_row). The
+ * planner's own #bake_size_clamp is about rows that are no canvas Material rows and stays apart. */
+static constexpr int PAINT_LAYER_CANVAS_MAX_SIDE = 4096;
+
+int BKE_paint_layers_material_canvas_max_side()
+{
+  return PAINT_LAYER_CANVAS_MAX_SIDE;
+}
+
+Span<int> BKE_paint_layers_material_canvas_size_presets()
+{
+  /* Ascending, Inherit first. The ceiling trims the tail, so raising it lengthens the list here
+   * alone -- every control reads this, not a private copy of the numbers. */
+  static int presets[] = {0, 512, 1024, 2048, 4096, 8192, 16384};
+  const int max_side = BKE_paint_layers_material_canvas_max_side();
+  int count = 1;
+  for (const int preset : presets) {
+    if (preset != 0 && preset <= max_side) {
+      count++;
+    }
+  }
+  return Span<int>(presets, count);
+}
+
+bool BKE_paint_layers_material_canvas_refused(const Material &ma, const MaterialPaintLayer &row)
+{
+  if (!BKE_paint_layers_material_row_is_canvas(row)) {
+    return false;
+  }
+  const PaintLayerCanvasSize canvas = BKE_paint_layers_material_canvas_size(ma, row);
+  return std::max(canvas.width, canvas.height) > BKE_paint_layers_material_canvas_max_side();
+}
+
+/** The side a Material row is rendered at when neither the row nor the material names one. Kept
+ * apart from #PAINT_LAYER_CANVAS_MAX_SIDE on purpose: the ceiling is what a render can hold, the
+ * default is what a row asks for; raising the ceiling must not silently enlarge every row. */
+static constexpr int PAINT_LAYER_CANVAS_DEFAULT_SIDE = 4096;
+
 int BKE_paint_layers_material_row_size(const Material &ma, const MaterialPaintLayer &layer)
 {
+  /* The long side of the row's maps, not necessarily the canvas width: a non-square canvas takes
+   * this as its longer dimension and derives the other from the aspect
+   * (#BKE_paint_layers_material_canvas_size). Anything that needs the actual width must ask the
+   * canvas, not this function.
+   *
+   * A canvas row's size is its own Canvas Size or, when that is Inherit, the side the source's own
+   * canvas is made at. The bake's size is not consulted: it is the side a render landed at, which
+   * the canvas paths set from this answer -- reading it back would make Inherit keep whatever the
+   * last explicit size was. */
+  if (BKE_paint_layers_material_row_is_canvas(layer)) {
+    if (layer.material_canvas_size > 0) {
+      return layer.material_canvas_size;
+    }
+    return ma.paint_layers_image_size > 0 ? int(ma.paint_layers_image_size) :
+                                            PAINT_LAYER_CANVAS_DEFAULT_SIDE;
+  }
   if (layer.bake != nullptr && layer.bake->size > 0) {
     return layer.bake->size;
   }
-  return ma.paint_layers_image_size > 0 ? int(ma.paint_layers_image_size) : 4096;
+  return ma.paint_layers_image_size > 0 ? int(ma.paint_layers_image_size) :
+                                          PAINT_LAYER_CANVAS_DEFAULT_SIDE;
 }
 
 bool BKE_paint_layers_material_row_is_preview(const MaterialPaintLayer &layer)
 {
   return layer.bake != nullptr && layer.bake->preview_side16 != 0;
+}
+
+PaintLayerCanvasSize BKE_paint_layers_material_canvas_size(const Material &ma,
+                                                           const MaterialPaintLayer &layer)
+{
+  /* The long side is the row's size (its own choice, or the side the material's layers are made
+   * at); the aspect decides what the other side is. The floor is the smallest canvas a bake makes,
+   * as the synchronous render used to clamp to; the ceiling is not applied here (the render paths
+   * refuse a larger canvas, see #BKE_paint_layers_material_canvas_max_side). */
+  const int side = std::max(BKE_paint_layers_material_row_size(ma, layer), 16);
+  PaintLayerCanvasSize size;
+  size.width = side;
+  size.height = side;
+  /* Only a narrowed row chooses an aspect: it renders the referenced row's content on the main
+   * thread, whose height the sync render carries. A FULL row's canvas is the source material's own
+   * square one (Material::paint_layers_image_size is one side), and its render still runs through
+   * the square job path, so a non-square field would name a canvas the render does not make. A
+   * Full-Material aspect waits for that render to carry a height as well. */
+  if (!BKE_paint_layers_material_row_narrowed(layer)) {
+    return size;
+  }
+  if (layer.material_canvas_aspect == MA_PAINT_LAYER_CANVAS_ASPECT_CUSTOM) {
+    /* The explicit width and height; a side left at zero keeps the row's size there. */
+    size.width = (layer.material_canvas_width > 0) ?
+                     std::max(int(layer.material_canvas_width), 16) :
+                     side;
+    size.height =
+        (layer.material_canvas_height > 0) ? std::max(int(layer.material_canvas_height), 16) : side;
+    return size;
+  }
+  if (layer.material_canvas_aspect == MA_PAINT_LAYER_CANVAS_ASPECT_SOURCE) {
+    /* The ratio of what the row reads: the referenced row's content, whose render this row's
+     * canvas is. The row's size is the canvas's long side and the source gives the ratio, so a
+     * 2:1 reference read at 4096 makes a 4096 x 2048 canvas -- the same proportions, scaled to the
+     * side the user asked for, never stretched. A walk that cannot say (no referenced row, no
+     * bottom layer to take dimensions from) keeps the square. */
+    if (layer.material != nullptr) {
+      const MaterialPaintLayer *referenced = BKE_paint_layers_source_row_find(
+          *layer.material, layer.material_row_marker);
+      if (referenced != nullptr) {
+        int width = 0;
+        int height = 0;
+        if (BKE_paint_layers_row_dimensions(*layer.material,
+                                            *referenced,
+                                            PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                            width,
+                                            height) &&
+            width > 0 && height > 0)
+        {
+          if (width >= height) {
+            size.width = side;
+            size.height = int(std::max<int64_t>(1, (int64_t(side) * height + width - 1) / width));
+          }
+          else {
+            size.height = side;
+            size.width = int(std::max<int64_t>(1, (int64_t(side) * width + height - 1) / height));
+          }
+        }
+      }
+    }
+    return size;
+  }
+  /* A square canvas of a narrowed row: the row's size alone. */
+  return size;
 }
 
 int BKE_paint_layers_preview_size_get(const Material &ma, const int final_size)
@@ -612,13 +837,32 @@ void BKE_paint_layers_source_material_consumers(Main &bmain,
     bool reads = false;
     BKE_paint_layers_foreach_source_row(static_cast<const Material &>(ma),
                                         [&](const MaterialPaintLayer &row) {
-                                          reads = row.material == &source;
+                                          reads = BKE_paint_layers_material_row_reads(row, source);
                                           return !reads;
                                         });
     if (reads) {
       r_consumers.append(&ma);
     }
   }
+}
+
+bool BKE_paint_layers_material_row_reads(const MaterialPaintLayer &layer, const Material &source)
+{
+  return paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE) &&
+         layer.material == &source;
+}
+
+bool BKE_paint_layers_source_material_has_auto_consumer(const Material &consumer,
+                                                        const Material &source)
+{
+  bool auto_reads = false;
+  BKE_paint_layers_foreach_source_row(
+      static_cast<const Material &>(consumer), [&](const MaterialPaintLayer &row) {
+        auto_reads = BKE_paint_layers_material_row_reads(row, source) &&
+                     row.source_refresh == MA_PAINT_LAYER_SOURCE_REFRESH_AUTO;
+        return !auto_reads;
+      });
+  return auto_reads;
 }
 
 bool BKE_paint_layers_bake_outstanding(const Material &ma)
@@ -664,7 +908,8 @@ void BKE_paint_layers_material_bake_apply(Main & /*bmain*/,
                                           MaterialPaintLayer &layer,
                                           const int size,
                                           const Span<int> channels,
-                                          const Span<Image *> images)
+                                          const Span<Image *> images,
+                                          const int size_y)
 {
   if (!paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE) || size <= 0 ||
       channels.size() != images.size() || !bake_row_owned(ma, layer))
@@ -672,7 +917,14 @@ void BKE_paint_layers_material_bake_apply(Main & /*bmain*/,
     return;
   }
   MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(layer);
+  /* `size` is the canvas width the maps were made at, `size_y` its height: the two are written
+   * together so a reader never sees a width left over from the previous shape. */
+  BLI_assert(size > 0 && size_y >= 0);
   bake->size = size;
+  /* A square canvas keeps the height at zero, the shape every row that is no canvas Material row
+   * has always had; the maps' own dimensions decide the reads, so the field is a record, not a
+   * rule. */
+  bake->size_y = int16_t((size_y > 0 && size_y != size) ? size_y : 0);
   Image *alpha = nullptr;
   Vector<bool> kept(PAINT_MATERIAL_CHANNEL_NUM, false);
   for (const int64_t i : channels.index_range()) {
@@ -704,6 +956,184 @@ void BKE_paint_layers_material_bake_apply(Main & /*bmain*/,
   bake->hash[1] = hash[1];
   BKE_paint_layers_bake_subscribe(ma, layer);
   DEG_id_tag_update(&ma.id, ID_RECALC_SHADING);
+}
+
+/* The side a canvas Material row's canvas is capped at lives with
+ * #BKE_paint_layers_material_canvas_max_side, next to the row size it bounds. */
+
+/** The channel id #bake_service_image uses for a row's coverage map. Not a material channel: it is
+ * the alpha entry of #BKE_paint_layers_material_bake_apply, spelled here so the sentinel has a
+ * name. */
+static constexpr int CANVAS_ROW_COVERAGE_CHANNEL = -1;
+
+/* TODO: render off the main thread; the buffers above are why the ceiling is 4096 (see
+ * #PAINT_LAYER_CANVAS_MAX_SIDE) -- moving this to a job is the extension point. */
+
+/** The canvas ceiling's verdict for a row about to render: the one refusal test lives in BKE. */
+static bool canvas_row_canvas_size_check(const Material &ma, const MaterialPaintLayer &row)
+{
+  return BKE_paint_layers_material_canvas_refused(ma, row);
+}
+
+/** The common coverage of the row's content, the way a planner bake folds the channels' own: the
+ * strongest content a texel carries and the coverage it is carried with. */
+static void canvas_row_fold_common_coverage(MutableSpan<float> common,
+                                            const Span<float> color,
+                                            const Span<float> coverage)
+{
+  for (const int64_t i : IndexRange(common.size())) {
+    const float content = color[i * 4 + 3];
+    if (content > 0.002f) {
+      common[i] = std::max(common[i], clamp_f(coverage[i] / content, 0.0f, 1.0f));
+    }
+  }
+}
+
+/**
+ * Render every channel \a row takes from \a referenced into \a color / \a coverage, mint the maps
+ * and append them to \a r_channels / \a r_images. \a r_common is made when the first channel lands,
+ * so a row with nothing to render pays for one buffer, not three.
+ *
+ * The referenced row is rendered as it looks: its mask and its opacity folded in, the result a
+ * caller of "Use Row Result" would get, laid once into the row's maps. Its corrections render
+ * through the same isolated-group formula a planner bake of the row would.
+ *
+ * \return whether any channel was rendered.
+ */
+static bool canvas_row_channels_render(Main &bmain,
+                                       Material &ma,
+                                       MaterialPaintLayer &row,
+                                       const MaterialPaintLayer &referenced,
+                                       const int size,
+                                       const int canvas_height,
+                                       const MutableSpan<float> color,
+                                       const MutableSpan<float> coverage,
+                                       Vector<float> &r_common,
+                                       Vector<int> &r_channels,
+                                       Vector<Image *> &r_images)
+{
+  /* The row is rendered whole: its corrections and mask are folded in by the render node. */
+  constexpr bool whole_row = true;
+  bool any_channel = false;
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    const int channel = int(info.channel);
+    if (!BKE_paint_layers_material_channel_render_wanted(ma, row, channel)) {
+      continue;
+    }
+    if (!BKE_paint_layers_bake_render_node(*row.material,
+                                           referenced,
+                                           channel,
+                                           size,
+                                           color.data(),
+                                           coverage.data(),
+                                           nullptr,
+                                           nullptr,
+                                           {},
+                                           whole_row,
+                                           canvas_height))
+    {
+      continue;
+    }
+    Image *color_image = bake_service_image(bmain,
+                                            row,
+                                            channel,
+                                            size,
+                                            info.is_color,
+                                            bake_channel_needs_float(row, info),
+                                            0,
+                                            {},
+                                            canvas_height);
+    if (color_image == nullptr) {
+      continue;
+    }
+    if (r_common.is_empty()) {
+      r_common = Vector<float>(int64_t(size) * canvas_height, 0.0f);
+    }
+    bake_write_image(*color_image, color.data(), info.is_color, nullptr);
+    r_channels.append(channel);
+    r_images.append(color_image);
+    canvas_row_fold_common_coverage(r_common, color, coverage);
+    any_channel = true;
+  }
+  return any_channel;
+}
+
+bool BKE_paint_layers_material_bake_render_row(Main &bmain, Material &ma, MaterialPaintLayer &row)
+{
+  if (!paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_SOURCE) || row.material == nullptr ||
+      !BKE_paint_layers_material_row_narrowed(row) || !bake_row_owned(ma, row))
+  {
+    return false;
+  }
+  uint32_t hash[2];
+  uint32_t source_hash[2];
+  BKE_paint_layers_material_bake_stamp_get(ma, row, hash, source_hash);
+  const MaterialPaintLayer *referenced = BKE_paint_layers_source_row_find(*row.material,
+                                                                         row.material_row_marker);
+  if (referenced == nullptr) {
+    /* The marker names nothing: remembered as a failure, so no update starts the same refused
+     * render again. The maps keep what they were last made from, and the status says the source is
+     * gone. The refusal is cheap, and this render has no preview form, so the failure is recorded
+     * at the full size only: while the row is being edited and a preview is wanted, #row_due keeps
+     * finding the failure not its own and lands here once per update -- a stamped refusal, never a
+     * render. */
+    BKE_paint_layers_material_bake_land(ma, row.marker, hash, source_hash, false, 0);
+    return false;
+  }
+  /* The canvas as the row asked for it: the requested size comes back as it is, and a canvas
+   * longer than the ceiling refuses the render instead of silently clamping it -- "Canvas too
+   * large" is the honest status, a quietly resized canvas is not. The refusal is remembered the
+   * way a missing marker is, so an update does not start the same refused render again. */
+  if (canvas_row_canvas_size_check(ma, row)) {
+    BKE_paint_layers_material_bake_land(ma, row.marker, hash, source_hash, false, 0);
+    return false;
+  }
+  const PaintLayerCanvasSize canvas = BKE_paint_layers_material_canvas_size(ma, row);
+  const int size = canvas.width;
+  const int canvas_height = canvas.height;
+  /* The buffers are allocated once per call and reused between the channels; the alpha channel of
+   * the colour buffer is the content alpha, and the coverage is that alpha laid by the referenced
+   * row's mask and opacity -- a correction's alpha is the content alpha of what it corrects, not a
+   * mask of its own. */
+  Vector<float> color(int64_t(size) * canvas_height * 4);
+  Vector<float> coverage(int64_t(size) * canvas_height);
+  Vector<float> common;
+  Vector<int> channels;
+  Vector<Image *> images;
+  if (!canvas_row_channels_render(bmain,
+                                  ma,
+                                  row,
+                                  *referenced,
+                                  size,
+                                  canvas_height,
+                                  color,
+                                  coverage,
+                                  common,
+                                  channels,
+                                  images))
+  {
+    BKE_paint_layers_material_bake_land(ma, row.marker, hash, source_hash, false, 0);
+    return false;
+  }
+  if (Image *coverage_image = bake_service_image(bmain,
+                                                 row,
+                                                 CANVAS_ROW_COVERAGE_CHANNEL,
+                                                 size,
+                                                 false,
+                                                 false,
+                                                 0,
+                                                 {},
+                                                 canvas_height))
+  {
+    bake_write_coverage_image(*coverage_image, common.data(), nullptr);
+    /* The alpha entry of #BKE_paint_layers_material_bake_apply is the row's coverage. */
+    channels.append(PAINT_MATERIAL_CHANNEL_ALPHA);
+    images.append(coverage_image);
+  }
+  BKE_paint_layers_material_bake_apply(
+      bmain, ma, row, size, channels, images, canvas_height);
+  BKE_paint_layers_material_bake_land(ma, row.marker, hash, source_hash, true, 0);
+  return true;
 }
 
 bool BKE_paint_layers_material_bake_land(Material &ma,

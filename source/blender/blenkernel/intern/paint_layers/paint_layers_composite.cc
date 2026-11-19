@@ -1416,8 +1416,11 @@ static bool composite_effect_source_describe(const Material &ma,
     correction.iuser = (source.kind == PaintLayerMaterialSourceKind::LiveImage) ? source.iuser :
                                                                                   nullptr;
     /* The source is read at the correction's UV, as the generator's source wrapper does and as
-     * a Material row's map is: the Image Editor's composite and the gizmo go through this. */
-    composite_mapping_describe(ma, effect, channel, correction.mapping, tile_number, painted_object);
+     * a Material row's map is: the Image Editor's composite and the gizmo go through this. The
+     * image is handed over too, so a projected canvas correction with FIT_ASPECT takes the
+     * canvas's own width and height, the way the generated graph reads its map. */
+    composite_mapping_describe(
+        ma, effect, channel, correction.mapping, tile_number, painted_object, source.image);
   }
   if (coverage.kind == PaintLayerMaterialCoverageKind::LiveConstant) {
     correction.opacity *= clamp_f(coverage.constant, 0.0f, 1.0f);
@@ -3378,11 +3381,17 @@ uint64_t paint_layer_mask_prefix_projection_hash(const Material &ma,
     }
     const MaterialPaintLayerChannel *record = paint_layer_channel_find(
         item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    /* A canvas Material mask item owns no record: its projection reads the canvas map its bake
+     * holds, so that image is what the aspect and the tiled read are hashed against. */
+    const Image *item_image =
+        (record != nullptr) ?
+            record->image :
+            paint_layer_material_canvas_image(ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
     PaintMaterialCompositeProjection projection;
     composite_projection_describe(ma,
                                   item,
                                   tile_number,
-                                  record != nullptr ? record->image : nullptr,
+                                  item_image,
                                   painted_object,
                                   projection);
     if (projection.present) {
@@ -3400,11 +3409,16 @@ uint64_t paint_layer_row_projection_hash(const Material &ma,
                                          PaintLayerSurfaceRef painted_object)
 {
   const MaterialPaintLayerChannel *record = paint_layer_channel_find(row, channel);
+  /* A canvas Material row owns no record: its projection reads the canvas map its bake holds, the
+   * same image the composer's source describe takes. */
+  const Image *row_image =
+      (record != nullptr) ? record->image :
+                            paint_layer_material_canvas_image(ma, row, channel);
   PaintMaterialCompositeProjection projection;
   composite_projection_describe(ma,
                                 row,
                                 tile_number,
-                                record != nullptr ? record->image : nullptr,
+                                row_image,
                                 painted_object,
                                 projection);
   return projection.present ? composite_projection_hash(1, projection) : 0;
@@ -3651,11 +3665,15 @@ bool BKE_paint_layers_bake_render_node(
     const int *dst_rect,
     const std::shared_ptr<const PaintMaterialCompositeSurface> &surface,
     const PaintLayerTileContext &context,
-    const bool whole_row)
+    const bool whole_row,
+    const int out_height)
 {
   PaintLayerSurfaceRef painted_object = context.painted_object;
   const int tile_number = context.tile_number;
-  if (size <= 0 || r_color_rgba == nullptr || r_coverage_gray == nullptr) {
+  /* The result's own shape: a square `size` for every caller that asks no height, the caller's
+   * canvas for a non-square one. The `size` stays the width of the result either way. */
+  const int result_height = (out_height > 0) ? out_height : size;
+  if (size <= 0 || result_height <= 0 || r_color_rgba == nullptr || r_coverage_gray == nullptr) {
     return false;
   }
   /* A subtree whose generators the bake cannot evaluate is never a cache. */
@@ -3713,23 +3731,23 @@ bool BKE_paint_layers_bake_render_node(
    * approximate while the drag lasts; the full bake is owed once it ends. */
   int eval_width = 0;
   int eval_height = 0;
-  if (dst_rect == nullptr && (width > size || height > size) &&
+  if (dst_rect == nullptr && (width > size || height > result_height) &&
       BKE_paint_layers_bake_drag_is_active(ma.id.session_uid))
   {
     eval_width = min_ii(width, size);
-    eval_height = min_ii(height, size);
+    eval_height = min_ii(height, result_height);
     width = eval_width;
     height = eval_height;
   }
-  /* The rectangle of the `size`-square result to produce, and the source pixels it samples. A full
-   * render produces all of it; a partial re-bake passes the changed tile so the composite runs over
-   * that source rectangle alone. */
-  int dx0 = 0, dy0 = 0, dx1 = size, dy1 = size;
+  /* The rectangle of the `size` x `result_height` result to produce, and the source pixels it
+   * samples. A full render produces all of it; a partial re-bake passes the changed tile so the
+   * composite runs over that source rectangle alone. */
+  int dx0 = 0, dy0 = 0, dx1 = size, dy1 = result_height;
   if (dst_rect != nullptr) {
     dx0 = clamp_i(dst_rect[0], 0, size);
-    dy0 = clamp_i(dst_rect[1], 0, size);
+    dy0 = clamp_i(dst_rect[1], 0, result_height);
     dx1 = clamp_i(dst_rect[2], 0, size);
-    dy1 = clamp_i(dst_rect[3], 0, size);
+    dy1 = clamp_i(dst_rect[3], 0, result_height);
   }
   if (dx0 >= dx1 || dy0 >= dy1) {
     return false;
@@ -3738,8 +3756,10 @@ bool BKE_paint_layers_bake_render_node(
    * pixel of the rectangle map to the source span that has to be composited. */
   const int sx0 = int(int64_t(dx0) * width / size);
   const int sx1 = (dx1 >= size) ? width : int((int64_t(dx1) * width + size - 1) / size);
-  const int sy0 = int(int64_t(dy0) * height / size);
-  const int sy1 = (dy1 >= size) ? height : int((int64_t(dy1) * height + size - 1) / size);
+  const int sy0 = int(int64_t(dy0) * height / result_height);
+  const int sy1 = (dy1 >= result_height) ? height :
+                                           int((int64_t(dy1) * height + result_height - 1) /
+                                               result_height);
   rcti area;
   BLI_rcti_init(&area, max_ii(0, sx0), min_ii(width, sx1), max_ii(0, sy0), min_ii(height, sy1));
   const int area_w = BLI_rcti_size_x(&area);
@@ -3775,7 +3795,7 @@ bool BKE_paint_layers_bake_render_node(
   }
   /* Resample only the requested rectangle: each output pixel reads the composited source span. */
   for (int y = dy0; y < dy1; y++) {
-    const int src_y = min_ii(int(int64_t(y) * height / size), height - 1);
+    const int src_y = min_ii(int(int64_t(y) * height / result_height), height - 1);
     const int local_y = src_y - area.ymin;
     for (int x = dx0; x < dx1; x++) {
       const int src_x = min_ii(int(int64_t(x) * width / size), width - 1);

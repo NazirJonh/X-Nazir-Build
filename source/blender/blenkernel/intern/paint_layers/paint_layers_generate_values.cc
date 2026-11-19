@@ -1018,6 +1018,14 @@ bool paint_layers_maps_sync(Material &ma, Main &bmain)
       }
       const MaterialPaintLayerChannel *record = paint_layer_channel_find(*layer, channel);
       Image *wanted = (record != nullptr) ? record->image : nullptr;
+      if (wanted == nullptr &&
+          paint_layer_kind_has_flag(*layer, PAINT_LAYER_KIND_READS_SOURCE) &&
+          BKE_paint_layers_material_row_is_canvas(*layer))
+      {
+        /* A canvas Material row (a row, a correction, a mask item) shows the canvas map its bake
+         * holds; the role decides which channel that map is rendered into. */
+        wanted = paint_layer_material_canvas_image(ma, *layer, channel);
+      }
       if (wanted == nullptr && layer->role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
         /* A mask effect item shows the grey its bake holds and owns no map of its own. */
         wanted = paint_layer_mask_effect_bake_map(ma, *layer);

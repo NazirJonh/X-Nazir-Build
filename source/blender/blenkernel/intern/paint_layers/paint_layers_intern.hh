@@ -200,6 +200,17 @@ PaintLayerMaterialCoverage paint_layer_material_coverage_source(
     PaintLayerMaterialUse use = PaintLayerMaterialUse::Graph);
 
 /**
+ * The baked canvas map a canvas Material row (#BKE_paint_layers_material_row_is_canvas) reads in
+ * the colour \a channel: the map its render made, or null while nothing is baked. The role decides
+ * which map that is -- a mask item keeps its grey in the Base Color record of its own bake, a row
+ * and a correction read the channel they are asked for -- so a caller of the composer or the
+ * generator asks here instead of reading #MaterialPaintLayerBake::images by hand.
+ */
+Image *paint_layer_material_canvas_image(const Material &ma,
+                                         const MaterialPaintLayer &row,
+                                         const int channel);
+
+/**
  * Whether the Material row \a row takes part in the colour \a channel: it has a source in the
  * channel (#paint_layer_material_channel_source) and its coverage is ready. The one test for the
  * generator and the CPU composite.

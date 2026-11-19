@@ -2652,6 +2652,9 @@ void material_bake_layered_rows_ensure(Main &bmain,
 {
   /* The shader tree of a one-way merge has been rebuilt by now: the maps it held can go. */
   BKE_paint_layers_orphan_maps_purge(bmain);
+  /* The plan asks the narrowed-row content hashes against the stack as it is now: the memo the
+   * redraws share starts empty here, whatever edits or loads put the stack where it is. */
+  BKE_paint_layers_source_row_hash_memo_drop();
   wmWindowManager *wm = static_cast<wmWindowManager *>(bmain.wm.first);
   if (wm == nullptr || !BKE_paint_layers_is_layered(ma)) {
     return;
@@ -2680,14 +2683,49 @@ void material_bake_layered_rows_ensure(Main &bmain,
     if (!forced && !BKE_paint_layers_material_row_due(ma, *row)) {
       continue;
     }
+    /* A canvas row's canvas is the one place its ceiling applies: a canvas longer than it is
+     * refused with the too-large status, not silently resized -- the user asked for a canvas this
+     * render cannot hold, and a quiet clamp would show a smaller picture and call it current. The
+     * refusal is remembered the way a failed render is, so an update does not restart it. */
+    if (BKE_paint_layers_material_canvas_refused(ma, *row)) {
+      uint32_t hash[2];
+      uint32_t source_hash[2];
+      BKE_paint_layers_material_bake_stamp_get(ma, *row, hash, source_hash);
+      BKE_paint_layers_material_bake_land(ma, row->marker, hash, source_hash, false, 0);
+      continue;
+    }
     /* The side is the row's own choice; a fresh row takes the default. The structural hash covers
-     * it, so it is set before the state the render starts from is read. */
+     * it, so it is set before the state the render starts from is read. A canvas row whose canvas
+     * passed the ceiling fits it here, so the clamp is about the rows that are no canvas rows.
+     *
+     * A narrowed row is the exception: its map size is the canvas
+     * #BKE_paint_layers_material_row_size reports as a long side, while the render lands at the
+     * canvas's width. Writing the long side
+     * into the bake here would make the next pass see a different size every time the canvas is not
+     * square (a portrait SOURCE aspect, a CUSTOM canvas with width != height), clear the hash and
+     * re-render forever. Its size belongs to the canvas paths alone. The one exception is the
+     * row's first render: the bake structure that holds its maps is made through the size setter,
+     * so a narrowed row with none still gets one -- once, before it has anything to compare. */
+    const bool narrowed = BKE_paint_layers_material_row_narrowed(*row);
     const int size = bake_size_clamp(BKE_paint_layers_material_row_size(ma, *row));
-    if (BKE_paint_layers_bake_size_get(*row) != size) {
+    if ((!narrowed || row->bake == nullptr) && BKE_paint_layers_bake_size_get(*row) != size) {
       BKE_paint_layers_bake_size_set(ma, *row, size);
     }
     if (row->bake == nullptr) {
       /* The size could not be stored, so there is nothing to hand the maps to. */
+      continue;
+    }
+    /* A narrowed row renders here and now on the main thread: its content is the referenced row's
+     * render, which no source-graph render pipeline serves, so a \a blocking wish cannot be
+     * honored by handing the row to a job -- the pixels come back before this call returns, and
+     * the canvas they are made at is checked against its ceiling
+     * (#BKE_paint_layers_material_canvas_max_side) to keep the hold bounded. A due check has run
+     * above, so a row that follows its source manually waits for the forced renders (the Update
+     * Now button). */
+    if (narrowed) {
+      if (BKE_paint_layers_material_bake_render_row(bmain, ma, *row)) {
+        WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma.id);
+      }
       continue;
     }
     MaterialBakeRowLink link;
@@ -2726,6 +2764,18 @@ void material_bake_layered_rows_ensure(Main &bmain,
         if (!BKE_image_material_source_get(*existing, source) ||
             source.material != row->material || source.channel != channel_index)
         {
+          existing = nullptr;
+        }
+      }
+      if (existing != nullptr && BKE_paint_layers_material_row_is_canvas(*row)) {
+        /* A FULL canvas row's canvas is the row's own side: the job writes a smaller render into
+         * an existing buffer by scaling it, so an image made at another Canvas Size would keep its
+         * old resolution and the row would call it current at a size it was not made at. A new map
+         * is minted at the canvas the row asks for instead. */
+        int image_width = 0;
+        int image_height = 0;
+        BKE_image_get_size(existing, nullptr, &image_width, &image_height);
+        if (image_width != size || image_height != size) {
           existing = nullptr;
         }
       }

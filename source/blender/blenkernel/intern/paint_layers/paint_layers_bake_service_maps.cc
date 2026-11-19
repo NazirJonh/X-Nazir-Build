@@ -89,9 +89,13 @@ Image *bake_service_image(Main &bmain,
                           const bool is_color,
                           const bool floatbuf,
                           const int object_num,
-                          const Span<int> tile_numbers)
+                          const Span<int> tile_numbers,
+                          const int height)
 {
   const bool tiled = object_num > 0;
+  /* The shape the map is made at: a square `size` for every caller that asks no height, the
+   * caller's canvas for a non-square one (a canvas Material row's). */
+  const int map_height = (height > 0) ? height : size;
   /* The tiles a tiled map has to hold: the blocks' tiles, or one per object in the single-tile
    * scheme. The first one is created by the image itself and is always 1001 (the first block sits
    * at the origin of the map). */
@@ -101,11 +105,13 @@ Image *bake_service_image(Main &bmain,
   const int tile_num = tile_numbers.is_empty() ? object_num : int(tile_numbers.size());
   Image **slot = bake_service_slot(layer, channel);
   if (*slot != nullptr) {
-    int width = 0;
-    int height = 0;
-    BKE_image_get_size(*slot, nullptr, &width, &height);
+    int slot_width = 0;
+    int slot_height = 0;
+    BKE_image_get_size(*slot, nullptr, &slot_width, &slot_height);
     const bool tiled_ok = ((*slot)->source == IMA_SRC_TILED) == tiled;
-    if (width == size && height == size && bake_image_is_float(**slot) == floatbuf && tiled_ok) {
+    if (slot_width == size && slot_height == map_height &&
+        bake_image_is_float(**slot) == floatbuf && tiled_ok)
+    {
       if (!tiled) {
         return *slot;
       }
@@ -147,8 +153,17 @@ Image *bake_service_image(Main &bmain,
   const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
   /* The creation reference is the one the row holds: unlike #BKE_paint_layers_bake_set_map this
    * takes no user of its own. */
-  Image *image = BKE_image_add_generated(
-      &bmain, size, size, name, 32, floatbuf, IMA_GENTYPE_BLANK, black, false, !is_color, tiled);
+  Image *image = BKE_image_add_generated(&bmain,
+                                         size,
+                                         map_height,
+                                         name,
+                                         32,
+                                         floatbuf,
+                                         IMA_GENTYPE_BLANK,
+                                         black,
+                                         false,
+                                         !is_color,
+                                         tiled);
   if (image != nullptr) {
     image->alpha_mode = IMA_ALPHA_STRAIGHT;
     if (tiled) {

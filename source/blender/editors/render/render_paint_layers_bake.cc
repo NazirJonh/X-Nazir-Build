@@ -17,6 +17,7 @@
 #include "ED_paint_layers_bake.hh"
 #include "ED_undo.hh"
 
+#include "BLI_function_ref.hh"
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
 #include "BLI_map.hh"
@@ -702,6 +703,18 @@ void paint_layer_row_result_wait_free(uintptr_t /*uuid*/, void *user_data)
   MEM_delete(static_cast<PaintLayerRowResultWait *>(user_data));
 }
 
+/** Parse the string property \a prop of \a op into \a marker. An empty string leaves \a marker as
+ * it came in; a set string that does not parse makes this false and leaves it nil. */
+static bool paint_layer_row_marker_get(wmOperator *op, const char *prop, bUUID &marker)
+{
+  char str[UUID_STRING_SIZE];
+  RNA_string_get(op->ptr, prop, str);
+  if (str[0] == '\0') {
+    return true;
+  }
+  return BLI_uuid_parse_string(&marker, str);
+}
+
 wmOperatorStatus paint_layer_row_result_exec(bContext *C, wmOperator *op)
 {
   Material *owner = static_cast<Material *>(
@@ -721,11 +734,10 @@ wmOperatorStatus paint_layer_row_result_exec(bContext *C, wmOperator *op)
   /* The source is named by its marker, the row's stable identity, so a menu drawn before the stack
    * changed cannot end up picking another row. Without one the target is updated from the row it
    * was last made from. */
-  char source_marker_str[UUID_STRING_SIZE];
-  RNA_string_get(op->ptr, "source_marker", source_marker_str);
   bUUID source_marker = target->row_result_source;
-  if (source_marker_str[0] != '\0' && !BLI_uuid_parse_string(&source_marker, source_marker_str)) {
-    source_marker = {};
+  if (!paint_layer_row_marker_get(op, "source_marker", source_marker)) {
+    /* A set marker that does not parse names nothing: the stored one is let go of. */
+    source_marker = BLI_uuid_nil();
   }
   const MaterialPaintLayer *source = BLI_uuid_is_nil(source_marker) ?
                                          nullptr :
@@ -1206,5 +1218,335 @@ void MATERIAL_OT_paint_layers_bake_now(wmOperatorType *ot)
   /* No #OPTYPE_UNDO: this starts background computation, it makes no user-visible edit to undo. */
   ot->flag = OPTYPE_REGISTER;
 }
+
+bool paint_layer_source_update_now(Main &bmain, Material &ma, MaterialPaintLayer &row)
+{
+  if (row.source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
+    return false;
+  }
+  /* Forgetting the source hash makes the row stale (#BKE_paint_layers_material_bake_retry zeroes
+   * #MaterialPaintLayerBake::source_hash), which is what the forced render below asks for: Update
+   * Now renders even a row the source has not moved on of, for a user who wants the pixels re-made
+   * regardless. The row's scope decides only where the render runs: a narrowed one here on the
+   * main thread, a whole-material one through the source-graph job the ensure hands it to. */
+  BKE_paint_layers_material_bake_retry(ma, row);
+  material_bake_layered_rows_ensure(
+      bmain, ma, /*force_preview=*/false, Span<bUUID>{row.marker}, /*blocking=*/false);
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma.id);
+  return true;
+}
+
+bool paint_layer_source_update_now_poll(bContext *C)
+{
+  const Material *ma = static_cast<const Material *>(
+      CTX_data_pointer_get_type(C, "material", RNA_Material).data);
+  if (ma == nullptr) {
+    CTX_wm_operator_poll_msg_set(C, "No material");
+    return false;
+  }
+  if (!BKE_paint_layers_is_layered(*ma)) {
+    CTX_wm_operator_poll_msg_set(C, "No layered material");
+    return false;
+  }
+  return true;
+}
+
+wmOperatorStatus paint_layer_source_update_now_exec(bContext *C, wmOperator *op)
+{
+  Material *ma = static_cast<Material *>(
+      CTX_data_pointer_get_type(C, "material", RNA_Material).data);
+  Main *bmain = CTX_data_main(C);
+  if (ma == nullptr || bmain == nullptr || !BKE_paint_layers_is_layered(*ma)) {
+    BKE_report(op->reports, RPT_ERROR, "No layered material");
+    return OPERATOR_CANCELLED;
+  }
+  bUUID marker = BLI_uuid_nil();
+  if (!paint_layer_row_marker_get(op, "row_marker", marker)) {
+    BKE_report(op->reports, RPT_ERROR, "Not a row marker");
+    return OPERATOR_CANCELLED;
+  }
+  if (BLI_uuid_is_nil(marker)) {
+    /* No marker named: the active row is the one the panel shows. */
+    marker = BKE_paint_layers_active_get(*ma);
+    if (BLI_uuid_is_nil(marker)) {
+      BKE_report(op->reports, RPT_ERROR, "No active paint layer");
+      return OPERATOR_CANCELLED;
+    }
+  }
+  MaterialPaintLayer *row = BKE_paint_layers_find(*ma, marker);
+  if (row == nullptr || row->source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
+    BKE_report(op->reports, RPT_ERROR, "The active row does not read a material");
+    return OPERATOR_CANCELLED;
+  }
+  /* The body is shared with the Outliner's action button, so the two cannot drift apart. */
+  if (!paint_layer_source_update_now(*bmain, *ma, *row)) {
+    BKE_report(op->reports, RPT_ERROR, "The active row does not read a material");
+    return OPERATOR_CANCELLED;
+  }
+  return OPERATOR_FINISHED;
+}
+
+void MATERIAL_OT_paint_layer_source_update_now(wmOperatorType *ot)
+{
+  ot->name = "Update Now";
+  ot->idname = "MATERIAL_OT_paint_layer_source_update_now";
+  ot->description =
+      "Re-render the maps this row reads its source into now, whatever the update setting says";
+  ot->exec = paint_layer_source_update_now_exec;
+  ot->poll = paint_layer_source_update_now_poll;
+  /* No #OPTYPE_UNDO: this starts background computation, it makes no user-visible edit to undo.
+   * Internal: it only makes sense with the context the panel supplies (a material and its row), so
+   * it must not surface in the operator search (F3) where that context is absent. */
+  ot->flag = OPTYPE_REGISTER | OPTYPE_INTERNAL;
+
+  RNA_def_string(ot->srna,
+                 "row_marker",
+                 nullptr,
+                 UUID_STRING_SIZE,
+                 "Source Row",
+                 "Marker of the row to re-render; empty names the active row");
+}
+
+/* -------------------------------------------------------------------- */
+/** \name Compact source controls (Outliner correction rows)
+ * \{ */
+
+/**
+ * The row a compact source-control button names: its owner material by the session uid the row
+ * build stamped into the button (a pointer would stale between the build and the click) and the
+ * row itself by its marker. Only a row reading a material carries the controls.
+ */
+static MaterialPaintLayer *paint_layer_source_control_row_get(bContext &C,
+                                                              wmOperator *op,
+                                                              Material **r_ma)
+{
+  Main *bmain = CTX_data_main(&C);
+  if (bmain == nullptr) {
+    return nullptr;
+  }
+  bUUID marker = BLI_uuid_nil();
+  if (!paint_layer_row_marker_get(op, "marker", marker) || BLI_uuid_is_nil(marker)) {
+    return nullptr;
+  }
+  const uint32_t uid = uint32_t(RNA_int_get(op->ptr, "session_uid"));
+  for (Material &ma : bmain->materials) {
+    if (ma.id.session_uid != uid) {
+      continue;
+    }
+    if (!ID_IS_EDITABLE(&ma.id) || ID_IS_OVERRIDE_LIBRARY(&ma.id)) {
+      return nullptr;
+    }
+    MaterialPaintLayer *row = BKE_paint_layers_find(ma, marker);
+    if (row == nullptr || row->source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
+      return nullptr;
+    }
+    *r_ma = &ma;
+    return row;
+  }
+  return nullptr;
+}
+
+/**
+ * The value of the row's enum \a property, through RNA so the getter is the one the panel reads.
+ */
+static int paint_layer_source_control_value_get(Material &ma,
+                                                MaterialPaintLayer &row,
+                                                const char *property)
+{
+  PointerRNA ptr = RNA_pointer_create_discrete(&ma.id, RNA_MaterialPaintLayer, &row);
+  PropertyRNA *prop = RNA_struct_find_property(&ptr, property);
+  if (prop == nullptr || RNA_property_type(prop) != PROP_ENUM) {
+    return 0;
+  }
+  return RNA_property_enum_get(&ptr, prop);
+}
+
+/**
+ * Step the row's enum \a property through its RNA setter: the bake reset, the marker clearing and
+ * the tagging the setters do are the one place that logic lives, and the update callback is what
+ * arms the editor's render for the edited row.
+ */
+static bool paint_layer_source_control_value_set(bContext &C,
+                                                 Material &ma,
+                                                 MaterialPaintLayer &row,
+                                                 const char *property,
+                                                 const int value)
+{
+  PointerRNA ptr = RNA_pointer_create_discrete(&ma.id, RNA_MaterialPaintLayer, &row);
+  PropertyRNA *prop = RNA_struct_find_property(&ptr, property);
+  if (prop == nullptr || RNA_property_type(prop) != PROP_ENUM) {
+    return false;
+  }
+  RNA_property_enum_set(&ptr, prop, value);
+  RNA_property_update(&C, &ptr, prop);
+  return true;
+}
+
+/**
+ * The boilerplate every compact control shares: find the row the button names, ask \a next_value
+ * for the setting's next value and write it through RNA. A new control is its value function plus
+ * one call, not another copy of the row lookup and the RNA round trip.
+ */
+static wmOperatorStatus paint_layer_source_control_step(
+    bContext &C,
+    wmOperator *op,
+    const char *property,
+    const FunctionRef<int(const MaterialPaintLayer &)> next_value)
+{
+  Material *ma = nullptr;
+  MaterialPaintLayer *row = paint_layer_source_control_row_get(C, op, &ma);
+  if (row == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  return paint_layer_source_control_value_set(C, *ma, *row, property, next_value(*row)) ?
+             OPERATOR_FINISHED :
+             OPERATOR_CANCELLED;
+}
+
+wmOperatorStatus paint_layer_source_scope_toggle_exec(bContext *C, wmOperator *op)
+{
+  return paint_layer_source_control_step(
+      *C, op, "material_scope", [](const MaterialPaintLayer &row) {
+        return row.material_scope == MA_PAINT_LAYER_MATERIAL_SCOPE_ROW ?
+                   MA_PAINT_LAYER_MATERIAL_SCOPE_MATERIAL :
+                   MA_PAINT_LAYER_MATERIAL_SCOPE_ROW;
+      });
+}
+
+wmOperatorStatus paint_layer_source_canvas_toggle_exec(bContext *C, wmOperator *op)
+{
+  /* A narrowed row has no live form: the mode is a FULL row's choice, and the button is not drawn
+   * for it. */
+  Material *ma = nullptr;
+  MaterialPaintLayer *row = paint_layer_source_control_row_get(*C, op, &ma);
+  if (row == nullptr || BKE_paint_layers_material_row_narrowed(*row)) {
+    return OPERATOR_CANCELLED;
+  }
+  const int next = paint_layer_source_control_value_get(*ma, *row, "material_canvas_mode") ==
+                           MA_PAINT_LAYER_CANVAS_MODE_CANVAS ?
+                       MA_PAINT_LAYER_CANVAS_MODE_LIVE :
+                       MA_PAINT_LAYER_CANVAS_MODE_CANVAS;
+  return paint_layer_source_control_value_set(*C, *ma, *row, "material_canvas_mode", next) ?
+             OPERATOR_FINISHED :
+             OPERATOR_CANCELLED;
+}
+
+/** The next side of the Canvas Size ladder the ceiling covers, cycling back to Inherit. */
+static int paint_layer_source_size_next(const int current)
+{
+  /* The ladder is BKE's, so the ceiling trims it in one place; this module only steps it. */
+  const Span<int> presets = BKE_paint_layers_material_canvas_size_presets();
+  bool found = false;
+  for (const int preset : presets) {
+    if (found) {
+      return preset;
+    }
+    found = preset == current;
+  }
+  if (found) {
+    /* The last side the ceiling offers: the ladder starts over at Inherit. */
+    return 0;
+  }
+  /* A hand-set size the ladder does not name: the first offered one is the next stop. */
+  return presets.size() > 1 ? presets[1] : 0;
+}
+
+wmOperatorStatus paint_layer_source_size_cycle_exec(bContext *C, wmOperator *op)
+{
+  Material *ma = nullptr;
+  MaterialPaintLayer *row = paint_layer_source_control_row_get(*C, op, &ma);
+  if (row == nullptr || !BKE_paint_layers_material_row_is_canvas(*row)) {
+    return OPERATOR_CANCELLED;
+  }
+  const int next = paint_layer_source_size_next(int(row->material_canvas_size));
+  return paint_layer_source_control_value_set(*C, *ma, *row, "material_canvas_size", next) ?
+             OPERATOR_FINISHED :
+             OPERATOR_CANCELLED;
+}
+
+wmOperatorStatus paint_layer_source_refresh_toggle_exec(bContext *C, wmOperator *op)
+{
+  return paint_layer_source_control_step(
+      *C, op, "source_refresh", [](const MaterialPaintLayer &row) {
+        return row.source_refresh == MA_PAINT_LAYER_SOURCE_REFRESH_MANUAL ?
+                   MA_PAINT_LAYER_SOURCE_REFRESH_AUTO :
+                   MA_PAINT_LAYER_SOURCE_REFRESH_MANUAL;
+      });
+}
+
+/** The properties every compact source control names its row and owner by. */
+static void paint_layer_source_control_props(wmOperatorType *ot)
+{
+  PropertyRNA *prop = RNA_def_int(ot->srna,
+                                  "session_uid",
+                                  0,
+                                  0,
+                                  0,
+                                  "Owner Session UID",
+                                  "Session uid of the material whose row the control edits",
+                                  0,
+                                  0);
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+  prop = RNA_def_string(ot->srna,
+                        "marker",
+                        nullptr,
+                        UUID_STRING_SIZE,
+                        "Row",
+                        "Marker of the row the control edits");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+}
+
+void MATERIAL_OT_paint_layer_source_scope_toggle(wmOperatorType *ot)
+{
+  ot->name = "Toggle Material Row Scope";
+  ot->idname = "MATERIAL_OT_paint_layer_source_scope_toggle";
+  ot->description =
+      "Switch the row between the whole material and one row of its stack";
+  ot->exec = paint_layer_source_scope_toggle_exec;
+  /* Internal: a control only makes sense on the row the button names, so it must not appear in the
+   * operator search (F3) where that context is absent. */
+  ot->flag = OPTYPE_UNDO | OPTYPE_INTERNAL;
+  paint_layer_source_control_props(ot);
+}
+
+void MATERIAL_OT_paint_layer_source_canvas_toggle(wmOperatorType *ot)
+{
+  ot->name = "Toggle Material Row Canvas";
+  ot->idname = "MATERIAL_OT_paint_layer_source_canvas_toggle";
+  ot->description =
+      "Switch the row between Live UV and a canvas it renders the source to";
+  ot->exec = paint_layer_source_canvas_toggle_exec;
+  /* Internal: a control only makes sense on the row the button names, so it must not appear in the
+   * operator search (F3) where that context is absent. */
+  ot->flag = OPTYPE_UNDO | OPTYPE_INTERNAL;
+  paint_layer_source_control_props(ot);
+}
+
+void MATERIAL_OT_paint_layer_source_size_cycle(wmOperatorType *ot)
+{
+  ot->name = "Cycle Material Row Canvas Size";
+  ot->idname = "MATERIAL_OT_paint_layer_source_size_cycle";
+  ot->description = "Step the row's canvas through the sizes the ceiling offers";
+  ot->exec = paint_layer_source_size_cycle_exec;
+  /* Internal: a control only makes sense on the row the button names, so it must not appear in the
+   * operator search (F3) where that context is absent. */
+  ot->flag = OPTYPE_UNDO | OPTYPE_INTERNAL;
+  paint_layer_source_control_props(ot);
+}
+
+void MATERIAL_OT_paint_layer_source_refresh_toggle(wmOperatorType *ot)
+{
+  ot->name = "Toggle Material Row Update";
+  ot->idname = "MATERIAL_OT_paint_layer_source_refresh_toggle";
+  ot->description =
+      "Switch the row between following its source and waiting for Update Now";
+  ot->exec = paint_layer_source_refresh_toggle_exec;
+  /* Internal: a control only makes sense on the row the button names, so it must not appear in the
+   * operator search (F3) where that context is absent. */
+  ot->flag = OPTYPE_UNDO | OPTYPE_INTERNAL;
+  paint_layer_source_control_props(ot);
+}
+
+/** \} */
 
 }  // namespace blender::ed::material_bake

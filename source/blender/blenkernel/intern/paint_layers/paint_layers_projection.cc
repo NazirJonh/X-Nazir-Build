@@ -224,13 +224,22 @@ static bool paint_layer_has_live_map(const MaterialPaintLayer &layer)
 
 /**
  * Whether \a layer's kind holds a map a projection can read. The projection wraps a map's lookup
- * exactly as the UV mapping does, so the support rules are the same, except that a Material row's
- * source graph is not wrapped for projection yet.
+ * exactly as the UV mapping does, so the support rules are the same. A canvas Material row reads
+ * its baked maps like an image, so it projects whatever its role is; a live row's source graph is
+ * not wrapped for projection, so it stays unprojected.
  */
 static bool paint_layer_projection_payload_supported(const Material &ma,
                                                      const MaterialPaintLayer &layer)
 {
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
+    if (BKE_paint_layers_material_row_is_canvas(layer)) {
+      /* A canvas row reads its baked maps like an image: the projection wraps that read for every
+       * role alike -- the role only decides which map is read (a row or a correction: the
+       * channel's map; a mask item: the grey its bake holds), never whether one can project. The
+       * maps are expected of any canvas row with a source, the way a Fill's Mapping is editable
+       * before its first texture. */
+      return layer.material != nullptr;
+    }
     /* The source wrapper rewrites every UV reader in a copied source tree; projecting that tree
      * needs the same rewrite once per face, which is a later step. */
     return false;
@@ -1028,6 +1037,13 @@ bool BKE_paint_layers_projection_set_object(Material &ma,
 const Image *BKE_paint_layers_projection_aspect_image(const Material &ma,
                                                       const MaterialPaintLayer &layer)
 {
+  /* A canvas Material row projects its baked canvas: the map its render made, the same image
+   * #paint_layer_material_canvas_image hands the composer and the generator. */
+  if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE) &&
+      BKE_paint_layers_material_row_is_canvas(layer))
+  {
+    return paint_layer_material_canvas_image(ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  }
   /* The same image predicate the payload support reads: a mask item projects its Base Color record,
    * a fill projects the first channel map it holds. */
   if (layer.role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {

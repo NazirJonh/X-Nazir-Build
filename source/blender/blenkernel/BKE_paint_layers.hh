@@ -2586,6 +2586,32 @@ bool BKE_paint_layers_set_source(Material &ma,
                                  eMaterialPaintLayerSource source);
 
 /**
+ * Switch a stack row between the two ways a Fill takes its channel content from: its own maps and
+ * values (#MA_PAINT_LAYER_SOURCE_CONSTANT, \a use_material false) and another material
+ * (#MA_PAINT_LAYER_SOURCE_MATERIAL, \a use_material true). The records and their maps stay in the
+ * row through both switches, so going to a material and back restores the Fill. The picked material
+ * does not: it is let go when the row becomes a Fill again (with its scope and row marker), because
+ * the ID walk reports the pointer of any row and a Fill must not depend on a material it does not
+ * read. A row that was added as a Material row has no records and gets a Base Color one when it
+ * becomes a Fill. Refused for a folder and for any other source.
+ */
+bool BKE_paint_layers_fill_source_set(Material &ma, MaterialPaintLayer *layer, bool use_material);
+
+/**
+ * The one entry point for changing what \a layer reads: routes the Fill <-> Material flip to
+ * #BKE_paint_layers_fill_source_set and every other accepted transition to
+ * #BKE_paint_layers_set_source. Returns false, leaving the row untouched, for a transition either
+ * of them refuses.
+ *
+ * Both RNA properties (#MaterialPaintLayer::source and the Fill view
+ * #MaterialPaintLayer::fill_source) call this, so a script and the UI cannot end up in different
+ * states for the same request.
+ */
+bool BKE_paint_layers_source_set(Material &ma,
+                                 MaterialPaintLayer *layer,
+                                 eMaterialPaintLayerSource source);
+
+/**
  * Which geometry map a #MA_PAINT_LAYER_SOURCE_MESH_MAP row reads, or -1 for any other source.
  */
 int BKE_paint_layers_mesh_map_type_get(const MaterialPaintLayer &layer);
@@ -2735,6 +2761,82 @@ uint64_t BKE_paint_layers_source_structure_hash_cached(const Material &ma);
 uint64_t BKE_paint_layers_source_normal_hash_cached(const Material &ma);
 
 /**
+ * The stack row of \a source that \a marker names, or null: the row a
+ * #MA_PAINT_LAYER_MATERIAL_SCOPE_ROW Material row reads. Only rows of the stack resolve, a folder
+ * and a leaf alike; corrections and mask items are addressed by marker too, but they are not rows
+ * of the stack and cannot be a source of their own.
+ */
+const MaterialPaintLayer *BKE_paint_layers_source_row_find(const Material &source,
+                                                           const bUUID &marker);
+
+/**
+ * Whether the Material row \a row reads one stack row of its source rather than the source whole
+ * (#MA_PAINT_LAYER_MATERIAL_SCOPE_ROW). A narrowed row has no live form for the source's part: its
+ * maps are always the render of the referenced row's content, so nothing resolves the source's
+ * graph and no group of it is ever copied. The one test of the narrowed scope: every reader that
+ * branches on it asks this, so a scope that only some of them recognize cannot come apart.
+ */
+bool BKE_paint_layers_material_row_narrowed(const MaterialPaintLayer &row);
+
+/**
+ * Whether the Material row \a row reads its baked maps like an image (a Source Canvas): a narrowed
+ * row always does (it has no live form), and a FULL row does when its
+ * #MA_PAINT_LAYER_CANVAS_MODE is Canvas. What a canvas row lays comes from #MaterialPaintLayerBake
+ * alone -- the source's graph is never resolved -- so the Mapping and the projections apply to it
+ * whatever its role (row, correction, mask item), and the row's canvas is asked with
+ * #BKE_paint_layers_material_canvas_size. A Live FULL row is not a canvas: its source graph is
+ * evaluated as it is. The scope question -- which source hash the render follows, where the render
+ * runs -- stays #BKE_paint_layers_material_row_narrowed's.
+ */
+bool BKE_paint_layers_material_row_is_canvas(const MaterialPaintLayer &row);
+
+/**
+ * The content fold of one stack row of \a owner: its structural bake hash
+ * (#BKE_paint_layers_bake_hash) with the mapping values of the row and of everything under it, and
+ * a nested Material row's source tree hash, folded in. One formula for every reader that bakes a
+ * row's content with its mapping applied -- the narrowed Material row
+ * (#BKE_paint_layers_source_row_content_hash) and the brush's layer source
+ * (#BKE_brush_layer_source_content_hash) -- so their keys cannot drift apart. It names no marker: a
+ * caller that addresses the row by marker folds that in beside this.
+ */
+uint64_t BKE_paint_layers_source_row_content_fold(const Material &owner,
+                                                  const MaterialPaintLayer &row);
+
+/**
+ * The content hash of what a #MA_PAINT_LAYER_SOURCE_MATERIAL row narrowed to one stack row
+ * (#MA_PAINT_LAYER_MATERIAL_SCOPE_ROW) reads: the structural bake hash of the row's subtree (the
+ * row, its corrections, its mask items, its children) with the mapping values of everything under
+ * it, folded with the marker itself. Pixels are deliberately absent: image edits are tracked by
+ * the bake's pixel subscription, not by hashing. Zero when the marker resolves to nothing (the
+ * "no bake possible" state, like the brush source's). A walk over the subtree, so not for per-texel
+ * callers; asked per row at the render's stamp and the staleness test, on the main thread.
+ *
+ * The walk is remembered per (owner, marker) -- the answer of a redraw comes from the memo. The
+ * stack it reads has no update signal, so the memo is dropped wholesale from
+ * #BKE_paint_layers_tag_edited / #BKE_paint_layers_tag_value_edited, which every content edit goes
+ * through, and before each render pass (#BKE_paint_layers_source_row_hash_memo_drop). An entry also
+ * holds the row it was made from and the owning stack's ends, so an undo, a load or a re-order that
+ * puts other memory under the same marker is made again.
+ */
+uint64_t BKE_paint_layers_source_row_content_hash(const Material &source, const bUUID &marker);
+
+/**
+ * Forget every remembered narrowed-row content hash
+ * (#BKE_paint_layers_source_row_content_hash). Called by the stack's own tags
+ * (#BKE_paint_layers_tag_edited / ..._tag_value_edited) and before each render pass, where the plan
+ * reads the stack as it is now. Not a duty of editors or scripts. Main thread; cheap whether the
+ * memo is full or empty.
+ */
+void BKE_paint_layers_source_row_hash_memo_drop();
+
+/**
+ * Whether \a layer reads \a source as its Material source: a row of the source kind naming
+ * \a source, whatever its scope. The one test of "this Material row reads that material", for the
+ * consumer walks and the update fan-out alike.
+ */
+bool BKE_paint_layers_material_row_reads(const MaterialPaintLayer &layer, const Material &source);
+
+/**
  * What \a source supplies to every paint channel (#BKE_paint_material_source_resolve), remembered
  * against the node tree update signal so the generator and the CPU composite, which ask once per
  * row and channel, do not walk the source each time. The answer points into \a source's own node
@@ -2814,6 +2916,33 @@ bool BKE_paint_layers_material_row_render_forced_wanted(const Material &ma,
 bool BKE_paint_layers_material_row_stale(const Material &ma, const MaterialPaintLayer &layer);
 
 /**
+ * How a Material row's maps stand against their source, the one answer the RNA status property,
+ * the #source_is_stale alias and the Outliner's warning slot read. RNA's enum values are these.
+ */
+enum PaintLayerSourceStatus {
+  MA_PAINT_LAYER_SOURCE_STATUS_OK = 0,
+  MA_PAINT_LAYER_SOURCE_STATUS_UPDATING = 1,
+  MA_PAINT_LAYER_SOURCE_STATUS_STALE = 2,
+  MA_PAINT_LAYER_SOURCE_STATUS_TOO_LARGE = 3,
+  MA_PAINT_LAYER_SOURCE_STATUS_SOURCE_GONE = 4,
+};
+
+/**
+ * The state of \a layer's maps against its source: the referenced row is gone, the canvas was
+ * refused, a render is armed or running, the source moved on, or the maps are current. OK for a row
+ * that does not read a material at all. Main thread only.
+ */
+PaintLayerSourceStatus BKE_paint_layers_material_source_status(const Material &ma,
+                                                              const MaterialPaintLayer &layer);
+
+/**
+ * A short user-facing label for \a status, untranslated: the callers wrap it in IFACE_ (C++) or
+ * read it already translated through RNA's `source_status_text`. Empty for OK, which has no
+ * warning to show. This is the one table both the Outliner and the panel draw from.
+ */
+const char *BKE_paint_layers_material_source_status_text(PaintLayerSourceStatus status);
+
+/**
  * Whether the editor should render the maps of the Material row \a layer now: it reads a material
  * that has a node tree, is not set to Never, is not hidden, its maps are missing or stale, and the
  * last render started from this very state did not just fail. Main thread only.
@@ -2837,7 +2966,10 @@ bool BKE_paint_layers_material_row_is_preview(const MaterialPaintLayer &layer);
 
 /**
  * The side the maps of the Material row \a layer are rendered at when it is not being edited: its
- * own size, or the size the material's layers are created with while it has none (4096 by default).
+ * own bake size for a live row, or for a canvas row its Canvas Size (and, when that is Inherit, the
+ * side the material's layers are created with -- 4096 by default). The bake's stored side is not
+ * read back for a canvas row: it is what a render landed at, which would make Inherit keep the last
+ * explicit size.
  */
 int BKE_paint_layers_material_row_size(const Material &ma, const MaterialPaintLayer &layer);
 
@@ -2880,13 +3012,87 @@ void BKE_paint_layers_material_bake_stamp_get(const Material &ma,
  * the pixel subscription started now, so the generator wires the new maps in while they render and
  * an edit made during the render is seen after it. The source hash waits for
  * #BKE_paint_layers_material_bake_land.
+ *
+ * \a size_y is the height the maps were made at, or zero for the square \a size (every row but a
+ * canvas Material row keeps square maps). It is recorded beside the size so the readers of the
+ * maps and the status line know the canvas the row holds.
  */
 void BKE_paint_layers_material_bake_apply(Main &bmain,
                                           Material &ma,
                                           MaterialPaintLayer &layer,
                                           int size,
                                           Span<int> channels,
-                                          Span<Image *> images);
+                                          Span<Image *> images,
+                                          int size_y = 0);
+
+/**
+ * Render the maps a Material row narrowed to one source row (#MA_PAINT_LAYER_MATERIAL_SCOPE_ROW)
+ * shows, here and now on the main thread: each channel of the owner's set that needs a render is
+ * the referenced row's content rendered by #BKE_paint_layers_bake_render_node into the row's own
+ * maps, which are reused the way a planner bake reuses them. A folder reads as the composite of
+ * its children; a leaf as its own result. Nothing renders live from the source, so the row always
+ * has this one function between its description and its pixels.
+ *
+ * The render is synchronous, like a planner bake of a light row, and there is no job form of it:
+ * the maps are minted and written in \a bmain as the render goes (#bake_service_image and the
+ * writers it feeds), which only the main thread may do, so a caller's \a blocking wish has no way
+ * to be honored here. The canvas is the row's own (#BKE_paint_layers_material_canvas_size), and a
+ * canvas longer than the ceiling (#BKE_paint_layers_material_canvas_max_side) is refused rather
+ * than clamped -- the status line says the canvas is too large, and no render is started; the
+ * refusal is remembered as a failure, not retried by every update. A source row holding a
+ * generator that needs a surface is refused too (the same refusal
+ * #BKE_paint_layers_bake_render_node gives), and a marker that resolves to nothing is remembered
+ * as a failure as well. The row must be due (#BKE_paint_layers_material_row_due); the caller
+ * decides that.
+ *
+ * The alpha a correction of the row lays over the maps is the content alpha of what it corrects,
+ * not a mask of its own: the render is the referenced row as it looks there, its mask and its
+ * opacity folded in.
+ *
+ * \return whether any channel was rendered.
+ */
+bool BKE_paint_layers_material_bake_render_row(Main &bmain, Material &ma, MaterialPaintLayer &row);
+
+/** The width and the height of one canvas Material row's canvas, in pixels. */
+struct PaintLayerCanvasSize {
+  int width = 0;
+  int height = 0;
+};
+
+/**
+ * The canvas \a row's maps are made at, as the row asked for it: the long side is the row's size
+ * (#BKE_paint_layers_material_row_size), the aspect decides the other side -- the source's own
+ * ratio for a narrowed row (the referenced row's content dimensions, scaled to that long side), a
+ * square, or the explicit width and height. A FULL row's canvas is always the source material's
+ * square one: its render still goes through the square job path, so no other shape is named here.
+ * The answer comes back as it was asked, without the ceiling applied: the render paths check it
+ * against #BKE_paint_layers_material_canvas_max_side and refuse a canvas that exceeds it, and the
+ * status line says so.
+ */
+PaintLayerCanvasSize BKE_paint_layers_material_canvas_size(const Material &ma,
+                                                           const MaterialPaintLayer &row);
+
+/**
+ * The one ceiling of a canvas Material row's canvas, in pixels on the longest side. A render
+ * beyond it is refused with the canvas-too-large status, not clamped; every consumer reads the
+ * limit through here, so raising it is a change in one place. It stays bounded because the canvas
+ * render of a narrowed row runs on the main thread: raise it only together with moving that render
+ * to the job path.
+ */
+int BKE_paint_layers_material_canvas_max_side();
+
+/**
+ * The Canvas Size ladder a row is offered, ascending: 0 is Inherit, then the sides the ceiling
+ * covers. This is the one list the RNA enum, the Outliner's size-cycle operator and any future
+ * control read; the identifiers stay in RNA, the numbers do not.
+ */
+Span<int> BKE_paint_layers_material_canvas_size_presets();
+
+/**
+ * Whether \a row's canvas is longer than #BKE_paint_layers_material_canvas_max_side, and so is
+ * refused by the render rather than clamped. False for a row that is no canvas row.
+ */
+bool BKE_paint_layers_material_canvas_refused(const Material &ma, const MaterialPaintLayer &row);
 
 /**
  * A render for the Material row \a marker ended, started from \a hash / \a source_hash. Landed,
@@ -3270,6 +3476,15 @@ void BKE_paint_layers_source_material_consumers(Main &bmain,
                                                 Vector<Material *> &r_consumers);
 
 /**
+ * Whether \a consumer has a Material row that follows its source by itself
+ * (#MA_PAINT_LAYER_SOURCE_REFRESH_AUTO) and reads \a source: the only consumers the update
+ * fan-out should arm a re-render for. A row that follows its source manually is left to the
+ * Update Now button, whatever the source does.
+ */
+bool BKE_paint_layers_source_material_has_auto_consumer(const Material &consumer,
+                                                        const Material &source);
+
+/**
  * Whether \a ma has a render nobody has started yet: a heavy row without a valid bake
  * (#BKE_paint_layers_bake_heavy_pending) or a Material row whose maps are due
  * (#BKE_paint_layers_material_row_due).
@@ -3401,9 +3616,9 @@ int BKE_paint_layers_bake_object_issue_get(const Material &ma, const MaterialPai
 /**
  * Composite \a layer's subtree for \a channel the way a bake of it would: the isolated-group model
  * -- the straight colour, the content alpha in its fourth component and the coverage it lays by --
- * into \a size x \a size buffers. The planner and the generator's substitution read this one
- * function's result, so a baked map means one thing. Source maps are composited at their own
- * resolution and nearest-sampled to \a size.
+ * into \a size x \a size buffers (or \a size x \a out_height, for a canvas of another shape). The
+ * planner and the generator's substitution read this one function's result, so a baked map means
+ * one thing. Source maps are composited at their own resolution and nearest-sampled to \a size.
  *
  * A row carrying a CPU-computed effect (#paint_layer_row_bakes_content) is rendered as its content
  * alone: neither its mask nor its opacity is folded in, and the coverage that comes back is the
@@ -3423,6 +3638,9 @@ int BKE_paint_layers_bake_object_issue_get(const Material &ma, const MaterialPai
  * tile the render is of. The row's maps are read at that tile, so a caller that renders the stack
  * tile by tile gets each tile's own pixels; an unset tile resolves through the surface, then the
  * object (see #BKE_paint_layers_tile_resolve).
+ * \param out_height: the height of the result, or zero for the square \a size. A canvas Material
+ * row with a non-square canvas hands its canvas height here: the buffers it passes are
+ * \a size x \a out_height, and the stack is nearest-sampled onto that canvas instead of a square.
  * \return false when the row has nothing to render in \a channel.
  */
 bool BKE_paint_layers_bake_render_node(
@@ -3435,7 +3653,8 @@ bool BKE_paint_layers_bake_render_node(
     const int *dst_rect = nullptr,
     const std::shared_ptr<const PaintMaterialCompositeSurface> &surface = nullptr,
     const PaintLayerTileContext &context = {},
-    bool whole_row = false);
+    bool whole_row = false,
+    int out_height = 0);
 
 /**
  * The pixel dimensions of \a layer's content in \a channel, the size a bake defaults to. For a

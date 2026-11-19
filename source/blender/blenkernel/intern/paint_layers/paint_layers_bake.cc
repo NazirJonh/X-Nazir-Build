@@ -916,7 +916,33 @@ void BKE_paint_layers_bake_collect_source_images(const Material &ma,
     return;
   }
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
-    if (scope != PaintLayerBakeScope::Child) {
+    if (BKE_paint_layers_material_row_narrowed(layer)) {
+      /* Only a narrowed row's render reads another bake's maps: it renders the referenced row's
+       * content out of them, so a pixel edit of the source's decal lands here as a change of these
+       * images, with the rectangle it touched. The source's own node-tree images are not what the
+       * render reads. A FULL row stays on the branch below whatever its canvas mode says: a canvas
+       * FULL row renders the source's graph, which reads the source's own images the way a live
+       * one does. */
+      if (scope != PaintLayerBakeScope::Child && layer.material != nullptr) {
+        if (const MaterialPaintLayer *referenced = BKE_paint_layers_source_row_find(
+                *layer.material, layer.material_row_marker))
+        {
+          if (referenced->bake != nullptr) {
+            for (Image *image : referenced->bake->images) {
+              if (image != nullptr && !r_images.contains(image)) {
+                r_images.append(image);
+              }
+            }
+            if (referenced->bake->coverage != nullptr &&
+                !r_images.contains(referenced->bake->coverage))
+            {
+              r_images.append(referenced->bake->coverage);
+            }
+          }
+        }
+      }
+    }
+    else if (scope != PaintLayerBakeScope::Child) {
       if (layer.material != nullptr && layer.material->nodetree != nullptr) {
         Set<const bNodeTree *> visited;
         bake_source_tree_images(*layer.material->nodetree, visited, r_images);

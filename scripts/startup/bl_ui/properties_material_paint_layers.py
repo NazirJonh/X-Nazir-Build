@@ -475,6 +475,102 @@ def draw_material_update_now(layout, owner):
     row.operator("material.paint_layers_bake_now", text="Update Now", icon='FILE_REFRESH')
 
 
+def draw_material_layer_fill_source(layout, layer):
+    """The Maps | Material switch of a Fill: its own channel maps and values, or a material.
+
+    Drawn above the channel switches, where the brush panel draws the same pair for the brush. The
+    choice keeps the other side's content in the row, so switching back restores it.
+    """
+    layout.prop(layer, "fill_source", expand=True)
+
+
+def draw_material_layer_source_row(layout, context, layer):
+    """The source controls of a Material layer: which part of its source it reads, whether it
+    shows live or as a canvas, at what size, and what its maps say against the source now.
+
+    Drawn under the source material the Layer panel's ID browser assigns. A layer whose
+    ``material_scope`` reads one row of that material (a dynamic decal configured in one material
+    and laid wherever it is referenced) also gets the picker for the row; the search walks the
+    source's rows like the brush's does, and the button names the row it currently reads, or the
+    state the reference is in. The Update toggle, the button and the status belong to every
+    Material row: a whole-material row follows its source the same way, only whole.
+
+    A whole-material row chooses how its source shows: live at its own UVs (instant), or rendered
+    to the row's canvas and read like an image, where the Mapping and the projections act. The
+    canvas controls show while the row reads its maps; a narrowed row is always a canvas, so it
+    only gets the size and the aspect, the ratio it takes from the row it reads.
+    """
+    # Imported here rather than at module level: the `bl_ui` modules load early, and this keeps the
+    # `bl_operators` import (and its cost) out of startup.
+    from bl_operators.material_paint_layers import find_layer_by_marker
+
+    col = layout.column(align=True)
+    col.prop(layer, "material_scope", expand=True)
+    narrowed = layer.material_scope == 'ROW'
+    name = ""
+    if narrowed and layer.material is not None:
+        # O(rows) per draw: the stack is small and the answer only paints a button's label, so a
+        # memo would cost more than the walk.
+        source_row = find_layer_by_marker(
+            layer.material.paint_layers, layer.material_row_marker)
+        name = source_row.name if source_row is not None else ""
+    # The layer this block edits is named by pointer: a correction or a mask item is not the stack's
+    # active row, and the popup's context is gone by the time it runs.
+    layout.context_pointer_set("material_paint_layer_source_target", layer)
+    if narrowed:
+        col.operator("material.paint_layer_source_row_search",
+                     text=name if name else "Select Source Row",
+                     icon='DOWNARROW_HLT')
+        col.separator()
+    if layer.material is not None:
+        if not narrowed:
+            # The Live UV | Canvas switch of a whole-material row. Live is the default, so the
+            # switch appears at once when the Maps | Material toggle lands here.
+            col.prop(layer, "material_canvas_mode", expand=True)
+            hint = col.column(align=True)
+            hint.enabled = False
+            if layer.material_canvas_mode == 'LIVE':
+                hint.label(text="Instant, UV only", icon='BLANK1')
+                hint.label(text="The active UV of the main shader path", icon='BLANK1')
+            else:
+                hint.label(text="Rendered to an image", icon='BLANK1')
+                hint.label(text="Mapping and projections; updates after the render", icon='BLANK1')
+        if layer.material_is_canvas:
+            col.prop(layer, "material_canvas_size", text="Canvas Size")
+            if narrowed:
+                # The ratio a canvas takes: what the row reads. A whole-material canvas is the
+                # source material's own square, so the aspect has no say there yet.
+                col.prop(layer, "material_canvas_aspect", text="Aspect")
+                if layer.material_canvas_aspect == 'CUSTOM':
+                    side = col.row(align=True)
+                    side.prop(layer, "material_canvas_width", text="W")
+                    side.prop(layer, "material_canvas_height", text="H")
+    controls = col.row(align=True)
+    controls.prop(layer, "source_refresh", text="Update")
+    update = controls.operator("material.paint_layer_source_update_now",
+                               text="", icon='FILE_REFRESH')
+    update.row_marker = layer.marker
+    if layer.material is None:
+        # No source material at all: a narrowed row has nothing to read, which is the state the
+        # status word would show if there were a source to compare against.
+        if narrowed:
+            col.label(text="The source row is gone", icon='ERROR')
+    else:
+        # A narrowed row that has not picked its reference yet is not "gone": it has nothing to
+        # read until a row is chosen, which the search button above asks for.
+        if narrowed and not layer.material_row_marker:
+            col.label(text="Select a source row", icon='INFO')
+        else:
+            status = layer.source_status
+            if status != 'OK':
+                # The words come from BKE's one table (through the read-only RNA property), so
+                # adding a status is a change there, not a second copy here.
+                text = layer.source_status_text
+                if status == 'TOO_LARGE':
+                    text = "{} (max {:d} px)".format(text, layer.material_canvas_max_side)
+                col.label(text=text, icon='TIME' if status == 'UPDATING' else 'ERROR')
+
+
 def draw_material_channel_mixer(layout, mixer):
     """The matrix a Channel Mixer filter reads: one row per output channel, then the constants.
 

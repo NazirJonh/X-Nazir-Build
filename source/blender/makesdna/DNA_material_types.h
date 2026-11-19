@@ -743,6 +743,70 @@ enum eMaterialPaintLayerSource : int8_t {
 };
 
 /**
+ * #MaterialPaintLayer::material_scope -- what of #MaterialPaintLayer::material a
+ * #MA_PAINT_LAYER_SOURCE_MATERIAL row reads. Zero keeps the whole material, so a file written
+ * before the field existed reads unchanged.
+ */
+enum eMaterialPaintLayerMaterialScope : int8_t {
+  /** The whole material: the behaviour of a row written before the field existed. */
+  MA_PAINT_LAYER_MATERIAL_SCOPE_MATERIAL = 0,
+  /**
+   * The isolated result of one stack row of the source (#MaterialPaintLayer::material_row_marker):
+   * a leaf lays its own result, a folder the composite of its children. The result is baked into
+   * the row's maps (there is no live form for a slice of another material's stack), so the row
+   * follows its source the way the maps of a rendered Normal do.
+   */
+  MA_PAINT_LAYER_MATERIAL_SCOPE_ROW = 1,
+};
+
+/**
+ * #MaterialPaintLayer::source_refresh -- whether the row follows its source by itself, or waits for
+ * the Update Now button. Zero keeps the behaviour rows written before the field existed.
+ */
+enum eMaterialPaintLayerSourceRefresh : int8_t {
+  /** Follow the source: a change re-bakes the row after the editor's debounce. */
+  MA_PAINT_LAYER_SOURCE_REFRESH_AUTO = 0,
+  /**
+   * Keep the row as it is: a change only marks the row stale for the status line to show, and no
+   * automatic render follows. The Update Now button (#MATERIAL_OT_paint_layer_source_update_now)
+   * is the only thing that re-renders it.
+   */
+  MA_PAINT_LAYER_SOURCE_REFRESH_MANUAL = 1,
+};
+
+/**
+ * #MaterialPaintLayer::material_canvas_mode -- how a FULL-scope Material row shows its source.
+ * Zero keeps the behaviour rows written before the field existed. A narrowed row
+ * (#MA_PAINT_LAYER_MATERIAL_SCOPE_ROW) has no live form, so it always reads its maps and this
+ * field means nothing to it.
+ */
+enum eMaterialPaintLayerCanvasMode : int8_t {
+  /** Live UV: the source's graph is evaluated as it is, at the active UV of its main path. */
+  MA_PAINT_LAYER_CANVAS_MODE_LIVE = 0,
+  /**
+   * Canvas: the source is rendered into the row's maps (#MaterialPaintLayerBake) and read like an
+   * image on the standard 0-1 UV, so the row's Mapping and the projections apply to it. Updates go
+   * through the render (the row's #source_refresh decides when), not instantly.
+   */
+  MA_PAINT_LAYER_CANVAS_MODE_CANVAS = 1,
+};
+
+/**
+ * #MaterialPaintLayer::material_canvas_aspect -- how a canvas Material row's canvas takes its
+ * width-to-height ratio. Zero keeps the source's own ratio, so a file written before the field
+ * existed reads unchanged.
+ */
+enum eMaterialPaintLayerCanvasAspect : int8_t {
+  /** The ratio of the source: the referenced row's content (ROW) or the source material's canvas
+   * (FULL). */
+  MA_PAINT_LAYER_CANVAS_ASPECT_SOURCE = 0,
+  /** A square canvas: the width and the height are the row's canvas size. */
+  MA_PAINT_LAYER_CANVAS_ASPECT_SQUARE = 1,
+  /** The explicit width and height (#MaterialPaintLayer::material_canvas_width / _height). */
+  MA_PAINT_LAYER_CANVAS_ASPECT_CUSTOM = 2,
+};
+
+/**
  * #MaterialPaintLayer::kind_subtype of a #MA_PAINT_LAYER_SOURCE_TEXT row. The effect and the mask
  * item are two kinds: the effect is a Fill-like row (channel values and textures, with the text as
  * the mask of the whole effect), the mask item is the text's coverage alone.
@@ -1748,8 +1812,14 @@ struct MaterialPaintLayerBake {
   ListBaseT<struct MaterialPaintLayerBakeTile> tiles = {nullptr, nullptr};
   /** Object/Generated rows only: how many objects the current maps cover. */
   int object_count = 0;
+  /**
+   * Of a canvas Material row: the height the maps were baked at, when it is not the #size (a
+   * non-square canvas). Zero reads as square -- what a file written before the field carries --
+   * and every row but a canvas Material row's bake stays square, so the field stays zero there.
+   */
+  int16_t size_y = 0;
   /** Keep the DNA struct a multiple of 8 bytes, as makesdna requires. */
-  char _pad_b[4] = {};
+  char _pad_b[2] = {};
 };
 
 /**
@@ -2012,6 +2082,57 @@ struct MaterialPaintLayer {
    * fields do not move.
    */
   struct Image *effect_image = nullptr;
+  /**
+   * #eMaterialPaintLayerMaterialScope: what of #MaterialPaintLayer::material a
+   * #MA_PAINT_LAYER_SOURCE_MATERIAL row reads. Zero keeps the whole material, so a file written
+   * before the field reads unchanged. Appended last so the offsets of the older fields do not
+   * move.
+   */
+  int8_t material_scope = 0;
+  /**
+   * #eMaterialPaintLayerSourceRefresh: whether the row follows its source by itself, or waits for
+   * the Update Now button. Zero keeps the behaviour rows written before the field read.
+   */
+  int8_t source_refresh = 0;
+  /**
+   * #eMaterialPaintLayerCanvasMode: how a FULL-scope Material row shows its source -- live at the
+   * active UV, or rendered to the row's maps and read like an image. Zero keeps the live behaviour
+   * rows written before the field read. Narrowed rows read their maps whatever this says.
+   */
+  int8_t material_canvas_mode = 0;
+  /**
+   * #eMaterialPaintLayerCanvasAspect: the width-to-height ratio a canvas Material row's canvas
+   * takes. Zero keeps the source's ratio. Only a canvas row reads it.
+   */
+  int8_t material_canvas_aspect = 0;
+  /** Align the marker below to 8 bytes, as makesdna requires. */
+  char _pad_canvas[4] = {};
+  /**
+   * The marker of the source's stack row a #MA_PAINT_LAYER_MATERIAL_SCOPE_ROW source reads, or nil
+   * for every other scope. Only rows of the stack resolve -- a folder and a leaf alike; corrections
+   * and mask items are not rows of the stack and cannot be a source of their own. A marker that no
+   * longer resolves makes the source stale, like a Use Row Result marker: the maps keep showing
+   * what they were last made from, and the status line says the source is gone. The marker is not
+   * an ID reference and registers no dependency: the row's #material is the one the ID walk reads.
+   */
+  bUUID material_row_marker = {};
+  /**
+   * The side a canvas Material row's canvas is made at, or zero to inherit it: the source's own
+   * size (the material's #Material::paint_layers_image_size, or the referenced row's maps for a
+   * narrowed row). A plain Material row and every non-Material row keep it zero. Takes precedence
+   * over the bake's size while it is set.
+   */
+  int16_t material_canvas_size = 0;
+  /**
+   * Of a canvas row whose #material_canvas_aspect is CUSTOM: the canvas width. Zero elsewhere.
+   */
+  int16_t material_canvas_width = 0;
+  /**
+   * Of a canvas row whose #material_canvas_aspect is CUSTOM: the canvas height. Zero elsewhere.
+   */
+  int16_t material_canvas_height = 0;
+  /** Keep the struct size a multiple of 8 so an array of rows stays aligned. */
+  char _pad_source[2] = {};
 };
 
 /**

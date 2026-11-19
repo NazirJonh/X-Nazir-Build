@@ -380,6 +380,24 @@ static void paint_layer_projection_duplicate(MaterialPaintLayer &dst,
 }
 
 /**
+ * The source-reading settings a row carries beyond its kind: which part of the source it reads
+ * (#material_scope), which row of it (#material_row_marker), whether it follows it
+ * (#source_refresh), and the canvas shape. Both copy paths need every field, so they share this --
+ * added a field to the source reading? Add it here, or a duplicated row silently loses it.
+ */
+static void paint_layer_source_settings_copy(MaterialPaintLayer &dst, const MaterialPaintLayer &src)
+{
+  dst.material_scope = src.material_scope;
+  dst.source_refresh = src.source_refresh;
+  dst.material_row_marker = src.material_row_marker;
+  dst.material_canvas_mode = src.material_canvas_mode;
+  dst.material_canvas_aspect = src.material_canvas_aspect;
+  dst.material_canvas_size = src.material_canvas_size;
+  dst.material_canvas_width = src.material_canvas_width;
+  dst.material_canvas_height = src.material_canvas_height;
+}
+
+/**
  * An unlinked copy of the mask item or correction \a item: a marker of its own and maps of its own,
  * for the same reason as the channel maps.
  */
@@ -432,6 +450,10 @@ MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
   /* The per (row, channel) overrides are state too: a pasted correction keeps the blend and
    * opacity it was given in each channel, the way the branch copy below keeps a row's. */
   memcpy(item_copy->channel_settings, item.channel_settings, sizeof(item_copy->channel_settings));
+  /* A duplicated source material keeps the row markers of the original -- a material copy shares no
+   * tree but copies its stack verbatim -- so the marker carried over names the same row of the
+   * copy, and of the shared original when the source could not be duplicated. */
+  paint_layer_source_settings_copy(*item_copy, item);
   paint_layer_material_duplicate(bmain, *item_copy, item);
   /* A Curve Patch effect carries its payload (its own curve container and brush snapshot) like a
    * Curve Patch row does: the copy owns duplicates of both, never shared. */
@@ -496,6 +518,10 @@ void paint_layer_branch_duplicate(Main &bmain,
   memcpy(dst.channel_settings, src.channel_settings, sizeof(dst.channel_settings));
   /* Keep the row's UV mapping (offset, scale, rotation, lock and wrap) with the copy. */
   dst.mapping = dna::shallow_copy(src.mapping);
+  /* A Material row's narrowing travels with the copy, the same fields a duplicated correction
+   * keeps: the duplicated source keeps the original's row markers, so the marker carried over
+   * names the same row of the copy. */
+  paint_layer_source_settings_copy(dst, src);
   paint_layer_material_duplicate(bmain, dst, src);
   paint_layer_curve_patch_duplicate(bmain, dst, src);
   paint_layer_text_decal_duplicate(dst, src);

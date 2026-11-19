@@ -911,6 +911,119 @@ class MaterialLayerAction final : public StackDropAction {
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Built-in Action: Material → the Source of a Material Row
+ *
+ * A material dropped onto a row that reads a material re-points that row: another source, the same
+ * row, its blend, opacity and mask untouched. The scope and the marker stay as they are; a marker
+ * that names nothing in the new source is let go by #BKE_paint_layers_set_material. Beside a row,
+ * or onto a row that is not a Material row, the material becomes a layer of its own, as
+ * #MaterialLayerAction does.
+ * \{ */
+
+class MaterialToSourceRowAction final : public StackDropAction {
+ public:
+  int priority() const override
+  {
+    /* Before #MaterialLayerAction: the more specific reading of the same payload runs first. */
+    return 110;
+  }
+
+  bool can_handle(const StackDropPayload &payload) const override
+  {
+    return payload.id_type == ID_MA;
+  }
+
+  bool can_accept(const StackReadContext &ctx,
+                  const ID &owner,
+                  const StackDropPayload &payload,
+                  const StackDropTarget &target,
+                  const char **r_disabled_hint) const override
+  {
+    Material *material = drop_material(owner, r_disabled_hint);
+    if (material == nullptr || target.place == StackMovePlace::Into) {
+      return false;
+    }
+    const MaterialPaintLayer *row = target_row(*material, target);
+    if (row == nullptr || row->source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
+      /* Not this action's reading: the drop is left to #MaterialLayerAction, which adds a row. */
+      return false;
+    }
+    const Material *candidate = drop_payload_material(ctx.bmain, payload);
+    if (candidate == nullptr) {
+      return false;
+    }
+    /* The same refusals the Add reports, stated on the gesture: a Smart asset is a saved stack,
+     * not a material to read, and a self- or cyclical read is refused wherever it is made. */
+    if (BKE_paint_layers_asset_type_get(*candidate) != PaintLayerAssetType::None) {
+      *r_disabled_hint = TIP_("That material is a Smart asset; drop it on a layer to insert it");
+      return false;
+    }
+    switch (BKE_paint_layers_material_source_issue(*material, *candidate)) {
+      case PaintLayerMaterialSourceIssue::None:
+        break;
+      case PaintLayerMaterialSourceIssue::Self:
+        *r_disabled_hint = TIP_("A layered material cannot read itself");
+        return false;
+      case PaintLayerMaterialSourceIssue::Cycle:
+        *r_disabled_hint = TIP_("That material already reads this one; it would form a cycle");
+        return false;
+    }
+    return true;
+  }
+
+  bool execute(bContext &C,
+               const StackFocus & /*focus*/,
+               ID &owner,
+               const StackDropPayload &payload,
+               const StackDropTarget &target,
+               const wmEvent * /*event*/,
+               int *r_affected_ordinal) const override
+  {
+    Material *source = drop_payload_material(CTX_data_main(&C), payload);
+    if (source == nullptr) {
+      return false;
+    }
+    Material &material = layers_owner(owner);
+    MaterialPaintLayer *row = target_row(material, target);
+    if (row == nullptr || !BKE_paint_layers_set_material(material, row, source)) {
+      return false;
+    }
+    if (BKE_paint_layers_material_row_narrowed(*row) &&
+        BLI_uuid_is_nil(row->material_row_marker))
+    {
+      /* #BKE_paint_layers_set_material let the marker go: the new stack keeps no row at it, and the
+       * row is a narrowed one with nothing to narrow to. The panel's status says so; this says it
+       * once, at the gesture that caused it. */
+      BKE_report(CTX_wm_reports(&C), RPT_INFO, "Select the source row again");
+    }
+    /* The same row re-pointed, not a new one: the affected ordinal is its own. */
+    if (r_affected_ordinal != nullptr) {
+      *r_affected_ordinal = paint_layers_ordinal_of(material, row);
+    }
+    /* #OUTLINER_OT_stack_layer_id_drop carries no #OPTYPE_UNDO: a drop that edits directly pushes
+     * its own, as the actions that add rows do. */
+    ED_undo_push(&C, "Re-point Material Source");
+    WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &material.id);
+    return true;
+  }
+
+  std::string tooltip(const StackDropPayload & /*payload*/,
+                      StringRef item_name,
+                      StringRef row_name,
+                      const StackDropTarget & /*target*/) const override
+  {
+    return fmt::format(fmt::runtime(TIP_("Make {} the source of {}")), item_name, row_name);
+  }
+
+  void id_types(Vector<short> &r_types) const override
+  {
+    r_types.append(ID_MA);
+  }
+};
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Built-in Action: FileHandler Bridge
  *
  * An external file the built-in actions do not take is offered to the registered
@@ -1277,6 +1390,7 @@ std::unique_ptr<StackDropHandler> paint_layers_drop_handler_create()
   handler->add_action(std::make_unique<ImageToFillLayerAction>());
   handler->add_action(std::make_unique<ImageToChannelAction>());
   handler->add_action(std::make_unique<SmartMaterialAssetAction>());
+  handler->add_action(std::make_unique<MaterialToSourceRowAction>());
   handler->add_action(std::make_unique<MaterialLayerAction>());
   /* Last: only a file no built-in action takes reaches the extensions. */
   handler->add_action(std::make_unique<FileHandlerDropAction>());

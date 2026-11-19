@@ -78,6 +78,10 @@ namespace blender {
 
 void BKE_paint_layers_tag_edited(Material &ma)
 {
+  /* The narrowed-row content hash memo reads the stack DNA this edit changes, and no signal covers
+   * that: dropping it here makes the invalidation the edit's business, not every caller's. Cheap
+   * when the memo is empty (#clear_and_shrink on a cleared map). */
+  BKE_paint_layers_source_row_hash_memo_drop();
   /* An edit is a reason to try a cancelled heavy bake again. */
   ma.paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_CANCELLED;
   /* Whatever the edit was, it is not covered by the value path: the shape may have moved. */
@@ -88,6 +92,8 @@ void BKE_paint_layers_tag_edited(Material &ma)
 
 void BKE_paint_layers_tag_value_edited(Material &ma)
 {
+  /* Values take part in the bake hash the memo folds, so a value edit invalidates it too. */
+  BKE_paint_layers_source_row_hash_memo_drop();
   /* A value can be baked into a row's cache (the hash covers opacity and fill), and this path does
    * not rebuild the tree, so the planner has to be asked for a re-bake as well. */
   ma.paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_CANCELLED;
@@ -2677,6 +2683,49 @@ MaterialPaintLayer *BKE_paint_layers_find(Material &ma, const bUUID &marker)
       BKE_paint_layers_find(static_cast<const Material &>(ma), marker));
 }
 
+bool BKE_paint_layers_material_row_narrowed(const MaterialPaintLayer &row)
+{
+  /* A row that does not read a material -- or names none -- reads no row of one, whatever stale
+   * scope its DNA carries: the check keeps the predicate self-contained, so no reader has to pair
+   * it with a source or pointer test (and a scripted scope change on a Fill row cannot make it
+   * true). Every reader may then use a narrowed row's material without a null check. */
+  return row.source == MA_PAINT_LAYER_SOURCE_MATERIAL && row.material != nullptr &&
+         row.material_scope == MA_PAINT_LAYER_MATERIAL_SCOPE_ROW;
+}
+
+bool BKE_paint_layers_material_row_is_canvas(const MaterialPaintLayer &row)
+{
+  /* A narrowed row has no live form, so it always reads its maps; a FULL row reads them when the
+   * user switched it to Canvas. The one test of "this row reads its baked maps like an image":
+   * every reader that branches on it asks this, so a canvas that only some of them recognize
+   * cannot come apart. The scope question -- which source hash the render follows, where the
+   * render runs -- stays #BKE_paint_layers_material_row_narrowed's. */
+  return BKE_paint_layers_material_row_narrowed(row) ||
+         (row.source == MA_PAINT_LAYER_SOURCE_MATERIAL &&
+          row.material_canvas_mode == MA_PAINT_LAYER_CANVAS_MODE_CANVAS);
+}
+
+const MaterialPaintLayer *BKE_paint_layers_source_row_find(const Material &source,
+                                                           const bUUID &marker)
+{
+  if (BLI_uuid_is_nil(marker)) {
+    /* A nil marker names nothing, whatever the stack holds: a narrowed row that has not been
+     * pointed at a source row yet reads no content, not whatever row has no marker of its own. */
+    return nullptr;
+  }
+  if (!BKE_paint_layers_is_layered(source)) {
+    return nullptr;
+  }
+  const MaterialPaintLayer *row = BKE_paint_layers_find(source, marker);
+  /* Corrections and mask items are addressed by marker too, but they are not rows of the stack and
+   * cannot be a source of their own: the owner list only ever answers for a leaf or a folder of the
+   * stack, the way the brush's source does (see #BKE_paint_layers_owner_list). */
+  if (row != nullptr && BKE_paint_layers_owner_list(source, *row) == nullptr) {
+    return nullptr;
+  }
+  return row;
+}
+
 void BKE_paint_layers_active_set(Material &ma, const bUUID &marker)
 {
   const bUUID old_marker = ma.active_layer_marker;
@@ -3563,6 +3612,12 @@ bool BKE_paint_layers_mapping_supported(const Material &ma, const MaterialPaintL
    * transform inside its wrapper. The source must exist; a material with no node tree has nothing
    * for the mapping to move. */
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
+    if (BKE_paint_layers_material_row_is_canvas(layer)) {
+      /* A canvas row reads its baked maps like an image at the row's UV: the Mapping moves that
+       * read whatever the source's graph does, so the reads-UV check of a live row has no say
+       * here (the render does not follow the row's UV). The source must exist. */
+      return layer.material != nullptr;
+    }
     return layer.material != nullptr && layer.material->nodetree != nullptr &&
            BKE_paint_layers_source_reads_uv(*layer.material);
   }
@@ -4298,6 +4353,20 @@ bool BKE_paint_layers_set_blend(Material &ma,
   return true;
 }
 
+/**
+ * Let go of the material \a layer reads: the reference and its user count. What named something
+ * inside it (the scope, the row marker, the canvas, the bake) is the caller's to clear -- it
+ * differs between a Fill flip and a switch to another material, and only the reference itself is
+ * common.
+ */
+static void paint_layer_material_unlink(MaterialPaintLayer &layer)
+{
+  if (layer.material != nullptr) {
+    id_us_min(&layer.material->id);
+    layer.material = nullptr;
+  }
+}
+
 bool BKE_paint_layers_set_source(Material &ma,
                                  MaterialPaintLayer *layer,
                                  const eMaterialPaintLayerSource source)
@@ -4377,6 +4446,88 @@ bool BKE_paint_layers_set_source(Material &ma,
   layer->source = source;
   BKE_paint_layers_tag_edited(ma);
   return true;
+}
+
+bool BKE_paint_layers_fill_source_set(Material &ma,
+                                      MaterialPaintLayer *layer,
+                                      const bool use_material)
+{
+  if (!paint_layer_in_stack(ma, layer) || BKE_paint_layers_is_folder(*layer)) {
+    return false;
+  }
+  const eMaterialPaintLayerSource target = use_material ? MA_PAINT_LAYER_SOURCE_MATERIAL :
+                                                          MA_PAINT_LAYER_SOURCE_CONSTANT;
+  const eMaterialPaintLayerSource origin = use_material ? MA_PAINT_LAYER_SOURCE_CONSTANT :
+                                                          MA_PAINT_LAYER_SOURCE_MATERIAL;
+  if (layer->source == target) {
+    return true;
+  }
+  if (layer->source != origin) {
+    return false;
+  }
+  /* The cache describes the old source. */
+  if (layer->bake != nullptr) {
+    BKE_paint_layers_bake_clear(ma, *layer);
+  }
+  /* The records, their values and their maps stay as they are: a Material row only stops reading
+   * them while the material is the source, so switching back restores what was there. They are
+   * reported by the ID walk for any source, so their maps stay owned. */
+  layer->source = target;
+  if (!use_material) {
+    /* The material is not kept: the ID walk reports the pointer of any row, so a Fill holding one
+     * would depend on a material it no longer reads, and a cycle through it would go unseen by the
+     * cycle test, which only follows Material rows. */
+    paint_layer_material_unlink(*layer);
+    layer->material_scope = MA_PAINT_LAYER_MATERIAL_SCOPE_MATERIAL;
+    layer->material_row_marker = {};
+    /* The canvas settings are the source's, of which a Fill has none: they go with the scope and
+     * the marker, so a return to Material starts from the defaults rather than carrying the canvas
+     * of a source the row no longer names. */
+    layer->material_canvas_mode = MA_PAINT_LAYER_CANVAS_MODE_LIVE;
+    layer->material_canvas_aspect = MA_PAINT_LAYER_CANVAS_ASPECT_SOURCE;
+    layer->material_canvas_size = 0;
+    layer->material_canvas_width = 0;
+    layer->material_canvas_height = 0;
+    /* The update policy is the source's too: a Fill follows nothing, and a return to Material
+     * starts from the default rather than carrying a Manual the user set for a source it no longer
+     * names ("starts from the defaults", as the docstring says). */
+    layer->source_refresh = MA_PAINT_LAYER_SOURCE_REFRESH_AUTO;
+  }
+  if (!use_material && paint_layer_channel_find(*layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR) ==
+                           nullptr)
+  {
+    /* A row that was added as a Material row has no records: a Fill needs the Base Color one to
+     * have something to lay, as a Paint row switched to a Fill gets an opaque black one. */
+    BKE_paint_layers_channel_add(ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    if (MaterialPaintLayerChannel *base = paint_layer_channel_find(
+            *layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR))
+    {
+      base->value[0] = base->value[1] = base->value[2] = 0.0f;
+      base->value[3] = 1.0f;
+    }
+  }
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
+bool BKE_paint_layers_source_set(Material &ma,
+                                 MaterialPaintLayer *layer,
+                                 const eMaterialPaintLayerSource source)
+{
+  if (layer == nullptr) {
+    return false;
+  }
+  /* The Fill <-> Material flip is the one pair #BKE_paint_layers_set_source refuses: it carries the
+   * material reference, the scope, the marker, the canvas and the Base Color record, and only
+   * #BKE_paint_layers_fill_source_set knows how to move them. Both RNA properties come through
+   * here, so the conversion and its refusals live in one place; a new source adds its transitions
+   * to one of the two functions, not to a third copy. */
+  if (ELEM(source, MA_PAINT_LAYER_SOURCE_MATERIAL, MA_PAINT_LAYER_SOURCE_CONSTANT) &&
+      ELEM(layer->source, MA_PAINT_LAYER_SOURCE_MATERIAL, MA_PAINT_LAYER_SOURCE_CONSTANT))
+  {
+    return BKE_paint_layers_fill_source_set(ma, layer, source == MA_PAINT_LAYER_SOURCE_MATERIAL);
+  }
+  return BKE_paint_layers_set_source(ma, layer, source);
 }
 
 int BKE_paint_layers_mesh_map_type_get(const MaterialPaintLayer &layer)
@@ -4529,11 +4680,15 @@ bool BKE_paint_layers_set_material(Material &ma, MaterialPaintLayer *layer, Mate
   if (layer->material == source) {
     return true;
   }
-  if (layer->material != nullptr) {
-    id_us_min(&layer->material->id);
-  }
+  paint_layer_material_unlink(*layer);
   layer->material = source;
   id_us_plus(&source->id);
+  /* Another material is another stack: a marker that named a row of the old one is let go, so a
+   * narrowed source starts empty rather than naming whatever the new stack happens to keep at that
+   * marker (the brush's owner update does the same). */
+  if (BKE_paint_layers_source_row_find(*source, layer->material_row_marker) == nullptr) {
+    layer->material_row_marker = {};
+  }
   BKE_paint_layers_tag_edited(ma);
   return true;
 }

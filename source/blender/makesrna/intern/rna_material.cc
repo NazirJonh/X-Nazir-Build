@@ -10,6 +10,7 @@
 #include <cfloat>
 #include <climits>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <unordered_set>
@@ -409,6 +410,22 @@ static const EnumPropertyItem rna_enum_material_paint_layer_kind_param_type_item
     {KIND_PARAM_TYPE_ENUM, "ENUM", 0, "Enum", "A choice from the parameter's list"},
     {KIND_PARAM_TYPE_COLOR, "COLOR", 0, "Color", "An RGBA colour"},
     {KIND_PARAM_TYPE_BOOL, "BOOL", 0, "Boolean", "An on/off checkbox"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* Every side a canvas can be asked for, so raising the ceiling in BKE
+ * (#BKE_paint_layers_material_canvas_max_side) starts offering the next one here without another
+ * edit; the itemf keeps the sides the ceiling covers and hides the rest. The strings are literal,
+ * because the item array RNA builds copies the pointers, not the text. It lives outside
+ * #ifdef RNA_RUNTIME because the runtime itemf and the property definition both name it. */
+static const EnumPropertyItem rna_material_paint_layer_canvas_size_all_items[] = {
+    {0, "INHERIT", 0, "Inherit", "The side the source's own canvas is made at"},
+    {512, "SIZE_512", 0, "512", "A canvas 512 pixels wide"},
+    {1024, "SIZE_1024", 0, "1024", "A canvas 1024 pixels wide"},
+    {2048, "SIZE_2048", 0, "2048", "A canvas 2048 pixels wide"},
+    {4096, "SIZE_4096", 0, "4096", "A canvas 4096 pixels wide"},
+    {8192, "SIZE_8192", 0, "8192", "A canvas 8192 pixels wide"},
+    {16384, "SIZE_16384", 0, "16384", "A canvas 16384 pixels wide"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -2605,7 +2622,28 @@ static void rna_MaterialPaintLayer_source_set(PointerRNA *ptr, int value)
 {
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
   if (Material *ma = rna_paint_layer_material(ptr, layer)) {
-    BKE_paint_layers_set_source(*ma, layer, eMaterialPaintLayerSource(value));
+    BKE_paint_layers_source_set(*ma, layer, eMaterialPaintLayerSource(value));
+  }
+}
+
+static int rna_MaterialPaintLayer_fill_source_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL ? 1 : 0;
+}
+
+static void rna_MaterialPaintLayer_fill_source_set(PointerRNA *ptr, int value)
+{
+  /* A thin view over `source`: the same facade, so the two properties cannot diverge. The view
+   * only means anything for the two sources it flips -- on a Paint or Generator row the old setter
+   * was a no-op, and it stays one. */
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (!ELEM(layer->source, MA_PAINT_LAYER_SOURCE_MATERIAL, MA_PAINT_LAYER_SOURCE_CONSTANT)) {
+    return;
+  }
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_source_set(
+        *ma, layer, value == 1 ? MA_PAINT_LAYER_SOURCE_MATERIAL : MA_PAINT_LAYER_SOURCE_CONSTANT);
   }
 }
 
@@ -2687,6 +2725,336 @@ static int rna_MaterialPaintLayer_row_result_source_length(PointerRNA *ptr)
 {
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
   return BLI_uuid_is_nil(layer->row_result_source) ? 0 : UUID_STRING_SIZE - 1;
+}
+
+/** What a change of the source reference does: another row, or another scope, is other content
+ * whatever the maps said, so the row is re-tagged the way a structural edit is. */
+static void rna_MaterialPaintLayer_source_reference_changed(PointerRNA *ptr,
+                                                            MaterialPaintLayer *layer)
+{
+  Material *ma = rna_paint_layer_material(ptr, layer);
+  if (ma != nullptr) {
+    BKE_paint_layers_tag_edited(*ma);
+  }
+}
+
+static int rna_MaterialPaintLayer_material_scope_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer->material_scope;
+}
+
+static void rna_MaterialPaintLayer_material_scope_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  /* The scope only exists for a row that reads a material; storing it on a Fill row would leave DNA
+   * that claims one thing while the row does another, and the predicates would have to keep
+   * second-guessing it. Refuse without touching the field. */
+  if (layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL || layer->material_scope == value) {
+    return;
+  }
+  layer->material_scope = int8_t(value);
+  /* Leaving the ROW scope orphans its marker: it is let go, so a return to ROW starts empty rather
+   * than naming whatever the marker still points at. */
+  if (value != MA_PAINT_LAYER_MATERIAL_SCOPE_ROW) {
+    layer->material_row_marker = {};
+  }
+  rna_MaterialPaintLayer_source_reference_changed(ptr, layer);
+}
+
+static int rna_MaterialPaintLayer_source_refresh_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer->source_refresh;
+}
+
+static void rna_MaterialPaintLayer_source_refresh_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (layer->source_refresh == value) {
+    return;
+  }
+  layer->source_refresh = int8_t(value);
+  /* Back to Auto is a change of behaviour, not of content: the row is re-tagged so the editor's
+   * debounce is armed and a source the row fell behind of catches up. */
+  rna_MaterialPaintLayer_source_reference_changed(ptr, layer);
+}
+
+/* A change of the canvas's shape or of how the source is shown: the maps the row holds were made
+ * for the other one, so the stored bake stops describing the row the way a resize of the bake size
+ * does -- the next render starts from nothing instead of reading them as its own. */
+static void rna_MaterialPaintLayer_canvas_changed(PointerRNA *ptr, MaterialPaintLayer *layer)
+{
+  if (layer->bake != nullptr) {
+    layer->bake->hash[0] = 0;
+    layer->bake->hash[1] = 0;
+  }
+  Material *ma = rna_paint_layer_material(ptr, layer);
+  if (ma != nullptr) {
+    BKE_paint_layers_tag_edited(*ma);
+  }
+}
+
+static int rna_MaterialPaintLayer_material_canvas_mode_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer->material_canvas_mode;
+}
+
+static void rna_MaterialPaintLayer_material_canvas_mode_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL || layer->material_canvas_mode == value) {
+    return;
+  }
+  layer->material_canvas_mode = int8_t(value);
+  /* The other mode's cache describes it: a canvas the row stopped reading, or a live row that
+   * keeps none, so the bake goes the way a source change goes. A narrowed row reads its maps
+   * whatever the mode says, and its bake is the render it shows -- cleared all the same, since
+   * the switch is a request for another shape of the row. */
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    if (layer->bake != nullptr) {
+      BKE_paint_layers_bake_clear(*ma, *layer);
+    }
+    BKE_paint_layers_tag_edited(*ma);
+  }
+}
+
+static bool rna_MaterialPaintLayer_material_is_canvas_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return BKE_paint_layers_material_row_is_canvas(*layer);
+}
+
+static int rna_MaterialPaintLayer_material_canvas_size_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer->material_canvas_size;
+}
+
+static const EnumPropertyItem *rna_MaterialPaintLayer_material_canvas_size_itemf(
+    bContext * /*C*/, PointerRNA *ptr, PropertyRNA * /*prop*/, bool *r_free)
+{
+  EnumPropertyItem *items = nullptr;
+  int items_num = 0;
+  /* The ladder and the ceiling come from BKE; this table only supplies the identifiers and the
+   * labels, which RNA needs as stable strings. */
+  for (const int side : BKE_paint_layers_material_canvas_size_presets()) {
+    for (const EnumPropertyItem *item = rna_material_paint_layer_canvas_size_all_items;
+         item->identifier != nullptr;
+         item++)
+    {
+      if (item->value == side) {
+        RNA_enum_item_add(&items, &items_num, item);
+        break;
+      }
+    }
+  }
+  RNA_enum_item_end(&items, &items_num);
+  *r_free = true;
+  return items;
+}
+
+static void rna_MaterialPaintLayer_material_canvas_size_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL || layer->material_canvas_size == value) {
+    return;
+  }
+  /* The enum's itemf only offers the sides the ceiling covers; a value set from a script above it
+   * is stored and refused by the render with the too-large status. Only the int16_t storage is
+   * bounded here. */
+  layer->material_canvas_size = int16_t(std::clamp(value, 0, SHRT_MAX));
+  rna_MaterialPaintLayer_canvas_changed(ptr, layer);
+}
+
+static int rna_MaterialPaintLayer_material_canvas_aspect_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer->material_canvas_aspect;
+}
+
+/* The ceiling the canvas sides are offered up to, so a panel can say "max N px" without keeping a
+ * number of its own; the BKE function stays the one source of truth. */
+static int rna_MaterialPaintLayer_material_canvas_max_side_get(PointerRNA * /*ptr*/)
+{
+  return BKE_paint_layers_material_canvas_max_side();
+}
+
+static void rna_MaterialPaintLayer_material_canvas_aspect_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL || layer->material_canvas_aspect == value) {
+    return;
+  }
+  layer->material_canvas_aspect = int8_t(value);
+  rna_MaterialPaintLayer_canvas_changed(ptr, layer);
+}
+
+static int rna_MaterialPaintLayer_material_canvas_width_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer->material_canvas_width;
+}
+
+/** The smallest canvas a bake makes, and the side the widget starts around. */
+constexpr int PAINT_LAYER_CANVAS_SIDE_MIN = 16;
+constexpr int PAINT_LAYER_CANVAS_SIDE_SOFT_MIN = 512;
+
+/* Both canvas sides share one range: the smallest canvas a bake makes, up to the ceiling the
+ * render makes, read from BKE so raising the ceiling widens the fields without another edit. */
+static void rna_material_paint_layer_canvas_side_range(
+    int *min, int *max, int *softmin, int *softmax)
+{
+  *min = PAINT_LAYER_CANVAS_SIDE_MIN;
+  *max = BKE_paint_layers_material_canvas_max_side();
+  *softmin = PAINT_LAYER_CANVAS_SIDE_SOFT_MIN;
+  *softmax = BKE_paint_layers_material_canvas_max_side();
+}
+
+static void rna_MaterialPaintLayer_material_canvas_width_range(PointerRNA * /*ptr*/,
+                                                               int *min,
+                                                               int *max,
+                                                               int *softmin,
+                                                               int *softmax)
+{
+  rna_material_paint_layer_canvas_side_range(min, max, softmin, softmax);
+}
+
+static void rna_MaterialPaintLayer_material_canvas_height_range(PointerRNA * /*ptr*/,
+                                                                int *min,
+                                                                int *max,
+                                                                int *softmin,
+                                                                int *softmax)
+{
+  rna_material_paint_layer_canvas_side_range(min, max, softmin, softmax);
+}
+
+static void rna_MaterialPaintLayer_material_canvas_width_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  /* The ceiling is not applied here: a canvas above it is refused by the render and reported as
+   * too large (#MA_PAINT_LAYER_SOURCE_STATUS_TOO_LARGE), never silently resized. Only the storage
+   * is bounded, because the field is int16_t; the property's own range keeps the widgets inside
+   * the ceiling. */
+  value = std::clamp(value, 0, SHRT_MAX);
+  if (layer->material_canvas_width == value) {
+    return;
+  }
+  layer->material_canvas_width = int16_t(value);
+  rna_MaterialPaintLayer_canvas_changed(ptr, layer);
+}
+
+static int rna_MaterialPaintLayer_material_canvas_height_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer->material_canvas_height;
+}
+
+static void rna_MaterialPaintLayer_material_canvas_height_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  /* As for the width: the render refuses a canvas above its ceiling with the too-large status,
+   * and the setter only bounds what the int16_t field can store. */
+  value = std::clamp(value, 0, SHRT_MAX);
+  if (layer->material_canvas_height == value) {
+    return;
+  }
+  layer->material_canvas_height = int16_t(value);
+  rna_MaterialPaintLayer_canvas_changed(ptr, layer);
+}
+
+/* The honest state of a Material row's maps against its source, one answer for the status line:
+ * the row is gone, the canvas was refused, a render is on its way, the source moved on, or the
+ * maps are current. The derivation lives in BKE so the Outliner and the panel read the same one. */
+static int rna_MaterialPaintLayer_source_status_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  if (layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
+    return MA_PAINT_LAYER_SOURCE_STATUS_OK;
+  }
+  Material *ma = rna_paint_layer_material(ptr, const_cast<MaterialPaintLayer *>(layer));
+  if (ma == nullptr) {
+    /* No source to compare against: the panel says so on its own, the status stays quiet. */
+    return MA_PAINT_LAYER_SOURCE_STATUS_OK;
+  }
+  return int(BKE_paint_layers_material_source_status(*ma, *layer));
+}
+
+/* The same status as its user-facing label, already translated: the panel and the Outliner draw
+ * this instead of keeping their own copies of the texts. Empty for OK, which has no warning. */
+static void rna_MaterialPaintLayer_source_status_text_get(PointerRNA *ptr, char *value)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  const Material *ma = rna_paint_layer_material(ptr, const_cast<MaterialPaintLayer *>(layer));
+  const PaintLayerSourceStatus status =
+      ma == nullptr ? MA_PAINT_LAYER_SOURCE_STATUS_OK :
+                      BKE_paint_layers_material_source_status(*ma, *layer);
+  /* RNA sizes the buffer from the length callback below. */
+  strcpy(value, IFACE_(BKE_paint_layers_material_source_status_text(status)));
+}
+
+static int rna_MaterialPaintLayer_source_status_text_length(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  const Material *ma = rna_paint_layer_material(ptr, const_cast<MaterialPaintLayer *>(layer));
+  const PaintLayerSourceStatus status =
+      ma == nullptr ? MA_PAINT_LAYER_SOURCE_STATUS_OK :
+                      BKE_paint_layers_material_source_status(*ma, *layer);
+  return int(strlen(IFACE_(BKE_paint_layers_material_source_status_text(status))));
+}
+
+/* The marker of the source's stack row a narrowed Material row reads. Empty clears the reference;
+ * malformed text keeps the current one rather than silently clearing it. */
+static void rna_MaterialPaintLayer_material_row_marker_get(PointerRNA *ptr, char *value)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  if (BLI_uuid_is_nil(layer->material_row_marker)) {
+    value[0] = '\0';
+    return;
+  }
+  BLI_uuid_format(value, layer->material_row_marker);
+}
+
+static int rna_MaterialPaintLayer_material_row_marker_length(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return BLI_uuid_is_nil(layer->material_row_marker) ? 0 : UUID_STRING_SIZE - 1;
+}
+
+static void rna_MaterialPaintLayer_material_row_marker_set(PointerRNA *ptr, const char *value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (value == nullptr || value[0] == '\0') {
+    if (!BLI_uuid_is_nil(layer->material_row_marker)) {
+      layer->material_row_marker = {};
+      rna_MaterialPaintLayer_source_reference_changed(ptr, layer);
+    }
+    return;
+  }
+  bUUID marker;
+  if (!BLI_uuid_parse_string(&marker, value)) {
+    return;
+  }
+  if (!BLI_uuid_equal(marker, layer->material_row_marker)) {
+    layer->material_row_marker = marker;
+    rna_MaterialPaintLayer_source_reference_changed(ptr, layer);
+  }
+}
+
+static bool rna_MaterialPaintLayer_source_is_stale_get(PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
+    return false;
+  }
+  const Material *ma = rna_paint_layer_material(ptr, layer);
+  if (ma == nullptr) {
+    /* Nothing to compare against: the row cannot call itself current. */
+    return true;
+  }
+  const PaintLayerSourceStatus status = BKE_paint_layers_material_source_status(*ma, *layer);
+  return ELEM(status, MA_PAINT_LAYER_SOURCE_STATUS_STALE, MA_PAINT_LAYER_SOURCE_STATUS_SOURCE_GONE);
 }
 
 /* The marker of the Anchor Point a reader lays. Empty clears the reference. Setting checks the
@@ -6929,6 +7297,99 @@ static void rna_def_material_paint_layer_text(BlenderRNA *brna)
       prop, NC_MATERIAL | ND_SHADING, "rna_MaterialPaintLayerText_update");
 }
 
+static const EnumPropertyItem rna_material_paint_layer_material_scope_items[] = {
+    {MA_PAINT_LAYER_MATERIAL_SCOPE_MATERIAL,
+     "MATERIAL",
+     0,
+     "Full Material",
+     "The whole material the row reads"},
+    {MA_PAINT_LAYER_MATERIAL_SCOPE_ROW,
+     "ROW",
+     0,
+     "Row",
+     "The result of one stack row of the source, as it looks there; a folder reads as the composite "
+     "of its children"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_material_paint_layer_source_refresh_items[] = {
+    {MA_PAINT_LAYER_SOURCE_REFRESH_AUTO,
+     "AUTO",
+     0,
+     "Auto Update",
+     "A change of the source re-bakes the row once the edits stop"},
+    {MA_PAINT_LAYER_SOURCE_REFRESH_MANUAL,
+     "MANUAL",
+     0,
+     "Manual",
+     "A change only marks the row stale until the Update Now button"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/** The values of the source-status enum, RNA's own: they name no DNA field, the getter derives
+ * one of them on the fly (declared above it). */
+static const EnumPropertyItem rna_material_paint_layer_source_status_items[] = {
+    {MA_PAINT_LAYER_SOURCE_STATUS_OK, "OK", 0, "Ok", "The maps are current against the source"},
+    {MA_PAINT_LAYER_SOURCE_STATUS_UPDATING,
+     "UPDATING",
+     0,
+     "Updating",
+     "A render of the maps is armed or running"},
+    {MA_PAINT_LAYER_SOURCE_STATUS_STALE,
+     "STALE",
+     0,
+     "Stale",
+     "The source has changed since the maps were made"},
+    {MA_PAINT_LAYER_SOURCE_STATUS_TOO_LARGE,
+     "TOO_LARGE",
+     0,
+     "Canvas Too Large",
+     "The canvas is larger than the ceiling the render makes, so no render was started"},
+    {MA_PAINT_LAYER_SOURCE_STATUS_SOURCE_GONE,
+     "SOURCE_GONE",
+     0,
+     "Source Gone",
+     "The source row the row reads no longer exists"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_material_paint_layer_canvas_mode_items[] = {
+    {MA_PAINT_LAYER_CANVAS_MODE_LIVE,
+     "LIVE",
+     0,
+     "Live UV",
+     "Instant: the source's graph is evaluated live at the active UV of its main shader path"},
+    {MA_PAINT_LAYER_CANVAS_MODE_CANVAS,
+     "CANVAS",
+     0,
+     "Canvas",
+     "The source is rendered to the row's maps and read like an image: the Mapping and the "
+     "projections apply, updates follow the render"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_material_paint_layer_canvas_aspect_items[] = {
+    {MA_PAINT_LAYER_CANVAS_ASPECT_SOURCE,
+     "SOURCE",
+     0,
+     "Source",
+     "The ratio of what the row reads: the referenced row's content for a narrowed row, the "
+     "source material's canvas for a whole material"},
+    {MA_PAINT_LAYER_CANVAS_ASPECT_SQUARE, "SQUARE", 0, "1:1", "A square canvas"},
+    {MA_PAINT_LAYER_CANVAS_ASPECT_CUSTOM,
+     "CUSTOM",
+     0,
+     "Custom",
+     "The explicit width and height, within the ceiling the render makes"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_material_paint_layer_fill_source_items[] = {
+    {0, "MAPS", 0, "Maps", "The Fill's own channel values and textures"},
+    {1, "MATERIAL", 0, "Material", "A material, one of its layers, a folder or a row of its stack"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 static void rna_def_material_paint_layer(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -7151,6 +7612,18 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Source", "What the layer reads its values from");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
+  /* The Maps / Material switch of a Fill: only Fill and Material rows answer it, the BKE setter
+   * refuses any other source. */
+  prop = RNA_def_property(srna, "fill_source", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_material_paint_layer_fill_source_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayer_fill_source_get",
+                              "rna_MaterialPaintLayer_fill_source_set",
+                              nullptr);
+  RNA_def_property_ui_text(
+      prop, "Fill Source", "Whether a Fill takes its channels from its own maps or from a material");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
   /* Which geometry map a MESH_MAP row reads. Editable only for that source; the BKE setter
    * refuses any other. */
   prop = RNA_def_property(srna, "mesh_map_type", PROP_ENUM, PROP_NONE);
@@ -7299,6 +7772,156 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(
       prop, "Material", "The material a Material layer reads; none for every other source");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "material_scope", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_material_paint_layer_material_scope_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayer_material_scope_get",
+                              "rna_MaterialPaintLayer_material_scope_set",
+                              nullptr);
+  RNA_def_property_ui_text(prop, "Scope", "What of the source material the row reads");
+  RNA_def_property_translation_context(prop, BLT_I18NCONTEXT_ID_MATERIAL);
+  /* The setter does the stack edit itself (#BKE_paint_layers_tag_edited); this is beside it, the
+   * same update the neighbour `material` takes, so the panels that show the row's source status
+   * get the material notifier a redraw reads. */
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "material_row_marker", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_MaterialPaintLayer_material_row_marker_get",
+                                "rna_MaterialPaintLayer_material_row_marker_length",
+                                "rna_MaterialPaintLayer_material_row_marker_set");
+  RNA_def_property_ui_text(
+      prop,
+      "Source Row",
+      "The stack row of the source the row reads, addressed by its marker; empty reads the whole "
+      "material. A marker that names nothing makes the source stale, and the maps keep showing "
+      "what they were made from");
+  /* Beside the setter's #BKE_paint_layers_tag_edited, the same update the neighbour `material`
+   * takes: the notifier a redraw of the source-status panels reads. */
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "source_refresh", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_material_paint_layer_source_refresh_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayer_source_refresh_get",
+                              "rna_MaterialPaintLayer_source_refresh_set",
+                              nullptr);
+  RNA_def_property_ui_text(
+      prop, "Update", "Whether the row follows its source by itself, or waits for Update Now");
+  /* Beside the setter's #BKE_paint_layers_tag_edited, the same update the neighbour `material`
+   * takes: the notifier a redraw of the source-status panels reads. */
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "source_is_stale", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_source_is_stale_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Source Stale",
+                           "The source has changed, or its row is gone, since the maps were made");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, nullptr);
+
+  /* The status the source-status line shows, the boolean above kept as the one-word alias of its
+   * stale state. Read-only: the render paths and the staleness test decide it, the UI reads it. */
+  prop = RNA_def_property(srna, "source_status", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_material_paint_layer_source_status_items);
+  RNA_def_property_enum_funcs(prop, "rna_MaterialPaintLayer_source_status_get", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Source Status",
+                           "How the row's maps stand against its source: current, being made, "
+                           "behind it, refused as too large, or the source row gone");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, nullptr);
+
+  /* The status above as the word the user reads, translated by one BKE table: the panel draws it
+   * instead of keeping its own copy of the texts. Empty when the maps are current. */
+  prop = RNA_def_property(srna, "source_status_text", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_MaterialPaintLayer_source_status_text_get",
+                                "rna_MaterialPaintLayer_source_status_text_length",
+                                nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Source Status Text", "The status word for the source row");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, nullptr);
+
+  /* How a Full-Material row shows its source: live at the active UV, or rendered to the row's maps
+   * and read like an image (a Source Canvas). A narrowed row reads its maps whatever this says. */
+  prop = RNA_def_property(srna, "material_canvas_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_material_paint_layer_canvas_mode_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayer_material_canvas_mode_get",
+                              "rna_MaterialPaintLayer_material_canvas_mode_set",
+                              nullptr);
+  RNA_def_property_ui_text(prop,
+                           "Canvas Mode",
+                           "Whether the source shows live at its own UVs, or is rendered to the "
+                           "row's canvas and read like an image");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "material_is_canvas", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_material_is_canvas_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Is Canvas",
+                           "The row reads its baked maps like an image: a narrowed row always "
+                           "does, a Full-Material row when its Canvas Mode is Canvas");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, nullptr);
+
+  /* The side the canvas of a canvas row is made at, among the sides the ceiling offers. */
+  prop = RNA_def_property(srna, "material_canvas_size", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_material_paint_layer_canvas_size_all_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayer_material_canvas_size_get",
+                              "rna_MaterialPaintLayer_material_canvas_size_set",
+                              "rna_MaterialPaintLayer_material_canvas_size_itemf");
+  RNA_def_property_ui_text(prop,
+                           "Canvas Size",
+                           "The long side the row's canvas is made at, or Inherit for the "
+                           "source's own");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  /* The ceiling the Canvas Size enum stops at, read-only: the status line names it ("Canvas too
+   * large (max N px)") without a number of its own. */
+  prop = RNA_def_property(srna, "material_canvas_max_side", PROP_INT, PROP_NONE);
+  RNA_def_property_int_funcs(prop,
+                             "rna_MaterialPaintLayer_material_canvas_max_side_get",
+                             nullptr,
+                             nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Canvas Max Side",
+                           "The ceiling a canvas side is made at, in pixels on the longest side");
+
+  /* The ratio of the canvas: what the row reads, a square, or the explicit width and height. */
+  prop = RNA_def_property(srna, "material_canvas_aspect", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_material_paint_layer_canvas_aspect_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayer_material_canvas_aspect_get",
+                              "rna_MaterialPaintLayer_material_canvas_aspect_set",
+                              nullptr);
+  RNA_def_property_ui_text(prop,
+                           "Aspect",
+                           "The width-to-height ratio the canvas takes: the source's own, a "
+                           "square, or explicit");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  /* The explicit canvas of a Custom aspect. The widget stops at the ceiling, but a value set from
+   * a script is stored as asked and the render refuses it with the too-large status, not a resize. */
+  prop = RNA_def_property(srna, "material_canvas_width", PROP_INT, PROP_NONE);
+  RNA_def_property_int_funcs(prop,
+                             "rna_MaterialPaintLayer_material_canvas_width_get",
+                             "rna_MaterialPaintLayer_material_canvas_width_set",
+                             "rna_MaterialPaintLayer_material_canvas_width_range");
+  RNA_def_property_ui_text(prop, "Canvas Width", "The width of a Custom-aspect canvas");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "material_canvas_height", PROP_INT, PROP_NONE);
+  RNA_def_property_int_funcs(prop,
+                             "rna_MaterialPaintLayer_material_canvas_height_get",
+                             "rna_MaterialPaintLayer_material_canvas_height_set",
+                             "rna_MaterialPaintLayer_material_canvas_height_range");
+  RNA_def_property_ui_text(prop, "Canvas Height", "The height of a Custom-aspect canvas");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "fill_color", PROP_FLOAT, PROP_COLOR);

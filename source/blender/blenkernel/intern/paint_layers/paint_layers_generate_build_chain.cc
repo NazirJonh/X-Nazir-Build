@@ -2416,8 +2416,7 @@ KindEmitResult PaintLayersTreeBuilder::material_source_emit(const RowEmitContext
       out.content_alpha = {one, one_out};
       break;
     }
-    case PaintLayerMaterialSourceKind::LiveImage:
-    case PaintLayerMaterialSourceKind::Baked: {
+    case PaintLayerMaterialSourceKind::LiveImage: {
       bNode *map = this->image_map_node_add(tree, *source.image);
       if (map == nullptr) {
         return {};
@@ -2428,12 +2427,11 @@ KindEmitResult PaintLayersTreeBuilder::material_source_emit(const RowEmitContext
       if (color_out == nullptr || alpha_out == nullptr) {
         return discard();
       }
-      if (source.kind == PaintLayerMaterialSourceKind::LiveImage) {
-        live_image_settings_copy(*map, source.node);
-      }
+      live_image_settings_copy(*map, source.node);
       grid_.place(*map, layout::Column::Source, 0);
-      /* A Material row reads its source at the row's UV: a live Image Texture and a map rendered
-       * from the source both take the row Mapping, the transform effects' steps in front of it. */
+      /* A live row reads its source at the row's UV: the plain texture takes the row Mapping, the
+       * transform effects' steps in front of it. A live row never projects (see
+       * #paint_layer_projection_payload_supported), so the plain mapping is the whole read. */
       const bool mapped = this->mapping_apply(tree, ctx.layer, *map, source_nodes);
       out.color = {map, color_out};
       if (mapped && ctx.channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
@@ -2441,6 +2439,43 @@ KindEmitResult PaintLayersTreeBuilder::material_source_emit(const RowEmitContext
         out.color = this->transform_normal_remap_apply(tree, ctx.layer, out.color, &source_nodes);
       }
       out.content_alpha = {map, alpha_out};
+      break;
+    }
+    case PaintLayerMaterialSourceKind::Baked: {
+      bNode *map = this->image_map_node_add(tree, *source.image);
+      if (map == nullptr) {
+        return {};
+      }
+      source_nodes.append(map);
+      /* Which map this node shows, so a re-render of the canvas is a pointer write
+       * (#paint_layers_maps_sync) rather than a rebuild: a canvas row's maps are the same
+       * datablocks re-filled in place whenever the canvas keeps its shape. Only a canvas row is
+       * keyed: the sync resolves a Material row's map through its canvas (#paint_layer_material_canvas_image),
+       * and a live row has no record for its baked map either, so a key on a live row would make
+       * the sync fail instead of following the map. */
+      if (BKE_paint_layers_material_row_is_canvas(ctx.layer)) {
+        map_node_key_set(*map, ctx.layer, ctx.channel);
+      }
+      bNodeSocket *color_out = socket_out(*map, "Color");
+      bNodeSocket *alpha_out = socket_out(*map, "Alpha");
+      if (color_out == nullptr || alpha_out == nullptr) {
+        return discard();
+      }
+      grid_.place(*map, layout::Column::Source, 0);
+      /* A canvas row reads its baked map like an image: the same read a Fill's map takes -- the
+       * row Mapping in UV, the projection frame wrapped over it when one applies
+       * (#paint_layer_projection_payload_supported lets a canvas row project), the transform
+       * effects' steps in front. */
+      const MapRead read = this->map_read_apply(tree, ctx.layer, *map, source_nodes, ctx.channel);
+      if (read.color.socket == nullptr || read.alpha.socket == nullptr) {
+        return discard();
+      }
+      out.color = read.color;
+      if (read.mapped && ctx.channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+        out.color = this->normal_remap_add(tree, ctx.layer, out.color, &source_nodes);
+        out.color = this->transform_normal_remap_apply(tree, ctx.layer, out.color, &source_nodes);
+      }
+      out.content_alpha = read.alpha;
       break;
     }
     case PaintLayerMaterialSourceKind::None:
@@ -2490,24 +2525,25 @@ KindEmitResult PaintLayersTreeBuilder::material_source_emit(const RowEmitContext
       }
       source_nodes.append(map);
       grid_.place(*map, layout::Column::Source, 2);
-      /* The source's transparency is read at the same UV as its colour. */
-      this->mapping_apply(tree, ctx.layer, *map, source_nodes);
+      /* The source's transparency is read at the same UV as its colour: the same read the colour
+       * map takes, the projection frame included, so a projected row's coverage follows its
+       * frame. */
+      const MapRead coverage_read = this->map_read_apply(
+          tree, ctx.layer, *map, source_nodes, ctx.channel);
+      if (coverage_read.node == nullptr) {
+        return discard();
+      }
       if (coverage.kind == PaintLayerMaterialCoverageKind::LiveAlpha) {
         live_image_settings_copy(*map, coverage.node);
-        bNodeSocket *alpha_out = socket_out(*map, "Alpha");
-        if (alpha_out == nullptr) {
+        if (coverage_read.alpha.socket == nullptr) {
           return discard();
         }
-        out.coverage = {map, alpha_out};
+        out.coverage = coverage_read.alpha;
       }
       else {
         /* The rendered coverage stores the scalar in grey RGB: its factor is the mean of the three
          * channels, exactly as the CPU reads it. */
-        bNodeSocket *color_out = socket_out(*map, "Color");
-        if (color_out == nullptr) {
-          return discard();
-        }
-        out.coverage = this->rgb_mean_nodes_add(tree, {map, color_out}, source_nodes);
+        out.coverage = this->rgb_mean_nodes_add(tree, coverage_read.color, source_nodes);
         if (out.coverage.socket == nullptr) {
           return discard();
         }
@@ -2527,7 +2563,13 @@ KindEmitResult PaintLayersTreeBuilder::material_source_emit(const RowEmitContext
    * CPU's per-step clip does. */
   const Vector<const MaterialPaintLayer *, 4> transform_effects =
       BKE_paint_layers_active_uv_transform_effects(ma_, ctx.layer);
-  if (BKE_paint_layers_mapping_remaps(ma_, ctx.layer) || !transform_effects.is_empty()) {
+  /* A projecting canvas row clips on its frame, the way a projected Fill's coverage does
+   * (#mapping_clip_alpha picks the frame for a projecting row): the frame's factor leaves the
+   * part outside out of the coverage and of the content alpha, which a Material row's colour
+   * map's own alpha does not carry. */
+  if (BKE_paint_layers_mapping_remaps(ma_, ctx.layer) || !transform_effects.is_empty() ||
+      BKE_paint_layers_projection_applies(ma_, ctx.layer))
+  {
     const auto multiply = [&](const NodeOutput value, const NodeOutput mask) -> NodeOutput {
       bNode *product = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
       bNodeSocket *a = (product != nullptr) ? socket_in(*product, "Value") : nullptr;
@@ -2567,6 +2609,9 @@ KindEmitResult PaintLayersTreeBuilder::material_source_emit(const RowEmitContext
       }
     };
     fold(this->mapping_clip_factor(tree, ctx.layer, source_nodes));
+    if (BKE_paint_layers_projection_applies(ma_, ctx.layer)) {
+      fold(this->projection_clip_factor(tree, ctx.layer, source_nodes));
+    }
     for (const MaterialPaintLayer *effect : transform_effects) {
       fold(this->mapping_clip_factor(tree, *effect, source_nodes));
     }

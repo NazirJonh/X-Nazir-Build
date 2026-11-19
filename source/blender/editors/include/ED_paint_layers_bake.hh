@@ -32,6 +32,7 @@
 namespace blender {
 struct Main;
 struct Material;
+struct MaterialPaintLayer;
 struct wmOperatorType;
 struct wmWindow;
 struct wmWindowManager;
@@ -207,5 +208,32 @@ void MATERIAL_OT_paint_layers_bake_now(wmOperatorType *ot);
  * light one inline so the operator can report an empty outcome at once.
  */
 void MATERIAL_OT_paint_layer_use_row_result(wmOperatorType *ot);
+
+/**
+ * "Update Now" of a Material row narrowed to one source row: re-render its maps here, whatever the
+ * row's update setting says. The row is the active one of the `"material"` context pointer, or the
+ * one the `row_marker` property names. This is the only thing a row whose Update is Manual waits
+ * for; a row that follows its source can be forced through it all the same.
+ */
+void MATERIAL_OT_paint_layer_source_update_now(wmOperatorType *ot);
+
+/**
+ * The body of "Update Now", for both the operator and the Outliner's action button: forget what
+ * \a row's maps were made from and run the render pass that re-makes them, then notify. Returns
+ * false, doing nothing, when \a row does not read a material.
+ */
+bool paint_layer_source_update_now(Main &bmain, Material &ma, MaterialPaintLayer &row);
+
+/**
+ * The compact source controls of the Outliner's Material correction and mask rows: each button
+ * names its owner by `session_uid` and its row by `marker` (both stamped by the row build) and
+ * steps one setting -- the scope, the live-or-canvas mode, the canvas size, the update setting.
+ * They write through the row's RNA properties, so the setters' bake reset and tagging stay the
+ * one place that logic lives.
+ */
+void MATERIAL_OT_paint_layer_source_scope_toggle(wmOperatorType *ot);
+void MATERIAL_OT_paint_layer_source_canvas_toggle(wmOperatorType *ot);
+void MATERIAL_OT_paint_layer_source_size_cycle(wmOperatorType *ot);
+void MATERIAL_OT_paint_layer_source_refresh_toggle(wmOperatorType *ot);
 
 }  // namespace blender::ed::material_bake

@@ -289,6 +289,9 @@ static void material_changed(Main *bmain, Material *ma)
    * (see the bake scheduling). A stack-only edit moves nothing the walk reads, so the cache of a
    * material whose rows changed stays fresh. */
   BKE_paint_layers_source_cache_validate(*ma);
+  /* The narrowed-row content hash memo is dropped by the stack's own tag
+   * (#BKE_paint_layers_tag_edited / ..._tag_value_edited), so this editor path no longer has to
+   * remember it; this comment stays as the pointer to where the invalidation now lives. */
 
   /* The renders an edit makes due -- a Material row's maps, a heavy row's bake -- are started once
    * the edits stop, not by the scene update of each one, so a burst (a slider held down, a node
@@ -308,6 +311,12 @@ static void material_changed(Main *bmain, Material *ma)
     Vector<Material *> consumers;
     BKE_paint_layers_source_material_consumers(*bmain, *ma, consumers);
     for (Material *consumer : consumers) {
+      /* A row that follows its source manually is left to the Update Now button: the edit marks it
+       * stale at the next scene update, and no render is armed for it here. A material whose rows
+       * all wait is not armed at all, so its tick never finds nothing to do. */
+      if (!BKE_paint_layers_source_material_has_auto_consumer(*consumer, *ma)) {
+        continue;
+      }
       /* An edit made through the row being edited waits as long as the material's preview delay
        * says; any other consumer renders after the short pause. */
       ed::material_bake::paint_layers_bake_debounce_arm(

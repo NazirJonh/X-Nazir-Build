@@ -8,16 +8,71 @@
 
 namespace blender {
 
-/* The PBR stroke randomness draws one factor per dab (#bke::PaintRuntime::strength_random_value)
- * with #bke::random_reduction_factor. The formula is shared by the stroke code and both engines,
- * so the tests pin the contract every consumer relies on: randomness only ever lowers the strength
- * (the factor stays in [1 - amount, 1]) and an amount of 0 leaves it untouched. */
+/* The stroke randomness draws one factor per dab (#bke::PaintRuntime::strength_random_value and
+ * #bke::PaintRuntime::size_random_value), fed from the single #Brush::strength_random and
+ * #Brush::size_random fields shared by dab strokes, PBR paint and Curve Patch stamps: the
+ * strength-style draws use #bke::random_reduction_factor, the size draw uses
+ * #bke::random_size_factor. Both formulas are shared by the stroke code and both engines, so the
+ * tests pin the contracts every consumer relies on: the reduction only ever lowers the value (the
+ * factor stays in [1 - amount, 1]), the size spreads symmetrically around 1 ([1 - amount / 2,
+ * 1 + amount / 2]), and an amount of 0 leaves either exactly untouched. */
 
 TEST(paint_strength_random, zero_amount_keeps_strength)
 {
   /* The feature is off: every draw must return exactly 1.0, no matter the random value. */
   for (const float random : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f, 123.0f, -4.0f}) {
     EXPECT_EQ(bke::random_reduction_factor(0.0f, random), 1.0f);
+  }
+}
+
+TEST(paint_size_random, zero_amount_keeps_size)
+{
+  /* The feature is off: every draw must return exactly 1.0, no matter the random value. */
+  for (const float random : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f, 123.0f, -4.0f}) {
+    EXPECT_EQ(bke::random_size_factor(0.0f, random), 1.0f);
+  }
+}
+
+TEST(paint_size_random, bounds_of_full_amount)
+{
+  /* amount = 1 spans the whole symmetric range: the first draw (random = 0) halves the size, the
+   * last one (random = 1) grows it by half. */
+  EXPECT_EQ(bke::random_size_factor(1.0f, 0.0f), 0.5f);
+  EXPECT_EQ(bke::random_size_factor(1.0f, 1.0f), 1.5f);
+}
+
+TEST(paint_size_random, interpolated_values)
+{
+  /* The middle draw (random = 0.5) is the base size no matter the amount. */
+  EXPECT_NEAR(bke::random_size_factor(0.8f, 0.5f), 1.0f, 1e-6);
+  EXPECT_NEAR(bke::random_size_factor(0.25f, 0.5f), 1.0f, 1e-6);
+  EXPECT_NEAR(bke::random_size_factor(0.5f, 0.1f), 0.95f, 1e-6);
+  EXPECT_NEAR(bke::random_size_factor(0.5f, 0.9f), 1.05f, 1e-6);
+}
+
+TEST(paint_size_random, stays_within_symmetric_range)
+{
+  /* The spread is bounded by +-amount / 2 around the base size in both directions, so a small
+   * amount cannot grow or shrink the brush much. */
+  for (const float amount : {0.0f, 0.1f, 0.5f, 0.9f, 1.0f}) {
+    for (const float random : {0.0f, 0.125f, 0.5f, 0.875f, 1.0f}) {
+      EXPECT_GE(bke::random_size_factor(amount, random), 1.0f - amount / 2.0f);
+      EXPECT_LE(bke::random_size_factor(amount, random), 1.0f + amount / 2.0f);
+    }
+  }
+}
+
+TEST(paint_size_random, symmetric_around_the_base_size)
+{
+  /* Mirror draws land symmetrically around 1: the size randomization grows and shrinks in equal
+   * measure, unlike the strength-style reduction. */
+  for (const float amount : {0.0f, 0.1f, 0.5f, 0.9f, 1.0f}) {
+    for (const float random : {0.0f, 0.125f, 0.5f, 0.875f, 1.0f}) {
+      EXPECT_NEAR(bke::random_size_factor(amount, random) +
+                      bke::random_size_factor(amount, 1.0f - random),
+                  2.0f,
+                  1e-6);
+    }
   }
 }
 

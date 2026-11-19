@@ -43,15 +43,27 @@ enum class PaintMode : int8_t {
 namespace bke {
 
 /**
- * The per-dab random reduction factor of the PBR stroke randomness
- * (#BrushMaterialPaint::strength_random, #BrushMaterialPaint::mask_strength_random and
- * #Brush::mask_texture_strength_random): with \a random in [0, 1) the result lies in
- * `[1 - amount, 1]`, so randomness only ever lowers the value and an \a amount of 0 keeps it
- * untouched. Pure so the stroke code and tests share one definition.
+ * The per-dab random reduction factor shared by the strength-like stroke randomness
+ * (#Brush::strength_random, #Brush::spacing_random and #Brush::mask_texture_strength_random):
+ * with \a random in [0, 1) the result lies in `[1 - amount, 1]`, so randomness only ever lowers
+ * the value and an \a amount of 0 keeps it untouched. Pure so the stroke code and tests share one
+ * definition.
  */
 inline float random_reduction_factor(const float amount, const float random)
 {
   return 1.0f - amount * random;
+}
+
+/**
+ * The per-dab random size factor of the stroke randomness (#Brush::size_random): with \a random
+ * in [0, 1) the result lies in
+ * `[1 - amount / 2, 1 + amount / 2]`, so the spread is symmetric around 1 — the size both grows
+ * and shrinks — and an \a amount of 0 keeps it untouched. Pure so the stroke code and tests share
+ * one definition.
+ */
+inline float random_size_factor(const float amount, const float random)
+{
+  return 1.0f + amount * (random - 0.5f);
 }
 
 struct PaintRuntime : NonCopyable, NonMovable {
@@ -154,22 +166,31 @@ struct PaintRuntime : NonCopyable, NonMovable {
   float size_pressure_value = 0.0f;
 
   /**
-   * Transient per-dab #BrushMaterialPaint::size_random factor the brush radius is multiplied by.
+   * Transient per-dab #Brush::size_random factor the brush radius is multiplied by.
    * Recomputed on every stroke step; 1.0 means no size randomization (feature off, or a stroke
    * method that excludes it, e.g. anchored).
    */
   float size_random_value = 1.0f;
 
   /**
-   * Transient per-dab #BrushMaterialPaint::strength_random / mask_strength_random factor the
-   * stroke strength is multiplied by. Recomputed on every stroke step; 1.0 means no strength
-   * randomization (feature off, or a stroke method that excludes it, e.g. anchored). One value
-   * serves both variants: a stroke paints either the Mask or the channels, never both, and the
-   * stroke step picks the matching amount when it draws the factor. Cleared in #PaintStroke::done
+   * Transient per-dab #Brush::strength_random factor the stroke strength is multiplied by.
+   * Recomputed on every stroke step; 1.0 means no strength randomization (feature off, or a
+   * stroke method that excludes it, e.g. anchored). Cleared in #PaintStroke::done
    * - cancelled strokes included, the reset runs before the cancel branch - so a stroke's draw
    * never leaks into the cursor or the next stroke, whichever way the stroke ends.
    */
   float strength_random_value = 1.0f;
+
+  /**
+   * Transient per-dab #Brush::spacing_random factor the spacing between dabs is multiplied by,
+   * 1.0 meaning no randomization. Recomputed on every stroke step: the draw lands in
+   * #PaintStroke::update when a dab is placed, the consumption in #paint_space_stroke_spacing
+   * computes the distance to the next dab, so every interval is randomized by the draw of the dab
+   * it starts from, and only a spacing computed before the first dab has landed (e.g. the
+   * smooth-stroke first dab) uses the untouched 1.0. Cleared in #PaintStroke::done alongside the
+   * other per-dab randoms — the single reset point, run for finished and cancelled strokes alike.
+   */
+  float spacing_random_value = 1.0f;
 
   /**
    * Transient per-dab factor of #Brush::mask_texture_strength_random: the Mask texture's coverage

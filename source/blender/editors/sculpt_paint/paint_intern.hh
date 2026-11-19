@@ -955,6 +955,20 @@ bool paint_supports_dynamic_size(const Brush &br, PaintMode mode);
  * Return true if the brush size can change during paint (normally used for pressure).
  */
 bool paint_supports_dynamic_tex_coords(const Brush &br, PaintMode mode);
+/**
+ * Single decision point for whether a brush supports the per-dab stroke randomness
+ * (#Brush::size_random, #Brush::strength_random): like the texture coordinate randomization,
+ * anchored and grab-like strokes keep a fixed position or a single dab, so there is nothing to
+ * randomize.
+ */
+bool paint_supports_stroke_randomness(const Brush &br, PaintMode mode);
+/**
+ * #paint_supports_stroke_randomness for the spacing random (#Brush::spacing_random). Cloth
+ * brushes are excluded on purpose: their spacing is deliberately radius-independent (the cloth
+ * branch in #paint_space_stroke_spacing), so randomizing their inter-dab distance would silently
+ * change the fixed simulation update rate.
+ */
+bool paint_supports_spacing_randomness(const Brush &br, PaintMode mode);
 bool paint_supports_smooth_stroke(const Brush &brush,
                                   PaintMode mode,
                                   BrushSwitchMode brush_switch_mode);

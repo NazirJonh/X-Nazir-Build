@@ -2895,7 +2895,7 @@ ShapeMaskMapping mask_mapping_get(const BrushMaterialPaint &brush_paint, const B
   mapping.angle = shared.rot;
   mapping.rotation_random = (shared.brush_angle_mode & MTEX_ANGLE_RANDOM) ? shared.random_angle :
                                                                            0.0f;
-  mapping.scale_random = brush_paint.size_random;
+  mapping.scale_random = brush.size_random;
   /* Stable base for the per-shape sequence: the same brush always produces the same layout, so a
    * preview and its commit agree. It also ties a cached source to its brush (see
    * #mask_source_key). */

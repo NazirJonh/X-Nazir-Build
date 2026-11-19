@@ -3433,23 +3433,6 @@ static void rna_def_brush_curve_patch_settings(BlenderRNA *brna)
       prop, "Swap Axis", "Run the texture's U axis along the control curve's length instead of V");
   RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
 
-  prop = RNA_def_property(srna, "stamp_size_random", PROP_INT, PROP_PERCENTAGE);
-  RNA_def_property_int_sdna(prop, nullptr, "stamp_size_random");
-  RNA_def_property_range(prop, 0, 100);
-  RNA_def_property_ui_range(prop, 0, 100, 1, -1);
-  RNA_def_property_ui_text(
-      prop, "Random Size", "Randomly shrink each stamp by up to this fraction of the brush size");
-  RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
-
-  prop = RNA_def_property(srna, "stamp_strength_random", PROP_INT, PROP_PERCENTAGE);
-  RNA_def_property_int_sdna(prop, nullptr, "stamp_strength_random");
-  RNA_def_property_range(prop, 0, 100);
-  RNA_def_property_ui_range(prop, 0, 100, 1, -1);
-  RNA_def_property_ui_text(prop,
-                           "Random Strength",
-                           "Randomly reduce each stamp's relief strength by up to this fraction");
-  RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
-
   prop = RNA_def_property(srna, "stamp_projection", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "stamp_projection");
   RNA_def_property_enum_items(prop, rna_enum_brush_curve_patch_stamp_projection_items);
@@ -5529,33 +5512,6 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
   RNA_def_property_ui_icon(prop, ICON_UNLOCKED, 1);
   RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_shared_mapping_update");
 
-  prop = RNA_def_property(srna, "size_random", PROP_FLOAT, PROP_FACTOR);
-  RNA_def_property_float_sdna(prop, nullptr, "size_random");
-  RNA_def_property_range(prop, 0.0f, 1.0f);
-  RNA_def_property_ui_text(prop,
-                           "Size Random",
-                           "Randomly vary the brush size with every stroke step by a symmetric "
-                           "factor of up to half this amount around the base size");
-  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
-
-  prop = RNA_def_property(srna, "strength_random", PROP_FLOAT, PROP_FACTOR);
-  RNA_def_property_float_sdna(prop, nullptr, "strength_random");
-  RNA_def_property_range(prop, 0.0f, 1.0f);
-  RNA_def_property_ui_text(
-      prop,
-      "Strength Random",
-      "Randomly lower the stroke strength with every stroke step by up to this fraction");
-  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
-
-  prop = RNA_def_property(srna, "mask_strength_random", PROP_FLOAT, PROP_FACTOR);
-  RNA_def_property_float_sdna(prop, nullptr, "mask_strength_random");
-  RNA_def_property_range(prop, 0.0f, 1.0f);
-  RNA_def_property_ui_text(
-      prop,
-      "Mask Strength Random",
-      "Randomly lower the stroke strength with every Mask stroke step by up to this fraction");
-  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
-
   prop = RNA_def_property(srna, "base_color", PROP_FLOAT, PROP_COLOR);
   RNA_def_property_float_sdna(prop, nullptr, "base_color");
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
@@ -6502,6 +6458,37 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_ui_range(prop, 1, 500, 5, -1);
   RNA_def_property_ui_text(
       prop, "Spacing", "Spacing between brush daubs as a percentage of brush diameter");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "size_random", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "size_random");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(prop,
+                           "Size Random",
+                           "Randomly vary the stamp size with every stroke step: dab strokes vary "
+                           "it symmetrically by up to half this amount around the base size, "
+                           "Curve Patch stamps only shrink by it");
+  RNA_def_property_translation_context(prop, BLT_I18NCONTEXT_ID_BRUSH);
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "strength_random", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "strength_random");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(prop,
+                           "Strength Random",
+                           "Randomly lower the stamp strength with every stroke step "
+                           "by up to this fraction");
+  RNA_def_property_translation_context(prop, BLT_I18NCONTEXT_ID_BRUSH);
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "spacing_random", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "spacing_random");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(prop,
+                           "Spacing Random",
+                           "Randomly shrink the spacing between stamps with every stroke step by "
+                           "up to this fraction; strokes never grow sparser than the base spacing");
+  RNA_def_property_translation_context(prop, BLT_I18NCONTEXT_ID_BRUSH);
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
   prop = RNA_def_property(srna, "grad_spacing", PROP_INT, PROP_PIXEL);

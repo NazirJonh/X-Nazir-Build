@@ -917,6 +917,74 @@ static void version_material_paint_channel_height_defaults(Main &bmain)
   }
 }
 
+/**
+ * The per-stroke randomness moved out of the per-feature structs into the Brush itself:
+ * #BrushMaterialPaint's size/strength randoms and #BrushCurvePatchSettings's stamp randoms both
+ * became #Brush::size_random / #Brush::strength_random, with Curve Patch keeping its own
+ * shrink-only application of the shared fields (see #curve_patch_params_from_brush). The old
+ * fields stay in DNA solely so this migration can read them; they are zeroed after the copy, and
+ * nothing outside this file may touch them.
+ *
+ * The first non-zero amount wins per field: a brush whose material paint and Curve Patch settings
+ * both carried amounts keeps the material paint's. The Mask stroke's separate
+ * #BrushMaterialPaint.mask_strength_random is dropped instead of merged: the shared field now
+ * serves Mask strokes too, and picking one of two old amounts would be arbitrary.
+ */
+static void version_brush_stroke_random_one(Brush &brush)
+{
+  bool size_random_set = brush.size_random != 0.0f;
+  bool strength_random_set = brush.strength_random != 0.0f;
+
+  if (brush.material_paint != nullptr) {
+    BrushMaterialPaint &material_paint = *brush.material_paint;
+    if (material_paint.size_random != 0.0f && !size_random_set) {
+      brush.size_random = material_paint.size_random;
+      size_random_set = true;
+    }
+    if (material_paint.strength_random != 0.0f && !strength_random_set) {
+      brush.strength_random = material_paint.strength_random;
+      strength_random_set = true;
+    }
+    material_paint.size_random = 0.0f;
+    material_paint.strength_random = 0.0f;
+  }
+
+  BrushCurvePatchSettings &curve_patch = brush.curve_patch;
+  if (curve_patch.stamp_size_random != 0 && !size_random_set) {
+    /* The old stamp randoms were RNA-clamped percentages (0..100), the brush fields are fractions
+     * (0..1). */
+    brush.size_random = float(curve_patch.stamp_size_random) / 100.0f;
+  }
+  if (curve_patch.stamp_strength_random != 0 && !strength_random_set) {
+    brush.strength_random = float(curve_patch.stamp_strength_random) / 100.0f;
+  }
+  curve_patch.stamp_size_random = 0;
+  curve_patch.stamp_strength_random = 0;
+}
+
+static void version_brush_stroke_random(Main &bmain)
+{
+  for (Brush &brush : bmain.brushes) {
+    version_brush_stroke_random_one(brush);
+  }
+  /* Material paint presets have no brush to receive the amounts, so their deprecated fields are
+   * only cleared; presets written after the move carry the randomness on the Brush itself. */
+  for (Scene &scene : bmain.scenes) {
+    if (scene.toolsettings == nullptr) {
+      continue;
+    }
+    for (PaintMaterialBrushPreset &preset :
+         scene.toolsettings->paint_mode.material_paint_brush_presets)
+    {
+      if (preset.material_paint == nullptr) {
+        continue;
+      }
+      preset.material_paint->size_random = 0.0f;
+      preset.material_paint->strength_random = 0.0f;
+    }
+  }
+}
+
 static void version_material_paint_channel_alpha_ao_emission_defaults(Main &bmain)
 {
   for (Brush &brush : bmain.brushes) {
@@ -2516,6 +2584,23 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
         scene.toolsettings->imapaint.selection_show_wire = 1;
       }
     }
+  }
+
+  /* The brush stroke randomness moved from #BrushMaterialPaint and #BrushCurvePatchSettings into
+   * the Brush itself, so old files carry the amounts in the deprecated DNA fields that were kept
+   * only for this migration.
+   *
+   * NOTE: Keyed on the member existence instead of a file subversion (see above); stays idempotent
+   * because the migration zeroes the deprecated fields after copying them. Keyed with an OR, not
+   * an AND: the Curve Patch stamp randoms shipped ten days before the material paint ones
+   * (September 3 vs 13), so dev-build files from that window carry one deprecated set without the
+   * other, and the migration has to run for whichever set is present. */
+  if (DNA_struct_member_exists_with_alias(
+          fd->filesdna, "BrushMaterialPaint", "float", "size_random") ||
+      DNA_struct_member_exists_with_alias(
+          fd->filesdna, "BrushCurvePatchSettings", "char", "stamp_size_random"))
+  {
+    version_brush_stroke_random(*bmain);
   }
 
   /**

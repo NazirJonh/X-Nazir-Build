@@ -361,23 +361,6 @@ struct BrushMaterialPaint {
    * #BrushMaterialPaintChannel.source_mtex.tex, only reading mapping from here at paint time.
    */
   struct MTex shared_source_mapping;
-  /**
-   * Random brush-size variation per stroke step, 0..1. Each dab multiplies its radius by
-   * `1 + size_random * (rand - 0.5)`, i.e. a symmetric range of +-(size_random / 2) around the
-   * base radius; 0 keeps the size untouched. The transient per-dab factor lives in
-   * #bke::PaintRuntime::size_random_value.
-   */
-  float size_random = 0.0f;
-  /**
-   * Random strength variation per stroke step, 0..1. Each dab multiplies the stroke strength by
-   * `1 - strength_random * rand`, i.e. only lowers it by up to this fraction; 0 keeps the strength
-   * untouched. Read for every channel a stroke paints except the Mask, which uses
-   * #mask_strength_random instead (a stroke writes either the Mask or channels, never both). The
-   * transient per-dab factor lives in #bke::PaintRuntime::strength_random_value.
-   */
-  float strength_random = 0.0f;
-  /** Same random strength reduction as #strength_random, read while the stroke paints the Mask. */
-  float mask_strength_random = 0.0f;
   /** #eBrushMaterialPaintSourceMode. */
   char source_mode = 0;
   /** #eBrushMaterialPaintSourceLayout. */
@@ -413,11 +396,11 @@ struct BrushMaterialPaint {
    * Lives in former padding, so the struct layout is unchanged.
    */
   char hide_mask_source_grid = 0;
-  /* #source_material is pointer-aligned: 4 (size_random) + 4 (strength_random) + 4
-   * (mask_strength_random) + 2 (modes) + 2 (mask flag) + 1 (scale lock) + 1 (mask source invert)
-   * + 1 (mask source select mode) + 1 (hide mask source grid) keep the int + pointer pair below
-   * on their natural boundaries without hidden compiler padding.
-   */
+  /* #source_material is pointer-aligned: 2 (modes) + 2 (mask flag) + 1 (scale lock) + 1 (mask
+   * source invert) + 1 (mask source select mode) + 1 (hide mask source grid) + 4 (_pad_modes)
+   * keep the int + pointer pair below on their natural boundaries without hidden compiler
+   * padding. */
+  char _pad_modes[4] = {};
   /**
    * Side of the square bake buffer in pixels. Deliberately smaller than
    * #PaintModeSettings.new_channel_image_size: this is a scratch buffer several channels of which
@@ -449,6 +432,17 @@ struct BrushMaterialPaint {
    * Full scope; a marker that no longer resolves makes the source stale.
    */
   bUUID source_layer_marker = {};
+  /**
+   * Deprecated: per-stroke size randomization moved to #Brush::size_random, which every stroke
+   * consumer reads now. Kept in DNA only so `versioning_520.cc` can migrate old files' amounts
+   * into the brush field, which then zeroes this; nothing else may read or write it. The old
+   * #mask_strength_random (the Mask stroke's separate amount) is not kept: the shared
+   * #Brush::strength_random serves Mask strokes too.
+   */
+  float size_random = 0.0f;
+  /** Deprecated: per-stroke strength randomization moved to #Brush::strength_random, see
+   * #size_random. */
+  float strength_random = 0.0f;
 };
 
 /** Max number of propagation steps for automasking settings. */
@@ -541,9 +535,9 @@ struct BrushCurvePatchTextureSlot {
  *
  * Makesdna does not insert alignment padding on its own (see `check_member_alignment()` in
  * `makesdna.cc`), so `_pad[6]` sits between `end_point_shape` and `stamp_mode` below to align the
- * following pointer-containing members to eight bytes, and `_pad1[5]` sits after the
- * `stamp_texture_source` char group to do the same for `tex_start`; new `char` settings should be
- * appended after `stamp_mode`'s group, not before the padding.
+ * following pointer-containing members to eight bytes, and `_pad1[4]` sits after the deprecated
+ * stamp randoms to do the same for `tex_start`; new `char` settings should be appended after
+ * `stamp_mode`'s group, not before the padding.
  */
 struct BrushCurvePatchSettings {
   /** STAMPS mode texture list, active only when #stamp_texture_source is
@@ -578,12 +572,6 @@ struct BrushCurvePatchSettings {
   /** STAMPS mode: which coordinate frame a stamp's texture is sampled in. See
    * #eBrushCurvePatchStampProjection. */
   char stamp_projection = BRUSH_CURVE_PATCH_STAMP_PROJ_CURVE;
-  /** STAMPS mode: per-stamp size randomization as a percentage (RNA-clamped 0..100). Stamps only
-   * ever shrink from the brush radius, never grow past it. */
-  char stamp_size_random = 0;
-  /** STAMPS mode: per-stamp relief strength randomization as a percentage (RNA-clamped 0..100).
-   * Like the size, it only ever reduces. */
-  char stamp_strength_random = 0;
   /** Whether every stamp samples the brush's own texture or draws one at random from
    * #texture_slots. See #eBrushCurvePatchTexSource. */
   char stamp_texture_source = BRUSH_CURVE_PATCH_TEX_SINGLE;
@@ -601,6 +589,17 @@ struct BrushCurvePatchSettings {
    * the ribbon's width is tessellated. See #eBrushCurvePatchRadiusInterp. Mostly meaningful in
    * RIBBON mode, where the width follows the interpolated radii. */
   char radius_interp = BRUSH_CURVE_PATCH_RADIUS_INTERP_SPLINE;
+  /**
+   * Deprecated: STAMPS mode per-stamp size randomization as a percentage (RNA-clamped 0..100),
+   * moved to #Brush::size_random, which stores a fraction instead. Kept in DNA only so
+   * `versioning_520.cc` can migrate old files' amounts (divided by 100) into the brush field,
+   * which then zeroes this; nothing else may read or write it.
+   */
+  char stamp_size_random = 0;
+  /** Deprecated: STAMPS mode per-stamp strength randomization, moved to #Brush::strength_random,
+   * see #stamp_size_random. */
+  char stamp_strength_random = 0;
+  /* Absorbs the deprecated stamp randoms above; keeps `tex_start` on its 8-byte boundary. */
   char _pad1[4] = {};
   /** Whether the whole ribbon carries the brush's own texture or splits into the Start / Middle /
    * End textures below. See #eBrushCurvePatchTexSource. */
@@ -724,6 +723,30 @@ struct Brush {
   float wet_persistence = 0;
   /** Density */
   float density = 0;
+  /**
+   * Per-dab size randomization (#bke::PaintRuntime::size_random_value), the single field shared
+   * by dab strokes, PBR paint and Curve Patch stamps. Dab strokes multiply the radius by
+   * `1 + size_random * (rand - 0.5)`, a symmetric range of +-(size_random / 2) around the base
+   * size; Curve Patch stamps apply their own shrink-only factor instead, because a stamp growing
+   * past the radius would clip against the patch's bounds.
+   */
+  float size_random = 0.0f;
+  /**
+   * Per-dab strength randomization (#bke::PaintRuntime::strength_random_value), the single field
+   * shared by dab strokes, PBR paint (Mask strokes included) and Curve Patch stamps: the strength
+   * is multiplied by `1 - strength_random * rand`, i.e. only lowered by up to this fraction;
+   * 0 keeps the strength exact.
+   */
+  float strength_random = 0.0f;
+  /**
+   * Per-dab spacing randomization (#bke::PaintRuntime::spacing_random_value): the spacing between
+   * dabs is multiplied by `1 - spacing_random * rand`, so spacing only shrinks. Drawn by the
+   * stroke step and consumed by #paint_space_stroke_spacing.
+   */
+  float spacing_random = 0.0f;
+  /* The three random floats above add 12 bytes; this keeps the members that follow on their 8-byte
+   * boundary (makesdna does not insert padding itself). */
+  char _pad_stroke_random[4] = {};
   ePaintBrush_flag paint_flags = {};
 
   /** Tip Shape */

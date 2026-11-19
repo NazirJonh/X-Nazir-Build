@@ -189,11 +189,12 @@ bke::CurvePatchParams curve_patch_params_from_brush(const Brush &brush,
   params.stamp_mode = stamp_mode_from_dna(settings.stamp_mode);
   params.stamp_layout = stamp_layout_from_dna(settings.stamp_layout);
   params.stamp_projection = stamp_projection_from_dna(settings.stamp_projection);
-  /* The DNA fields are percentages and the core takes fractions in `[0, 1]`. The division belongs
-   * here and only here, so that no consumer has to know which of the two conventions it is
-   * holding. */
-  params.stamp_size_random = float(settings.stamp_size_random) / 100.0f;
-  params.stamp_strength_random = float(settings.stamp_strength_random) / 100.0f;
+  /* Read straight from the brush: the fields are fractions in `[0, 1]`, the convention the core
+   * takes, so no percent conversion happens anywhere. The stamps apply them through their own
+   * shrink-only formulas, since a stamp growing past `radius` would clip against the patch's
+   * bounds. */
+  params.stamp_size_random = brush.size_random;
+  params.stamp_strength_random = brush.strength_random;
 
   /* Blender stores Spacing as a percentage of the brush DIAMETER, the same convention a normal dab
    * stroke uses, so the stamps land at the same density a freehand stroke of this brush would

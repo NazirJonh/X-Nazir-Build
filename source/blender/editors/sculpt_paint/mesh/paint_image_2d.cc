@@ -2290,9 +2290,9 @@ static float paint_2d_ibuf_add_if(
 
 /**
  * The strength this dab paints with: the brush/unified Strength — already folded with pressure
- * and overlap by the stroke system — times the PBR per-dab strength-random factor
- * (#BrushMaterialPaint::strength_random / mask_strength_random through
- * #bke::PaintRuntime::strength_random_value). The stroke step draws the factor once and every
+ * and overlap by the stroke system — times the per-dab strength-random factor
+ * (#Brush::strength_random through #bke::PaintRuntime::strength_random_value). The stroke step
+ * draws the factor once and every
  * reader of this helper within the same dab shares it; outside a PBR stroke the factor is 1.0, so
  * the value reduces to #BKE_brush_alpha_get. Every place that derives a dab strength from the
  * brush alpha must go through this, exactly like the sculpt engine's #StrokeCache::bstrength.

@@ -6114,7 +6114,7 @@ void do_symmetrical_brush_actions(const Depsgraph &depsgraph,
                       1.0f :
                       calc_symmetry_feather(sd, symm, symm_mesh, feather_location, cache.radius);
 
-  /* PBR Strength Random (#BrushMaterialPaint::strength_random via
+  /* Strength Random (#Brush::strength_random via
    * #PaintRuntime::strength_random_value): scale this step's dab strength. The stroke step draws
    * the factor once per dab and every channel and symmetry pass of the dab shares it; recomputing
    * from the base strength each time (instead of accumulating into #StrokeCache::bstrength) keeps
@@ -9885,7 +9885,7 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
 }
 
 /**
- * Per-dab #BrushMaterialPaint::size_random factor for radii derived from the brush radius. Curve
+ * Per-dab #Brush::size_random factor for radii derived from the brush radius. Curve
  * strokes get 1: their stroke point radius already carries the factor (#PaintStroke::add_step).
  * Every place that derives a dab radius from the brush radius must apply it, otherwise secondary
  * objects of a multi-object stroke paint with a different size than the primary one.
@@ -10141,7 +10141,7 @@ void SculptPaintStroke::stroke_cache_update(PointerRNA *ptr)
     cache.dyntopo_pixel_radius = paint_runtime.initial_pixel_radius;
   }
 
-  /* PBR Size Random (#BrushMaterialPaint::size_random): scale this step's dab radius so the
+  /* Size Random (#Brush::size_random): scale this step's dab radius so the
    * painted area, the brush local matrix (Area mapping) and the dyntopo detail size all follow
    * the same randomized size. Curve stroke points already carry the factor in their RNA `size`
    * value.

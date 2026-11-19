@@ -201,7 +201,8 @@ struct CurvePatchParams {
    * per-point rotation attribute when it is off (the per-point angle handle is shown then), so
    * the switch itself -- not just the amount -- is part of the parameters. */
   bool stamp_use_random_angle = false;
-  /** Per-stamp randomization, as fractions in [0, 1] (the DNA fields are percentages). */
+  /** Per-stamp randomization, as fractions in [0, 1], read from #Brush::size_random /
+   * #Brush::strength_random and mirrored 1:1 into the DNA #PaintVectorCurveParams. */
   float stamp_size_random = 0.0f;
   float stamp_strength_random = 0.0f;
   CurvePatchStampProjection stamp_projection = CurvePatchStampProjection::Curve;

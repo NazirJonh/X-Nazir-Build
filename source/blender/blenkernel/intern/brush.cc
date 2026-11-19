@@ -815,6 +815,9 @@ static void brush_defaults(Brush *brush)
   FROM_DEFAULT(smooth_stroke_factor);
   FROM_DEFAULT(rate);
   FROM_DEFAULT(jitter);
+  FROM_DEFAULT(size_random);
+  FROM_DEFAULT(strength_random);
+  FROM_DEFAULT(spacing_random);
   FROM_DEFAULT(texture_sample_bias);
   FROM_DEFAULT(texture_overlay_alpha);
   FROM_DEFAULT(mask_overlay_alpha);
@@ -1891,6 +1894,9 @@ void BKE_brush_debug_print_state(Brush *br)
   BR_TEST_FLAG_OVERLAY(BRUSH_OVERLAY_SECONDARY_OVERRIDE_ON_STROKE);
 
   BR_TEST(jitter, f);
+  BR_TEST(size_random, f);
+  BR_TEST(strength_random, f);
+  BR_TEST(spacing_random, f);
   BR_TEST(spacing, d);
   BR_TEST(smooth_stroke_radius, d);
   BR_TEST(smooth_stroke_factor, f);

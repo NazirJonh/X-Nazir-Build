@@ -799,7 +799,6 @@ def draw_pbr_mask_slot(layout, context, brush):
         panel.prop(material_paint, "mask_source")
         if material_paint.mask_source_has_texture:
             panel.prop(material_paint, "use_mask_source_invert", text="Invert Source")
-        _draw_material_paint_strength_random(panel, material_paint, mask_stroke=True)
 
     panel.separator()
     draw_mask_texture_panel(panel, context, brush, show_grid=False, show_invert=False)
@@ -976,12 +975,12 @@ class StrokePanel(BrushPanel):
                 row.prop(brush, "spacing", text="Spacing", slider=True)
                 col.prop(brush, "jitter", text="Jitter", slider=True)
                 row = col.row(align=True)
-                row.prop(cp, "stamp_size_random", text="Random Size", slider=True)
+                row.prop(brush, "size_random", text="Random Size", slider=True)
                 if is_points:
                     # Per-point radius handles: edit each point's own stamp size.
                     row.prop(cp, "show_point_radius_handles", text="", icon='CON_TRACKTO')
                 row = col.row(align=True)
-                row.prop(cp, "stamp_strength_random", text="Random Strength", slider=True)
+                row.prop(brush, "strength_random", text="Random Strength", slider=True)
                 if is_points:
                     # Per-point strength handles: edit each point's own stamp strength.
                     row.prop(cp, "show_point_strength_handles", text="", icon='SMOOTHCURVE')
@@ -1127,7 +1126,10 @@ class StrokePanel(BrushPanel):
             row.prop(brush, "spacing", text="Spacing")
             row.prop(brush, "use_pressure_spacing", toggle=True, text="")
 
-        if brush.stroke_method in {'LINE', 'CURVE'}:
+        # Roll rides the spaced-stroke path (it places its dabs by spacing, same as Space), so it
+        # edits spacing like Line and Curve do. No pressure toggle: the pressure branch in
+        # #paint_space_stroke_spacing only runs for Space.
+        if brush.stroke_method in {'LINE', 'CURVE', 'ROLL'}:
             row = col.row(align=True)
             row.prop(brush, "spacing", text="Spacing")
 
@@ -1171,7 +1173,24 @@ class StrokePanel(BrushPanel):
             col.prop(brush, "dash_ratio", text="Dash Ratio")
             col.prop(brush, "dash_samples", text="Dash Length")
 
-        if (mode == 'SCULPT' and brush.sculpt_capabilities.has_jitter) or mode != 'SCULPT':
+        # The Jitter and Random blocks share one visibility rule so their per-dab variation
+        # settings always appear together: in Sculpt only brush types with jitter support get
+        # them, other modes show them for every brush.
+        show_stroke_jitter = mode != 'SCULPT' or brush.sculpt_capabilities.has_jitter
+
+        # Per-stamp randomization. The Curve Patch stroke draws these same properties in its own
+        # panel above (as Random Size / Random Strength), so they are hidden here to avoid two
+        # sliders for one field.
+        if brush.stroke_method != 'CURVE_PATCH':
+            if show_stroke_jitter:
+                col.separator()
+                col.label(text="Random")
+                col.prop(brush, "size_random", text="Size", slider=True)
+                col.prop(brush, "strength_random", text="Strength", slider=True)
+                if brush.stroke_method in {'SPACE', 'LINE', 'CURVE', 'ROLL'}:
+                    col.prop(brush, "spacing_random", text="Spacing", slider=True)
+
+        if show_stroke_jitter:
             col.separator()
             row = col.row(align=True)
             if brush.jitter_unit == 'BRUSH':
@@ -3018,16 +3037,6 @@ def _draw_material_paint_source_texture(panel, context, channel, *, enabled=True
     # #PAINT_MT_material_paint_channel_socket.
 
 
-def _draw_material_paint_strength_random(layout, material_paint, *, mask_stroke):
-    """Draw the one active Strength Random: the Mask variant on a Mask stroke, else the channel one."""
-    layout.prop(
-        material_paint,
-        "mask_strength_random" if mask_stroke else "strength_random",
-        text="Mask Strength Random" if mask_stroke else "Strength Random",
-        slider=True,
-    )
-
-
 def _draw_material_paint_shared_mapping(layout, material_paint, *,
                                         show_map_mode=True):
     """Mapping shared by every channel's source texture: Mapping mode, Size (X/Y only), Angle.
@@ -3036,10 +3045,9 @@ def _draw_material_paint_shared_mapping(layout, material_paint, *,
     channel.
     Multi-channel patterns (a Base Color texture with a matching Normal/Roughness texture meant
     to tile together) need identical mapping to stay aligned, so there is deliberately no
-    per-channel override and no Offset control.
-    Below the texture mapping, Size Random varies the brush dab size itself per stroke step; the
-    value is shared by every channel, since the dab geometry is shared too. Strength Random is drawn
-    by #_draw_material_paint_strength_random where the panel can keep it visible.
+    per-channel override and no Offset control. The Size and Strength Random sliders live in the
+    common Stroke panel: one pair of properties drives dab strokes, PBR paint and Curve Patch
+    stamps alike.
 
     \a show_map_mode is false for the Shape tools: their Mask Source texture is placed in the
     shape's own frame, where Area/View projection has no meaning. Size, Angle and the random
@@ -3059,9 +3067,6 @@ def _draw_material_paint_shared_mapping(layout, material_paint, *,
             col.prop(slot, "use_random", text="Random")
             if slot.use_random:
                 col.prop(slot, "random_angle", text="Random Angle")
-
-    col.separator()
-    col.prop(material_paint, "size_random", text="Size Random", slider=True)
 
 
 def material_paint_visible_channels_owner(context):
@@ -3558,11 +3563,6 @@ def draw_material_paint_channels(
                 material_paint,
                 show_map_mode=not shape_tool,
             )
-        layout.separator()
-    if not paint_shape_tool_active(context):
-        # Strength Random does not depend on a source texture or its mapping, so it is drawn
-        # outside the collapsed Image Transform panel where it would otherwise stay hidden.
-        _draw_material_paint_strength_random(layout, material_paint, mask_stroke=is_mask_target)
         layout.separator()
 
     # Wrapped rows of fixed-width toggles; see #_draw_material_paint_channel_toggles.

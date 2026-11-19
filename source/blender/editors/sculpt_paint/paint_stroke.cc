@@ -45,7 +45,6 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_generate.hh"
-#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_types.hh"
 
 #include "WM_api.hh"
@@ -428,10 +427,9 @@ bool PaintStroke::update(bContext *C,
   bool is_dry_run = false;
   bool do_random = false;
   bool do_random_mask = false;
-  /* PBR Paint shared stroke randomness (#BrushMaterialPaint): one random angle for every
-   * channel's source texture and one size factor per dab, so multi-channel patterns stay
-   * aligned. Anchored and grab-like strokes are excluded through the same gate as the regular
-   * texture coordinate randomization below. */
+  /* PBR Paint shared stroke randomness: one random angle for every channel's source texture, so
+   * multi-channel patterns stay aligned. Anchored and grab-like strokes are excluded through the
+   * same gate as the regular texture coordinate randomization below. */
   const BrushMaterialPaint *material_paint =
       paint_stroke_material_paint_active(*scene, *paint, brush, mode) ? brush.material_paint :
                                                                          nullptr;
@@ -443,27 +441,26 @@ bool PaintStroke::update(bContext *C,
                                         MTEX_MAP_MODE_RANDOM) &&
                                    (material_paint->shared_source_mapping.brush_angle_mode &
                                     MTEX_ANGLE_RANDOM);
-  const bool do_pbr_size_random = material_paint != nullptr &&
-                                  material_paint->size_random > 0.0f &&
-                                  paint_supports_dynamic_tex_coords(brush, mode);
-  /* A Mask stroke paints the Mask map instead of the material channels (the same rule that sets
-   * #ImagePaintTarget::is_mask_target and the 2D engine's `is_mask_target`), so it reads
-   * #BrushMaterialPaint::mask_strength_random while every other stroke reads #strength_random.
-   * Only one of the two is active at a time. */
-  const bool pbr_mask_stroke = material_paint != nullptr && scene->toolsettings != nullptr &&
-                               BKE_paint_layers_target_is_mask(scene->toolsettings->paint_mode);
-  const float strength_random_amount =
-      material_paint == nullptr ?
-          0.0f :
-          (pbr_mask_stroke ? material_paint->mask_strength_random :
-                             material_paint->strength_random);
-  const bool do_pbr_strength_random = strength_random_amount > 0.0f &&
-                                      paint_supports_dynamic_tex_coords(brush, mode);
+  /* Effective per-dab amplitudes of the size and strength randomization. One pair of brush fields
+   * serves every stroke kind: dab strokes, PBR paint (Mask strokes included) and Curve Patch
+   * stamps, so a slider cannot be set one way for PBR and another for the rest. */
+  const float size_random_amount = brush.size_random;
+  const float strength_random_amount = brush.strength_random;
   /* Mask texture influence random: independent of PBR, it weakens the clip texture of any brush
    * that has one assigned. */
   const bool do_mask_influence_random = brush.mask_texture_strength_random > 0.0f &&
                                         brush.mask_mtex.tex != nullptr &&
                                         paint_supports_dynamic_tex_coords(brush, mode);
+  /* One gate for all three stroke randoms, so the dab-placing paths cannot drift apart on which
+   * brushes randomize. Spacing excludes cloth as well, whose spacing is deliberately
+   * radius-independent (#paint_supports_spacing_randomness); it only reshapes the distance
+   * between dabs, which #paint_space_stroke_spacing consumes through the cached factor. */
+  const bool do_size_random = size_random_amount > 0.0f &&
+                              paint_supports_stroke_randomness(brush, mode);
+  const bool do_strength_random = strength_random_amount > 0.0f &&
+                                  paint_supports_stroke_randomness(brush, mode);
+  const bool do_spacing_random = brush.spacing_random > 0.0f &&
+                                 paint_supports_spacing_randomness(brush, mode);
   *r_location_is_set = false;
   /* XXX: Use pressure value from first brush step for brushes which don't
    *      support strokes (grab, thumb). They depends on initial state and
@@ -637,8 +634,8 @@ bool PaintStroke::update(bContext *C,
     }
   }
 
-  if ((do_random || do_random_mask || do_pbr_random_angle || do_pbr_size_random ||
-       do_pbr_strength_random || do_mask_influence_random) &&
+  if ((do_random || do_random_mask || do_pbr_random_angle || do_mask_influence_random ||
+       do_size_random || do_strength_random || do_spacing_random) &&
       !rng_)
   {
     /* Lazy initialization. */
@@ -658,7 +655,7 @@ bool PaintStroke::update(bContext *C,
   if (do_pbr_random_angle) {
     /* Same symmetric distribution as the regular texture angle above: a range of
      * +-random_angle / 2, shared by every PBR channel of this dab. RNG order is stable: brush
-     * angle or PBR shared angle, mask angle, PBR size. */
+     * angle or PBR shared angle, mask angle, size. */
     paint_runtime.brush_rotation +=
         -material_paint->shared_source_mapping.random_angle / 2.0f +
         material_paint->shared_source_mapping.random_angle * rng_->get_float();
@@ -671,28 +668,27 @@ bool PaintStroke::update(bContext *C,
     }
   }
 
-  if (do_pbr_size_random) {
+  if (do_size_random) {
     /* Symmetric range of +-size_random / 2 around the base size, applied to this dab's radius
      * only (the initial/start radii stay untouched). Everything downstream — the sculpt stroke
      * cache, the recorded stroke point size and the 2D dab diameter — reads the multiplied
      * #PaintRuntime::pixel_radius, so no path applies the factor twice. */
-    paint_runtime.size_random_value = 1.0f +
-                                      material_paint->size_random * (rng_->get_float() - 0.5f);
+    paint_runtime.size_random_value = bke::random_size_factor(size_random_amount,
+                                                              rng_->get_float());
     paint_runtime.pixel_radius *= paint_runtime.size_random_value;
   }
   else {
     paint_runtime.size_random_value = 1.0f;
   }
 
-  if (do_pbr_strength_random) {
-    /* Randomly lower this dab's strength (#BrushMaterialPaint::strength_random, or
-     * #mask_strength_random for a Mask stroke): the factor lands in [1 - amount, 1], so a dab
-     * never exceeds the user Strength. One factor is shared by every channel of this dab, and
-     * each engine multiplies its strength input by it exactly once (#StrokeCache::bstrength for
-     * the sculpt engine, the 2D dab alpha read in paint_image_2d.cc). The draw comes last, after
-     * the size draw, so enabling this cannot shift the Angle/Size sequences. */
-    paint_runtime.strength_random_value = bke::random_reduction_factor(
-        strength_random_amount, rng_->get_float());
+  if (do_strength_random) {
+    /* Randomly lower this dab's strength: the factor lands in [1 - amount, 1], so a dab never
+     * exceeds the user Strength. One factor is shared by every channel of this dab, and each
+     * engine multiplies its strength input by it exactly once (#StrokeCache::bstrength for the
+     * sculpt engine, the 2D dab alpha read in paint_image_2d.cc). The draw comes after the size
+     * draw, so enabling this cannot shift the Angle/Size sequences. */
+    paint_runtime.strength_random_value = bke::random_reduction_factor(strength_random_amount,
+                                                                       rng_->get_float());
   }
   else {
     paint_runtime.strength_random_value = 1.0f;
@@ -705,6 +701,19 @@ bool PaintStroke::update(bContext *C,
   }
   else {
     paint_runtime.mask_influence_random_value = 1.0f;
+  }
+
+  if (do_spacing_random) {
+    /* Drawn after the mask-influence draw so enabling it cannot shift the other random
+     * sequences. The factor lands in [1 - amount, 1], so the spacing only shrinks.
+     * #paint_space_stroke_spacing computes the distance to the next dab from this cached factor,
+     * so every interval is randomized by the draw of the dab it starts from; a spacing computed
+     * before the first dab has landed uses the untouched 1.0. */
+    paint_runtime.spacing_random_value = bke::random_reduction_factor(brush.spacing_random,
+                                                                      rng_->get_float());
+  }
+  else {
+    paint_runtime.spacing_random_value = 1.0f;
   }
 
   if (!location_sampled) {
@@ -1055,6 +1064,12 @@ static float paint_space_stroke_spacing(const ViewContext &vc,
   if (method == BRUSH_STROKE_SPACE && brush->flag & BRUSH_SPACING_PRESSURE) {
     spacing = spacing * (1.5f - pressure);
   }
+
+  /* Apply the per-dab spacing randomization drawn in #PaintStroke::update
+   * (#Brush::spacing_random). The factor lands in [1 - amount, 1], so the spacing only shrinks.
+   * Cloth brushes never reach this with a factor other than 1: their spacing below is
+   * deliberately radius-independent, so #paint_supports_spacing_randomness excludes them. */
+  spacing *= paint->runtime->spacing_random_value;
 
   if (cloth::is_cloth_deform_brush(*brush)) {
     /* The spacing in tools that use the cloth solver should not be affected by the brush radius to
@@ -1471,6 +1486,7 @@ void PaintStroke::done(bContext *C, const bool is_cancel)
   paint_runtime->size_random_value = 1.0f;
   paint_runtime->strength_random_value = 1.0f;
   paint_runtime->mask_influence_random_value = 1.0f;
+  paint_runtime->spacing_random_value = 1.0f;
 
   /* Still has the live stroke caches/undo data needed to raycast the end point. */
   if (!is_cancel) {
@@ -1759,6 +1775,22 @@ bool paint_supports_dynamic_tex_coords(const Brush &br, const PaintMode mode)
       break;
   }
   return true;
+}
+
+bool paint_supports_stroke_randomness(const Brush &br, const PaintMode mode)
+{
+  /* Same gate as the texture coordinate randomization, plus Drag Dot: it places a single dab, and
+   * the UI hides the randoms for it through the brush "has_jitter" capability. Curve Patch is
+   * excluded too: its stroke only records the gesture that becomes the control curve, and the
+   * stamps laid out along that curve apply these same fields themselves, so randomizing the
+   * recorded gesture would apply them twice. */
+  return paint_supports_dynamic_tex_coords(br, mode) &&
+         !ELEM(br.stroke_method, BRUSH_STROKE_DRAG_DOT, BRUSH_STROKE_CURVE_PATCH);
+}
+
+bool paint_supports_spacing_randomness(const Brush &br, const PaintMode mode)
+{
+  return paint_supports_stroke_randomness(br, mode) && !cloth::is_cloth_deform_brush(br);
 }
 
 enum {

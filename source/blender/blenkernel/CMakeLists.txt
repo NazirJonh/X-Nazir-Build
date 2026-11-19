@@ -979,6 +979,7 @@ if(WITH_GTESTS)
     intern/paint_test.cc
     intern/paint_vector_test.cc
     intern/path_templates_test.cc
+    intern/preferences_paint_add_favorite_test.cc
     intern/preferences_test.cc
     intern/scene_test.cc
     intern/sculpt_history_test.cc

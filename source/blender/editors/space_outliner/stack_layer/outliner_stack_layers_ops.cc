@@ -460,6 +460,20 @@ void OUTLINER_OT_stack_layer_add(wmOperatorType *ot)
                                            "Label",
                                            "Name shown for this button, e.g. \"Add Fill Layer\"");
   RNA_def_property_flag(label_prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+  /* The stable identifier of the kind, what the Favorites pin and what the menu buttons carry:
+   * the exec prefers it over the numeric type, whose place in the source's list moves when the
+   * list is rebuilt between the draw and the exec. Not remembered as a last-used value: a caller
+   * that names the kind by `type` alone (the header's quick buttons) would otherwise inherit the
+   * identifier of whatever was added last, and that identifier wins over `type`. A repeat still
+   * replays the stored properties. */
+  PropertyRNA *kind_id_prop = RNA_def_string(ot->srna,
+                                             "kind_id",
+                                             nullptr,
+                                             MAX_NAME,
+                                             "Kind Identifier",
+                                             "The stable identifier of the kind to add, e.g. "
+                                             "\"PAINT\"; preferred over the numeric type");
+  RNA_def_property_flag(kind_id_prop, PROP_HIDDEN | PROP_SKIP_SAVE);
   RNA_def_int(ot->srna,
               "ordinal",
               -1,

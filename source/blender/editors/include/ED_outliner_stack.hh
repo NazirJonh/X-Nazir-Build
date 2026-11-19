@@ -219,6 +219,17 @@ MaterialPaintLayer *outliner_stack_row_mask_add_image(bContext &C,
 bool outliner_stack_row_add_anchor_reader(bContext &C, const bUUID &point);
 
 /**
+ * The Add menu's Favorites changed: the preferences differ from what was saved last now.
+ *
+ * Every mutation of #UserDef.paint_add_favorites sends the same pair: the preferences'
+ * save-on-exit dirty state, and the `NC_SPACE | ND_SPACE_OUTLINER` notifier the Outliner redraws
+ * its Add menu on. The operator that pins and the RNA collection Python pins through both call
+ * this, so a pin made from the menu and one made from a script behave alike and the pair has one
+ * owner.
+ */
+void outliner_stack_add_favorites_tag_changed();
+
+/**
  * \name Python-defined stack sources and row decorators
  *
  * The registration half of the `bpy.types.OutlinerStackSource` and

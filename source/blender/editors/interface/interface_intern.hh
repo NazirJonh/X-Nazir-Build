@@ -491,6 +491,8 @@ struct ButtonPush : public Button {
   /** Multiplier for overlay background and icon alpha when #draw_as_overlay is set and the button
    * is not hovered (#UI_HOVER). Hovered overlay buttons always draw at full alpha. */
   float overlay_alpha_factor = 1.0f;
+  /** See #button_pushbutton_show_on_row_hover_set(). */
+  bool show_on_row_hover = false;
 };
 
 /** Derived struct for #ButtonType::Num */
@@ -1671,6 +1673,18 @@ int button_is_pushed(Button *but) ATTR_WARN_UNUSED_RESULT;
 void button_override_flag(Main *bmain, Button *but);
 
 void block_bounds_calc(Block *block);
+
+/**
+ * Set #Block.menu_col_padding and #Block.menu_col_row_inset so a menu's columns hug their widest
+ * text and a row of aligned buttons stops beside it like a plain menu item does. The figures must
+ * match what the draw code puts around a menu item text, which #block_bounds_calc_text does not
+ * measure; deriving them here keeps menus that use these fields in agreement with each other.
+ *
+ * \param has_icons: Whether the items carry an icon, which the column leaves room for.
+ * \param extra_units: Extra column units to fold in, e.g. room for a submenu arrow, which the text
+ *                     measure omits.
+ */
+void block_menu_column_metrics_set(Block &block, bool has_icons, float extra_units);
 
 const ColorManagedDisplay *block_cm_display_get(Block *block);
 void block_cm_to_display_space_v3(Block *block, float pixel[3]);

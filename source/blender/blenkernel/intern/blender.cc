@@ -403,6 +403,7 @@ void BKE_blender_userdef_data_free(UserDef *userdef, bool clear_fonts)
   userdef->autoexec_paths.free_no_destruct();
   userdef->script_directories.free_no_destruct();
   userdef->asset_libraries.free_no_destruct();
+  userdef->paint_add_favorites.free_no_destruct();
 
   for (bUserExtensionRepo &repo_ref : userdef->extension_repos.items_mutable()) {
     MEM_SAFE_DELETE(repo_ref.access_token);
@@ -585,6 +586,20 @@ static void userdef_sync_asset_libraries(UserDef *userdef_dst, UserDef *userdef_
   }
 }
 
+static void userdef_sync_paint_add_favorites(UserDef *userdef_dst, UserDef *userdef_src)
+{
+  /* Replace, like the user menus right below: the source is the configuration to become, not one
+   * to merge into what is running. Merging would keep the running pins over a source whose
+   * favorites are empty, which is what Load Factory Settings reads, and a favorite of a kind the
+   * new configuration no longer offers would linger. The list can hold no duplicate (the pin
+   * refuses one), so the source has nothing to disambiguate against the running favorites. */
+  BKE_preferences_paint_add_favorite_clear(userdef_dst);
+  for (bUserPaintAddFavorite &favorite_src : userdef_src->paint_add_favorites.items_mutable()) {
+    BLI_remlink(&userdef_src->paint_add_favorites, &favorite_src);
+    BLI_addtail(&userdef_dst->paint_add_favorites, &favorite_src);
+  }
+}
+
 void BKE_blender_userdef_sync_themes_selective(UserDef *userdef_dst, UserDef *userdef_src)
 {
   for (bTheme &theme_src : userdef_src->themes.items_mutable()) {
@@ -666,6 +681,7 @@ void BKE_blender_userdef_sync_from(UserDef *userdef_dst, UserDef *userdef_src, c
   if (flags & USER_SYNC_FAVORITES) {
     userdef_free_user_menus(userdef_dst);
     userdef_sync_list_move(userdef_dst->user_menus, userdef_src->user_menus);
+    userdef_sync_paint_add_favorites(userdef_dst, userdef_src);
   }
 
   if (flags & USER_SYNC_PATHS) {

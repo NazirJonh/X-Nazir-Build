@@ -69,6 +69,9 @@ void outliner_operatortypes()
   WM_operatortype_append(OUTLINER_OT_stack_layer_effect_add_transform);
   WM_operatortype_append(OUTLINER_OT_stack_layer_effect_add_anchor);
   WM_operatortype_append(OUTLINER_OT_stack_layer_effect_add_anchor_reader);
+  WM_operatortype_append(OUTLINER_OT_stack_add_favorite_set);
+  WM_operatortype_append(OUTLINER_OT_stack_add_favorite_reorder);
+  WM_operatortype_append(OUTLINER_OT_stack_add_menu_call);
   WM_operatortype_append(OUTLINER_OT_stack_layer_remove);
   WM_operatortype_append(OUTLINER_OT_stack_layer_rename);
   WM_operatortype_append(OUTLINER_OT_stack_layer_duplicate);

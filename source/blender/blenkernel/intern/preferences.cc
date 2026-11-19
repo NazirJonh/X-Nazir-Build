@@ -851,6 +851,115 @@ void BKE_preferences_asset_builtin_pin_set(UserDef *userdef,
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Paint Add Menu Favorites
+ * \{ */
+
+/* The DNA member spells the size out as a literal, because #MAX_NAME is not available in the DNA
+ * header; this catches the two drifting apart when either is touched. */
+static_assert(sizeof(bUserPaintAddFavorite::identifier) == MAX_NAME);
+
+bUserPaintAddFavorite *BKE_preferences_paint_add_favorite_find(UserDef *userdef,
+                                                               const char *identifier)
+{
+  return static_cast<bUserPaintAddFavorite *>(BLI_findstring(
+      &userdef->paint_add_favorites, identifier, offsetof(bUserPaintAddFavorite, identifier)));
+}
+
+bool BKE_preferences_paint_add_favorite_contains(const UserDef *userdef, const char *identifier)
+{
+  return BKE_preferences_paint_add_favorite_find(const_cast<UserDef *>(userdef), identifier) !=
+         nullptr;
+}
+
+bUserPaintAddFavorite *BKE_preferences_paint_add_favorite_add(UserDef *userdef,
+                                                              const char *identifier)
+{
+  if (identifier[0] == '\0') {
+    return nullptr;
+  }
+  if (bUserPaintAddFavorite *existing = BKE_preferences_paint_add_favorite_find(userdef,
+                                                                                identifier))
+  {
+    return existing;
+  }
+  bUserPaintAddFavorite *favorite = MEM_new<bUserPaintAddFavorite>(__func__);
+  STRNCPY(favorite->identifier, identifier);
+  BLI_addtail(&userdef->paint_add_favorites, favorite);
+  return favorite;
+}
+
+bool BKE_preferences_paint_add_favorite_remove(UserDef *userdef, const char *identifier)
+{
+  bUserPaintAddFavorite *favorite = BKE_preferences_paint_add_favorite_find(userdef, identifier);
+  if (favorite == nullptr) {
+    return false;
+  }
+  return BKE_preferences_paint_add_favorite_remove_ptr(userdef, favorite);
+}
+
+bool BKE_preferences_paint_add_favorite_remove_ptr(UserDef *userdef,
+                                                   bUserPaintAddFavorite *favorite)
+{
+  if (BLI_findindex(&userdef->paint_add_favorites, favorite) == -1) {
+    return false;
+  }
+  BLI_freelinkN(&userdef->paint_add_favorites, favorite);
+  return true;
+}
+
+void BKE_preferences_paint_add_favorite_clear(UserDef *userdef)
+{
+  BLI_freelistN(&userdef->paint_add_favorites);
+}
+
+bool BKE_preferences_paint_add_favorite_move(
+    UserDef *userdef,
+    const char *identifier,
+    const eBKE_PaintAddFavoriteMoveDirection direction)
+{
+  bUserPaintAddFavorite *favorite = BKE_preferences_paint_add_favorite_find(userdef, identifier);
+  if (favorite == nullptr) {
+    return false;
+  }
+  const int count = BLI_listbase_count(&userdef->paint_add_favorites);
+  const int index = BLI_findindex(&userdef->paint_add_favorites, favorite);
+  int target = index;
+  switch (direction) {
+    case PAINT_ADD_FAVORITE_MOVE_UP:
+      target = index - 1;
+      break;
+    case PAINT_ADD_FAVORITE_MOVE_DOWN:
+      target = index + 1;
+      break;
+    case PAINT_ADD_FAVORITE_MOVE_TOP:
+      target = 0;
+      break;
+    case PAINT_ADD_FAVORITE_MOVE_BOTTOM:
+      target = count - 1;
+      break;
+  }
+  target = std::clamp(target, 0, count - 1);
+  if (target == index) {
+    return false;
+  }
+  /* A handful of pins, so rebuilding the list in the new order is cheaper than the neighbor
+   * bookkeeping a single relink would take. The nodes themselves are reused, not copied. */
+  Vector<bUserPaintAddFavorite *> ordered;
+  for (bUserPaintAddFavorite &item : userdef->paint_add_favorites) {
+    ordered.append(&item);
+  }
+  ordered.remove(index);
+  ordered.insert(target, favorite);
+  BLI_listbase_clear(&userdef->paint_add_favorites);
+  for (bUserPaintAddFavorite *item : ordered) {
+    BLI_addtail(&userdef->paint_add_favorites, item);
+  }
+  return true;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Extension Repositories
  * \{ */
 

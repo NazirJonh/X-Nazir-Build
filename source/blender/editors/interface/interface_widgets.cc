@@ -6332,8 +6332,40 @@ static WidgetType *popover_widget_type(Button *but, rcti *rect)
 /** \name Public API
  * \{ */
 
+/**
+ * Whether \a but is under the mouse, or another button of its alignment group is -- i.e. the row
+ * \a but trails in a menu is hovered (see #button_pushbutton_show_on_row_hover_set).
+ *
+ * NOTE: this walks every button of \a but's block, O(N) per hidden row-hover button on each redraw.
+ * Fine while only a menu's trailing buttons use the flag; a block-level hover cache would be needed
+ * if more buttons did.
+ */
+static bool button_row_hovered(const Button &but)
+{
+  if (but.flag & UI_HOVER) {
+    return true;
+  }
+  if (but.alignnr == 0 || but.block == nullptr) {
+    return false;
+  }
+  /* Shown with its row: hovering any button of the same alignment group reveals it. */
+  for (const std::unique_ptr<Button> &other : but.block->buttons_ptrs) {
+    if (other->alignnr == but.alignnr && (other->flag & UI_HOVER)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void draw_button(const bContext *C, ARegion *region, uiStyle *style, Button *but, rcti *rect)
 {
+  /* Row-hover push buttons only draw while their row is hovered (see
+   * #button_pushbutton_show_on_row_hover_set). */
+  if (but->type == ButtonType::But && static_cast<ButtonPush *>(but)->show_on_row_hover &&
+      !button_row_hovered(*but))
+  {
+    return;
+  }
   bTheme *btheme = theme::theme_get();
   const ThemeUI *tui = &btheme->tui;
   const uiFontStyle *fstyle = &style->widget;

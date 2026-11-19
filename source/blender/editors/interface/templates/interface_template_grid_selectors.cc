@@ -1896,31 +1896,10 @@ static const EnumPropertyItem *library_selector_enum_items_get(bContext *C,
  * Column widths and paddings for the multi-column menu. A popup menu
  * (#BLOCK_BOUNDS_POPUP_MENU) is re-sized to its widest text per column in #block_bounds_calc_text,
  * ignoring any ui_units_x / fixed_size set on a column, so these #Block fields are the only levers.
- *
- * The padding is what each column needs beyond its widest text: #block_bounds_calc_text measures
- * the text alone, so it has to carry everything the widget puts around it, or the longest name in
- * each column gets ellipsized. The figures come from the draw code, not from the layout's
- * estimator (whose `text_pad_none` is about a different question and is short of what is needed):
- *
- * - 0.125 each side: the menu item's own box padding. #widget_menu_itembut shrinks the rect in
- *   place and the text is then drawn into that same, smaller rect.
- * - #UI_TEXT_MARGIN_X: the left text margin, applied via #button_text_padding.
- * - 0.25: the margin #text_clip_middle keeps free before it starts ellipsizing
- *   (#UI_TEXT_CLIP_MARGIN). #ButtonType::ButMenu is not one of the types exempt from it.
- * - The icon column, when the items show icons (#widget_draw_text_icon: 0.2 for a menu item plus
- *   the icon and its padding).
- *
- * Cross-check on the derivation: with an icon these sum to 2.0, so with the gap they land exactly
- * on the 2.5-unit blanket #block_bounds_calc_popup hands the pass -- that blanket is the icon
- * case's requirement, which an ordinary single-column enum menu pays once. This menu draws a column
- * per folder and would pay it in every one, so it says what its own items need instead.
- *
- * WARNING: this is a silent coupling to the draw code, in both directions. Nothing here breaks at
- * compile time if #widget_menu_itembut or #UI_TEXT_CLIP_MARGIN changes its padding -- the figures
- * simply drift out of agreement with what is drawn, and the longest name in a column starts
- * clipping (or gains slack) again. Re-check this against the draw code after any upstream merge
- * that touches `interface_widgets.cc`. The one cheap test: open the selector with a folder whose
- * longest library name nearly fills its column and confirm it is not ellipsized.
+ * What each column needs beyond its widest text comes from #block_menu_column_metrics_set (see it
+ * for the figures and their derivation): this menu says what its own items need instead of taking
+ * the blanket #block_bounds_calc_popup hands a column, which it would pay in every one of its
+ * per-folder columns.
  */
 static void library_selector_set_column_metrics(Block &block,
                                                 const Button *calling_but,
@@ -1934,22 +1913,7 @@ static void library_selector_set_column_metrics(Block &block,
     block.menu_first_col_minwidth = std::min(int(but_width), 10 * UI_UNIT_X);
   }
 
-  const float box_padding_units = 2.0f * 0.125f;
-  const float clip_margin_units = 0.25f;
-  const float icon_units = has_item_with_icon ? 1.1f : 0.0f;
-  const float col_gap_units = 0.5f;
-  block.menu_col_padding = int(
-      (box_padding_units + UI_TEXT_MARGIN_X + clip_margin_units + icon_units + col_gap_units) *
-      UI_UNIT_X);
-
-  /* Where a row's pin stops: exactly the inset #widget_draw gives a menu's separator line
-   * (`BLI_rcti_pad(rect, -7 * UI_SCALE_FAC, 0)`), so the pin lines up with the end of the rule
-   * that underlines the column's heading instead of sitting on the column boundary. Written the
-   * same way the draw writes it: #UI_UNIT_X is not a whole 20 * #UI_SCALE_FAC
-   * (#WM_window_dpi_set_userdef rounds it), so a fraction of a unit would not land on the same
-   * pixel. Smaller than `col_gap_units` above, so the row's text keeps its slack and stays
-   * unclipped. */
-  block.menu_col_row_inset = int(7.0f * UI_SCALE_FAC);
+  block_menu_column_metrics_set(block, has_item_with_icon, 0.0f);
 }
 
 static void asset_library_column_menu_draw_impl(bContext *C,

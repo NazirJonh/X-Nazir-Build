@@ -7146,6 +7146,66 @@ void button_pushbutton_overlay_alpha_factor_set(Button *but, const float alpha_f
   but_push->overlay_alpha_factor = std::clamp(alpha_factor, 0.0f, 1.0f);
 }
 
+void button_pushbutton_show_on_row_hover_set(Button *but, const bool value)
+{
+  BLI_assert(but->type == ButtonType::But);
+  ButtonPush *but_push = static_cast<ButtonPush *>(but);
+
+  but_push->show_on_row_hover = value;
+}
+
+void block_menu_column_metrics_set(Block &block, const bool has_icons, const float extra_units)
+{
+  /* The padding is what each column needs beyond its widest text: #block_bounds_calc_text measures
+   * the text alone, so it has to carry everything the widget puts around a menu item's text, or the
+   * longest name in a column gets ellipsized. The figures come from the draw code, not from the
+   * layout's estimator (whose `text_pad_none` is about a different question and is short of what is
+   * needed):
+   * - 0.125 each side: the menu item's own box padding. #widget_menu_itembut shrinks the rect in
+   *   place and the text is then drawn into that same, smaller rect.
+   * - #UI_TEXT_MARGIN_X: the left text margin, applied via #button_text_padding.
+   * - 0.25: the margin #text_clip_middle keeps free before it starts ellipsizing
+   *   (#UI_TEXT_CLIP_MARGIN). #ButtonType::ButMenu is not one of the types exempt from it.
+   * - 1.1: the icon column, when the items show icons (#widget_draw_text_icon: 0.2 for a menu item
+   *   plus the icon and its padding).
+   * - 0.5: the gap to the next column.
+   *
+   * Cross-check on the derivation: with an icon these sum to 2.0, so with the gap they land exactly
+   * on the 2.5-unit blanket #block_bounds_calc_popup hands the pass -- that blanket is the icon
+   * case's requirement, which an ordinary single-column enum menu pays once. A menu laying its
+   * items out in several columns would pay it in every one, so it says what its own items need
+   * instead.
+   *
+   * WARNING: this is a silent coupling to the draw code, in both directions. Nothing here breaks at
+   * compile time if #widget_menu_itembut or #UI_TEXT_CLIP_MARGIN changes its padding -- the figures
+   * simply drift out of agreement with what is drawn, and the longest name in a column starts
+   * clipping (or gains slack) again. Re-check this against the draw code after any upstream merge
+   * that touches `interface_widgets.cc`. The one cheap test: open a menu using this with a column
+   * whose longest name nearly fills it and confirm it is not ellipsized. */
+  const float box_padding_units = 2.0f * 0.125f;
+  const float clip_margin_units = 0.25f;
+  const float icon_units = has_icons ? 1.1f : 0.0f;
+  const float col_gap_units = 0.5f;
+  block.menu_col_padding = int(
+      (box_padding_units + UI_TEXT_MARGIN_X + clip_margin_units + icon_units + col_gap_units +
+       extra_units) *
+      UI_UNIT_X);
+
+  /* Where a row of aligned buttons stops: exactly the inset #widget_draw gives a menu's separator
+   * line (`BLI_rcti_pad(rect, -7 * UI_SCALE_FAC, 0)`), so its last button lines up with the end of
+   * that rule instead of sitting on the column boundary. Written the same way the draw writes it:
+   * #UI_UNIT_X is not a whole 20 * #UI_SCALE_FAC (#WM_window_dpi_set_userdef rounds it), so a
+   * fraction of a unit would not land on the same pixel. Smaller than `col_gap_units` above, so the
+   * row's text keeps its slack and stays unclipped. */
+  block.menu_col_row_inset = int(7.0f * UI_SCALE_FAC);
+}
+
+void block_menu_rows_fill_column_set(Block *block, const bool has_icons, const bool has_submenus)
+{
+  /* One extra unit: the place the submenu arrow takes, which the text measure does not include. */
+  block_menu_column_metrics_set(*block, has_icons, has_submenus ? 1.0f : 0.0f);
+}
+
 void button_number_step_size_set(Button *but, float step_size)
 {
   ButtonNumber *but_number = static_cast<ButtonNumber *>(but);

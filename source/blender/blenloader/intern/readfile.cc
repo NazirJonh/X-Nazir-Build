@@ -4041,6 +4041,7 @@ static BHead *read_userdef(BlendFileData *bfd, FileData *fd, BHead *bhead)
   BLO_read_struct_list(reader, bPathCompare, &user->autoexec_paths);
   BLO_read_struct_list(reader, bUserScriptDirectory, &user->script_directories);
   BLO_read_struct_list(reader, bUserAssetLibrary, &user->asset_libraries);
+  BLO_read_struct_list(reader, bUserPaintAddFavorite, &user->paint_add_favorites);
 
   /* Clear runtime parent pointers (contain stale addresses from the saved file),
    * then restore them from the serialized parent_name strings. */

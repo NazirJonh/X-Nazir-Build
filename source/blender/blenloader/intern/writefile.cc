@@ -1257,6 +1257,10 @@ static void write_userdef(BlendWriter *writer, const UserDef *userdef)
     writer->write_struct(&asset_library_ref);
   }
 
+  for (const bUserPaintAddFavorite &favorite_ref : userdef->paint_add_favorites) {
+    writer->write_struct(&favorite_ref);
+  }
+
   for (const bUserExtensionRepo &repo_ref : userdef->extension_repos) {
     writer->write_struct(&repo_ref);
     BKE_preferences_extension_repo_write_data(writer, &repo_ref);

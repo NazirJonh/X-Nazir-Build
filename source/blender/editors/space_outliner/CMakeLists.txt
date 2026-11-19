@@ -32,6 +32,7 @@ set(SRC
   stack_layer/outliner_rendered_preview.cc
   stack_layer/outliner_stack_draw.cc
   stack_layer/outliner_stack_add.cc
+  stack_layer/outliner_stack_add_menu.cc
   stack_layer/outliner_stack_clipboard.cc
   stack_layer/outliner_stack_focus.cc
   stack_layer/outliner_stack_smart_asset.cc

@@ -1199,6 +1199,37 @@ void OUTLINER_OT_stack_layer_effect_add_correction(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_effect_add_transform(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_effect_add_anchor(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_effect_add_anchor_reader(wmOperatorType *ot);
+/** The idnames of the registry-driven Add menus (stack_layer/outliner_stack_add_menu.cc), which
+ * the Python root menu (space_outliner.py) spells the same way: they live here once, and the
+ * Python test over `bpy.types` fails when one of them is not registered. */
+inline constexpr const char *OUTLINER_MENU_STACK_ADD_FAVORITES = "OUTLINER_MT_stack_add_favorites";
+inline constexpr const char *OUTLINER_MENU_STACK_ADD_EFFECTS = "OUTLINER_MT_stack_add_effects";
+inline constexpr const char *OUTLINER_MENU_STACK_ADD_EFFECT_CORRECTION =
+    "OUTLINER_MT_stack_add_effect_correction";
+inline constexpr const char *OUTLINER_MENU_STACK_ADD_EFFECT_TRANSFORM =
+    "OUTLINER_MT_stack_add_effect_transform";
+inline constexpr const char *OUTLINER_MENU_STACK_ADD_EFFECT_FILTER =
+    "OUTLINER_MT_stack_add_effect_filter";
+inline constexpr const char *OUTLINER_MENU_STACK_ADD_EFFECT_FILTER2 =
+    "OUTLINER_MT_stack_add_effect_filter2";
+inline constexpr const char *OUTLINER_MENU_STACK_ADD_EFFECT_PATTERN =
+    "OUTLINER_MT_stack_add_effect_pattern";
+inline constexpr const char *OUTLINER_MENU_STACK_ADD_EFFECT_ANCHOR =
+    "OUTLINER_MT_stack_add_effect_anchor";
+/** The root Add menu the module's lists are inlined into. Defined by Python (space_outliner.py),
+ * which owns the quick layers and the search over the whole of it; the keymap entry opens it by
+ * this name. */
+inline constexpr const char *OUTLINER_MENU_STACK_LAYER_ADD = "OUTLINER_MT_stack_layer_add";
+
+/** The pin and the reorder of the Add menu's Favorites submenu
+ * (stack_layer/outliner_stack_add_menu.cc). */
+void OUTLINER_OT_stack_add_favorite_set(wmOperatorType *ot);
+void OUTLINER_OT_stack_add_favorite_reorder(wmOperatorType *ot);
+/** Shift+A entry point: opens the Add menu in the paint-material stack only. */
+void OUTLINER_OT_stack_add_menu_call(wmOperatorType *ot);
+/** Register the registry-driven Add menus: the Favorites and the effect lists
+ * (stack_layer/outliner_stack_add_menu.cc). */
+void outliner_stack_add_menus_register();
 void OUTLINER_OT_stack_layer_remove(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_rename(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_duplicate(wmOperatorType *ot);

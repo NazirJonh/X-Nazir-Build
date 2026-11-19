@@ -1125,6 +1125,10 @@ void ED_spacetype_outliner()
   art->listener = outliner_footer_region_listener;
   BLI_addhead(&st->regiontypes, art);
 
+  /* The registry-driven lists of the Stack Layers Add menu: the Favorites the user pins into, and
+   * the effect lists the root Python menu inlines. */
+  outliner_stack_add_menus_register();
+
   BKE_spacetype_register(std::move(st));
 }
 

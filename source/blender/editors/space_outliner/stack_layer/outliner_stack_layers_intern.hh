@@ -32,6 +32,42 @@ enum StackFillMode {
   STACK_FILL_MODE_EMPTY,
 };
 
+/**
+ * The kinds of rows the source can add, as enum items.
+ *
+ * Built from the editor's own list, so the Add UI offers the domain's vocabulary without the
+ * Outliner knowing it: the item's value is the kind's place in that list, which is what
+ * #StackEditor::row_add reads back, and the identifier is the stable name scripts see.
+ *
+ * The Effects menu asks the editor for its own folded view (#StackEditor::effect_menu_kinds), so
+ * an editor whose vocabulary repeats a correction per target can offer one line per thing. Its
+ * identifiers are that view's resolved role, not the stable name of the full list: the Effects
+ * menu is UI, and scripts name a kind through `stack_layer_add`. The newer corrections are listed
+ * by their own operator (the "Filter" submenu), so the two views never share an entry.
+ */
+enum class StackAddKindsView {
+  /** The full, stable list of kinds. */
+  All,
+  /** The Effects menu's folded view, without the entries of the "Filter" submenu. */
+  Effects,
+  /** Only the entries of the "Filter" submenu. */
+  NewEffects,
+  /** Only the entries of the "Filter 2" submenu. */
+  Filter2Effects,
+  /** Only the entries of the "Generate Patterns" submenu. */
+  PatternEffects,
+  /** Only the entries of the "Correction" submenu. */
+  CorrectionEffects,
+  /** Only the entries of the "Transform" submenu. */
+  TransformEffects,
+  /** Only the Anchor Point entries, listed after the submenus. */
+  AnchorEffects,
+};
+
+/** The list of the Effects menu that \a entry is shown in. Shared by the operator enums and the
+ * Add menu's own folded lists, so the two cannot place one entry differently. */
+StackAddKindsView stack_effect_menu_group(const StackEffectMenuKind &entry);
+
 bool stack_mode_poll(bContext *C);
 int stack_operator_marker_ordinal_get(bContext &C, SpaceOutliner &space_outliner, wmOperator &op);
 

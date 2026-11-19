@@ -1546,6 +1546,9 @@ def km_outliner(params):
         ("outliner.show_one_level", {"type": 'NUMPAD_MINUS', "value": 'PRESS'},
          {"properties": [("open", False)]}),
         *_template_items_select_actions(params, "outliner.select_all"),
+        # Before `expanded_toggle`: the Add menu's poll is false outside the paint-material stack,
+        # and a false poll lets the event fall through to the toggle below.
+        ("outliner.stack_add_menu_call", {"type": 'A', "value": 'PRESS', "shift": True}, None),
         ("outliner.expanded_toggle", {"type": 'A', "value": 'PRESS', "shift": True}, None),
         ("outliner.keyingset_add_selected", {"type": 'K', "value": 'PRESS'}, None),
         ("outliner.keyingset_remove_selected", {"type": 'K', "value": 'PRESS', "alt": True}, None),

@@ -24,6 +24,7 @@ struct bUserAssetBrowserSettings;
 struct bUserExtensionRepo;
 struct bUserAssetLibrary;
 struct bUserAssetShelfSettings;
+struct bUserPaintAddFavorite;
 /* Fixed underlying type, so this matches #DNA_asset_types.h exactly and can be forward-declared. */
 enum eAssetLibraryType : short;
 class StringRef;
@@ -273,6 +274,71 @@ bool BKE_preferences_asset_builtin_pin_get(const struct UserDef *userdef, eAsset
 void BKE_preferences_asset_builtin_pin_set(struct UserDef *userdef,
                                            eAssetLibraryType type,
                                            bool pinned) ATTR_NONNULL();
+
+/** \name Paint Add Menu Favorites
+ *
+ * The Stack Layers Add menu's Favorites submenu: the Add kinds the user pinned. The menu order is
+ * the list order itself, and every mutation goes through these functions, so the menu, the
+ * operators and the Python collection cannot disagree with the stored list.
+ * \{ */
+
+/** Where to move a pinned Add menu item among the favorites. */
+enum eBKE_PaintAddFavoriteMoveDirection {
+  PAINT_ADD_FAVORITE_MOVE_UP = 0,
+  PAINT_ADD_FAVORITE_MOVE_DOWN = 1,
+  PAINT_ADD_FAVORITE_MOVE_TOP = 2,
+  PAINT_ADD_FAVORITE_MOVE_BOTTOM = 3,
+};
+
+/** \return the favorite that names \a identifier, or null. */
+bUserPaintAddFavorite *BKE_preferences_paint_add_favorite_find(struct UserDef *userdef,
+                                                               const char *identifier)
+    ATTR_NONNULL(1, 2) ATTR_WARN_UNUSED_RESULT;
+
+/** \return whether a favorite naming \a identifier exists. */
+bool BKE_preferences_paint_add_favorite_contains(const struct UserDef *userdef,
+                                                 const char *identifier)
+    ATTR_NONNULL(1, 2) ATTR_WARN_UNUSED_RESULT;
+
+/**
+ * Pin the Add kind \a identifier: append it to the favorites when it is not there already.
+ *
+ * \return the favorite, or null for an empty \a identifier.
+ */
+bUserPaintAddFavorite *BKE_preferences_paint_add_favorite_add(struct UserDef *userdef,
+                                                              const char *identifier)
+    ATTR_NONNULL(1, 2) ATTR_WARN_UNUSED_RESULT;
+
+/** Unpin the Add kind \a identifier. \return false when it was not pinned. */
+bool BKE_preferences_paint_add_favorite_remove(struct UserDef *userdef, const char *identifier)
+    ATTR_NONNULL(1, 2);
+
+/**
+ * Unpin the favorite \a favorite itself, the pointer an RNA collection hands back.
+ *
+ * The membership check is what keeps a pointer that is not in the list (an already invalidated
+ * RNA wrapper, a favorite of another #UserDef) from freeing list-owned memory.
+ *
+ * \return false when \a favorite is not in \a userdef's list.
+ */
+bool BKE_preferences_paint_add_favorite_remove_ptr(struct UserDef *userdef,
+                                                   bUserPaintAddFavorite *favorite)
+    ATTR_NONNULL(1, 2);
+
+/** Unpin everything. */
+void BKE_preferences_paint_add_favorite_clear(struct UserDef *userdef) ATTR_NONNULL(1);
+
+/**
+ * Move the favorite naming \a identifier one slot, or to an end of the list, per \a direction.
+ *
+ * \return false when it is not pinned, or the move would change nothing.
+ */
+bool BKE_preferences_paint_add_favorite_move(struct UserDef *userdef,
+                                             const char *identifier,
+                                             eBKE_PaintAddFavoriteMoveDirection direction)
+    ATTR_NONNULL(1, 2);
+
+/** \} */
 
 /**
  * Restore parent pointers from parent_name strings in the asset library hierarchy.

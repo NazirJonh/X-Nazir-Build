@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <climits>
 #include <functional>
+#include <optional>
 #include <set>
 #include <string>
 
@@ -75,37 +76,67 @@ namespace blender::ed::outliner {
  * `row_remove` and keep the ordinals and the selection consistent across the rebuild.
  * \{ */
 
-/** The Add kind \a kind as the space's source declares it; false when it declares no such kind. */
-static bool stack_add_kind_info_get(const bContext &C, const int kind, StackAddKindInfo &r_info)
+/**
+ * The Add kind the stable identifier \a kind_id names; none when it names no kind of this source.
+ * A non-empty \a kind_id does not fall back to the place: an identifier that matches nothing is a
+ * stale one (a pin of a kind the source no longer declares, a Repeat Last of a rebuild), and
+ * guessing a kind from a place it was not drawn for would add the wrong row silently. Only an
+ * empty \a kind_id -- an older caller that passed the numeric type alone -- reads the place \a
+ * kind from the source's list, none when that names no kind either.
+ *
+ * The identifier wins over the place because the place is positional: a list rebuilt between the
+ * draw and the exec moves it, while the identifier is what the Favorites pin holds and what the
+ * menu buttons carry. \a r_info is the kind's record; the value is its place in the list, what
+ * #StackEditor::row_add takes.
+ */
+static std::optional<int> stack_add_kind_info_get(const bContext &C,
+                                                  const char *kind_id,
+                                                  const int kind,
+                                                  StackAddKindInfo &r_info)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(&C);
   if (space_outliner == nullptr || space_outliner->runtime == nullptr) {
-    return false;
+    return std::nullopt;
   }
   const StackEditor *editor = stack_source_for_space(*space_outliner)->editor();
   if (editor == nullptr) {
-    return false;
+    return std::nullopt;
   }
   Vector<StackAddKindInfo> kinds;
   editor->add_kinds(kinds);
-  if (!kinds.index_range().contains(kind)) {
-    return false;
+  int resolved = -1;
+  if (kind_id[0] != '\0') {
+    for (const int64_t index : kinds.index_range()) {
+      if (kinds[index].identifier == kind_id) {
+        resolved = int(index);
+        break;
+      }
+    }
   }
-  r_info = std::move(kinds[kind]);
-  return true;
+  else if (kinds.index_range().contains(kind)) {
+    resolved = kind;
+  }
+  if (resolved < 0) {
+    return std::nullopt;
+  }
+  r_info = std::move(kinds[resolved]);
+  return resolved;
 }
 
 wmOperatorStatus stack_row_add_exec(bContext *C, wmOperator *op)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
-  /* The value is the kind's place in the source's full list, which is what a repeat or the redo
-   * panel stores. It is not the Effects menu's identifier: that one is resolved per target when
-   * the menu is built, so a value left over from another target mode still names a real kind here
-   * rather than being looked up by name. A value that names none is stale (the source changed
-   * under a repeat) and says so instead of silently adding nothing. */
-  const int kind = RNA_enum_get(op->ptr, "type");
+  /* The numeric type is the kind's place in the source's full list, which is what a repeat or the
+   * redo panel stores; the stable identifier the menu buttons carry wins over it, since a list
+   * rebuilt between the draw and the exec moves the place and not the identifier. An identifier
+   * that names no kind, or a type out of range, is stale (the source changed under a repeat) and
+   * says so instead of silently adding nothing. */
+  char kind_id[MAX_NAME];
+  RNA_string_get(op->ptr, "kind_id", kind_id);
   StackAddKindInfo kind_info;
-  if (!stack_add_kind_info_get(*C, kind, kind_info)) {
+  const std::optional<int> kind = stack_add_kind_info_get(
+      *C, kind_id, RNA_enum_get(op->ptr, "type"), kind_info);
+  if (!kind.has_value()) {
     BKE_report(
         op->reports, RPT_ERROR, "That Add kind is no longer part of this stack's vocabulary");
     return OPERATOR_CANCELLED;
@@ -169,7 +200,7 @@ wmOperatorStatus stack_row_add_exec(bContext *C, wmOperator *op)
     /* The Empty buttons ask which channels the new row should start with; none is the default. */
     args.channel_mask = uint32_t(RNA_enum_get(op->ptr, "fill_channels"));
   }
-  const int added = outliner_stack_row_add(C, *space_outliner, kind, anchor_ordinal, args);
+  const int added = outliner_stack_row_add(C, *space_outliner, *kind, anchor_ordinal, args);
   return added >= 0 ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
 }
 
@@ -217,9 +248,12 @@ static const char *stack_add_source_collection_name(const short idcode)
 wmOperatorStatus stack_row_add_invoke(bContext *C, wmOperator *op, const wmEvent * /*event*/)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  char kind_id[MAX_NAME];
+  RNA_string_get(op->ptr, "kind_id", kind_id);
   StackAddKindInfo kind_info;
-  const bool kind_known = space_outliner != nullptr && space_outliner->runtime != nullptr &&
-                          stack_add_kind_info_get(*C, RNA_enum_get(op->ptr, "type"), kind_info);
+  const bool kind_known =
+      space_outliner != nullptr && space_outliner->runtime != nullptr &&
+      stack_add_kind_info_get(*C, kind_id, RNA_enum_get(op->ptr, "type"), kind_info).has_value();
   PropertyRNA *source_prop = RNA_struct_find_property(op->ptr, "source");
   const bool creates_source =
       kind_known && kind_info.source_creatable && RNA_boolean_get(op->ptr, "create_source");
@@ -287,9 +321,11 @@ static void stack_add_fill_color_draw(wmOperator &op)
 void stack_row_add_ui(bContext *C, wmOperator *op)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  char kind_id[MAX_NAME];
+  RNA_string_get(op->ptr, "kind_id", kind_id);
   StackAddKindInfo kind_info;
   if (space_outliner == nullptr || space_outliner->runtime == nullptr ||
-      !stack_add_kind_info_get(*C, RNA_enum_get(op->ptr, "type"), kind_info))
+      !stack_add_kind_info_get(*C, kind_id, RNA_enum_get(op->ptr, "type"), kind_info).has_value())
   {
     return;
   }
@@ -382,40 +418,10 @@ static void stack_add_kind_item_add(EnumPropertyItem *&items,
   RNA_enum_item_add(&items, &items_num, &item);
 }
 
-/**
- * The kinds of rows the source can add, as enum items.
- *
- * Built from the editor's own list, so the Add UI offers the domain's vocabulary without the
- * Outliner knowing it: the item's value is the kind's place in that list, which is what
- * #StackEditor::row_add reads back, and the identifier is the stable name scripts see.
- *
- * The Effects menu asks the editor for its own folded view (#StackEditor::effect_menu_kinds), so
- * an editor whose vocabulary repeats a correction per target can offer one line per thing. Its
- * identifiers are that view's resolved role, not the stable name of the full list: the Effects
- * menu is UI, and scripts name a kind through `stack_layer_add`. The newer corrections are listed
- * by their own operator (the "Filter" submenu), so the two views never share an entry.
- */
-enum class StackAddKindsView {
-  /** The full, stable list of kinds. */
-  All,
-  /** The Effects menu's folded view, without the entries of the "Filter" submenu. */
-  Effects,
-  /** Only the entries of the "Filter" submenu. */
-  NewEffects,
-  /** Only the entries of the "Filter 2" submenu. */
-  Filter2Effects,
-  /** Only the entries of the "Generate Patterns" submenu. */
-  PatternEffects,
-  /** Only the entries of the "Correction" submenu. */
-  CorrectionEffects,
-  /** Only the entries of the "Transform" submenu. */
-  TransformEffects,
-  /** Only the Anchor Point entries, listed after the submenus. */
-  AnchorEffects,
-};
-
-/** The list of the Effects menu that \a entry is shown in. */
-static StackAddKindsView stack_effect_menu_group(const StackEffectMenuKind &entry)
+/** The list of the Effects menu that \a entry is shown in. The views and their item builders are
+ * shared with the Add menu (#StackAddKindsView in outliner_stack_layers_intern.hh), so the
+ * operator enums and the menu cannot place one entry differently. */
+StackAddKindsView stack_effect_menu_group(const StackEffectMenuKind &entry)
 {
   if (entry.is_anchor) {
     return StackAddKindsView::AnchorEffects;

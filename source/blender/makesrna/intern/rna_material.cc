@@ -393,6 +393,252 @@ static const EnumPropertyItem rna_enum_material_paint_layer_generator_items[] = 
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/* Values are #eMaterialPaintLayerFilter; 0 is "not a filter" and is only ever read. Kept
+ * outside the #RNA_RUNTIME split: the runtime authoring helper validates against it, and
+ * the property definitions in the other branch read it. */
+/* TODO: the names and tooltips here are a second copy of the kind records in
+ * `paint_layers_kind.cc`; when the kind API can expose its own RNA items, build this list from it
+ * instead of naming every filter by hand. */
+static const EnumPropertyItem rna_enum_material_paint_layer_filter_items[] = {
+    {0, "NONE", 0, "None", "Not a filter"},
+    {MA_PAINT_LAYER_FILTER_INVERT, "INVERT", 0, "Invert", "Invert the colour or coverage below"},
+    {MA_PAINT_LAYER_FILTER_LEVELS, "LEVELS", 0, "Levels", "Remap the levels of what is below"},
+    {MA_PAINT_LAYER_FILTER_HSL, "HSL", 0, "Hue Saturation Value", "Shift hue, saturation, value"},
+    {MA_PAINT_LAYER_FILTER_BRIGHTNESS_CONTRAST,
+     "BRIGHTNESS_CONTRAST",
+     0,
+     "Brightness/Contrast",
+     "Brighten or darken and scale the contrast of what is below"},
+    {MA_PAINT_LAYER_FILTER_COLOR_RAMP,
+     "COLOR_RAMP",
+     0,
+     "Color Ramp",
+     "Remap the luminance of what is below through a Color Band"},
+    {MA_PAINT_LAYER_FILTER_POSTERIZE,
+     "POSTERIZE",
+     0,
+     "Posterize",
+     "Quantize what is below to a whole number of steps per channel"},
+    {MA_PAINT_LAYER_FILTER_MATH,
+     "MATH",
+     0,
+     "Math",
+     "Combine what is below with a constant operand, per channel"},
+    {MA_PAINT_LAYER_FILTER_THRESHOLD,
+     "THRESHOLD",
+     0,
+     "Threshold",
+     "Turn each channel of what is below into the two states of a comparison"},
+    {MA_PAINT_LAYER_FILTER_CLAMP,
+     "CLAMP",
+     0,
+     "Clamp",
+     "Keep each channel of what is below inside a constant range"},
+    {MA_PAINT_LAYER_FILTER_HISTOGRAM_SCAN,
+     "HISTOGRAM_SCAN",
+     0,
+     "Histogram Scan",
+     "Remap each channel of what is below through a smoothstep: a soft threshold the contrast "
+     "opens into a ramp, the one that grows and shrinks a mask"},
+    {MA_PAINT_LAYER_FILTER_HISTOGRAM_SHIFT,
+     "HISTOGRAM_SHIFT",
+     0,
+     "Histogram Shift",
+     "Roll the tonal range of each channel of what is below by one amount, wrapping back through "
+     "zero"},
+    {MA_PAINT_LAYER_FILTER_CURVES,
+     "CURVES",
+     0,
+     "RGB Curves",
+     "Remap each channel of what is below through its own curve"},
+    {MA_PAINT_LAYER_FILTER_COLOR_BALANCE,
+     "COLOR_BALANCE",
+     0,
+     "Color Balance",
+     "Balance the colours of what is below through lift, gamma and gain (or slope, offset and power)"},
+    {MA_PAINT_LAYER_FILTER_BLUR,
+     "BLUR",
+     0,
+     "Blur",
+     "Blur the colours of what is below with a box or gaussian kernel"},
+    {MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL,
+     "BLUR_DIRECTIONAL",
+     0,
+     "Blur Directional",
+     "Streak the colours of what is below along a fixed angle: a line average the radius reaches "
+     "along, mixed over the colour by its intensity"},
+    {MA_PAINT_LAYER_FILTER_DROP_SHADOW,
+     "DROP_SHADOW",
+     0,
+     "Drop Shadow",
+     "Cast a shadow off the shape of what is below: the silhouette spread, blurred and offset by "
+     "the angle and the distance, tinted by the colour"},
+    {MA_PAINT_LAYER_FILTER_MASK_OUTLINE,
+     "MASK_OUTLINE",
+     0,
+     "Mask Outline",
+     "Lay a band along the border of the grey of what is below: inside it, outside it, or on both "
+     "sides, the width the band takes and the shape its falloff walks"},
+    {MA_PAINT_LAYER_FILTER_FILL_AREA,
+     "FILL_AREA",
+     0,
+     "Fill Area",
+     "Fill what a continuous border of what is below encloses: the regions the border closes off "
+     "take the colour the border carries, diffused inward, or the solid colour"},
+    {MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT,
+     "CHANNEL_SPLIT",
+     0,
+     "Channel Split",
+     "Extract one channel of the assigned image and lay it as a grey in the channels the effect "
+     "works in, or as the coverage of the mask it is an item of"},
+    {MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK,
+     "NORMAL_TO_MASK",
+     0,
+     "Normal to Mask",
+     "Turn the normal map of the referenced layer (an Anchor Point), or of the row's own Normal "
+     "content, into a black-and-white mask: the normal rebuilds into a Height, an Edges or a Slope "
+     "field the threshold cuts"},
+    {MA_PAINT_LAYER_FILTER_SHARPEN,
+     "SHARPEN",
+     0,
+     "Sharpen",
+     "Sharpen the colours of what is below around the details a blur removes"},
+    {MA_PAINT_LAYER_FILTER_HIGH_PASS,
+     "HIGH_PASS",
+     0,
+     "High Pass",
+     "Keep the details of what is below above a blurred copy of them"},
+    {MA_PAINT_LAYER_FILTER_EDGE_DETECT,
+     "EDGE_DETECT",
+     0,
+     "Edge Detect",
+     "Outline the edges of what is below with the Sobel gradient magnitude"},
+    {MA_PAINT_LAYER_FILTER_EMBOSS,
+     "EMBOSS",
+     0,
+     "Emboss",
+     "Emboss the colours of what is below with a diagonal lighting kernel"},
+    {MA_PAINT_LAYER_FILTER_ERODE_DILATE,
+     "ERODE_DILATE",
+     0,
+     "Erode / Dilate",
+     "Shrink or grow the bright regions of what is below by the kernel's radius"},
+    {MA_PAINT_LAYER_FILTER_COLOR_ID,
+     "COLOR_ID",
+     0,
+     "Color ID",
+     "Keep the coverage where an ID Map matches the listed colours"},
+    {MA_PAINT_LAYER_FILTER_UV_ISLAND,
+     "UV_ISLAND",
+     0,
+     "UV Island",
+     "Keep the coverage on the UV islands captured from the Image Editor selection"},
+    {MA_PAINT_LAYER_FILTER_EXPOSURE,
+     "EXPOSURE",
+     0,
+     "Exposure",
+     "Scale what is below by a power of two, shift it and raise the result to a gamma"},
+    {MA_PAINT_LAYER_FILTER_DEBAND,
+     "DEBAND",
+     0,
+     "Deband / Dither",
+     "Break the bands of what is below up with a triangular noise of one quantization step, or "
+     "round it to fewer bits with that noise on top"},
+    {MA_PAINT_LAYER_FILTER_NOISE,
+     "NOISE",
+     0,
+     "Noise",
+     "Lay a gaussian, uniform, speckle or salt and pepper grain over the colours of what is below"},
+    {MA_PAINT_LAYER_FILTER_NORMAL_CONVERT,
+     "NORMAL_CONVERT",
+     0,
+     "Normal Convert",
+     "Convert the encoding of a normal map: flip its green, rebuild or clear its blue, or move its "
+     "channels between linear and sRGB"},
+    {MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL,
+     "HEIGHT_TO_NORMAL",
+     0,
+     "Height To Normal",
+     "Convert the Height the row lays into a tangent-space normal: the Sobel gradients of the "
+     "height, scaled by the intensity or the world units, encoded into the Normal channel"},
+    {MA_PAINT_LAYER_FILTER_SMOOTHSTEP,
+     "SMOOTHSTEP",
+     0,
+     "Smoothstep",
+     "Extract a range of the grey of what is below between a minimum and a maximum: the Hermite "
+     "interpolation between the edges, the smoother sibling of a threshold"},
+    {MA_PAINT_LAYER_FILTER_CONTRAST_LUMINOSITY,
+     "CONTRAST_LUMINOSITY",
+     0,
+     "Contrast Luminosity",
+     "Scale the contrast of what is below about its middle and shift it: the two sliders a "
+     "brightness and contrast control carries"},
+    {MA_PAINT_LAYER_FILTER_HEIGHT_ADJUST,
+     "HEIGHT_ADJUST",
+     0,
+     "Height Adjust",
+     "Invert, offset or multiply the height of what is below: the offset rides before the "
+     "multiply, so a zero offset result annihilates the multiply at that point"},
+    {MA_PAINT_LAYER_FILTER_PIXELATE,
+     "PIXELATE",
+     0,
+     "Pixelate",
+     "Quantize what is below into blocks of one colour: the map cut into a grid of the pixel "
+     "amount's size, every block taking the average of what it covers"},
+    {MA_PAINT_LAYER_FILTER_HSL_PERSPECTIVE,
+     "HSL_PERSPECTIVE",
+     0,
+     "HSL Perspective",
+     "Adjust the hue, saturation and lightness of what is below: the Regular mode shifts the "
+     "value channel, the Perceptive one lifts the colour toward white or black"},
+    {MA_PAINT_LAYER_FILTER_FXAA,
+     "FXAA",
+     0,
+     "FXAA",
+     "Smooth the jagged edges of what is below with a single-pass FXAA: the luminance-driven "
+     "edge blend walking the jag along its own direction"},
+    {MA_PAINT_LAYER_FILTER_BLUR_SLOPE,
+     "BLUR_SLOPE",
+     0,
+     "Blur Slope",
+     "Smear what is below along the slope of a source: the samples walk the gradient of the "
+     "noise, the blending mode saying what the walk accumulates"},
+    {MA_PAINT_LAYER_FILTER_CHANNEL_MIXER,
+     "CHANNEL_MIXER",
+     0,
+     "Channel Mixer",
+     "Mix the colour channels: each output channel is a weighted sum of the input ones plus a "
+     "constant"},
+    {MA_PAINT_LAYER_FILTER_GLOW,
+     "GLOW",
+     0,
+     "Glow",
+     "Bleed a coloured glow off the light of what is below"},
+    {MA_PAINT_LAYER_FILTER_BEVEL,
+     "BEVEL",
+     0,
+     "Bevel",
+     "Lay a distance ramp from the borders of what is below inward"},
+    {MA_PAINT_LAYER_FILTER_COLOR_MATCH,
+     "COLOR_MATCH",
+     0,
+     "Color Match",
+     "Grade the colours of what is below from a source colour to a target one"},
+    {MA_PAINT_LAYER_FILTER_TRANSFORM,
+     "TRANSFORM",
+     0,
+     "Transform Mapping",
+     "Move, rotate and scale the UV the row's content is read at: the transform the row's own "
+     "mapping applies, as an effect over every map the row reads"},
+    {MA_PAINT_LAYER_FILTER_MIRROR,
+     "MIRROR",
+     0,
+     "Mirror",
+     "Fold the UV the row's content is read at about a center, per axis: what either side of the "
+     "center shows, both sides show"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 /* The type of a kind parameter, derived from how its property stores the value. Outside the
  * #RNA_RUNTIME split: the runtime getter reads the values and the definition pass needs the item
  * list for the property. */
@@ -1248,6 +1494,177 @@ static MaterialPaintLayer *rna_Material_paint_layers_paste_correction(Material *
   return copy;
 }
 
+/* The "not given" default of the filter argument: the filter enum starts at 1, and its NONE item
+ * (0) is "not a filter", only ever read -- what a caller passes when it names no filter. */
+constexpr int rna_paint_layer_filter_unset = 0;
+
+/** Whether \a generator is one the generator registry declares. */
+static bool rna_paint_layer_generator_valid(const int generator)
+{
+  for (const EnumPropertyItem *item = rna_enum_material_paint_layer_generator_items;
+       item->identifier != nullptr;
+       item++)
+  {
+    if (item->value == generator) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Whether \a filter is one the filter list declares. */
+static bool rna_paint_layer_filter_valid(const int filter)
+{
+  for (const EnumPropertyItem *item = rna_enum_material_paint_layer_filter_items;
+       item->identifier != nullptr;
+       item++)
+  {
+    if (item->value == filter) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* The error for a filter or generator named alongside a source that reads neither, shared by
+ * every such check below so the wording cannot drift apart between the sources. */
+static constexpr const char *rna_paint_layer_foreign_qualifiers_error =
+    "The filter and generator only go with the Filter and Generator sources";
+
+/**
+ * The shared half of the two authoring entry points (`paint_layers.new` for a row of the stack,
+ * `effect_add` for a correction over one): map the source onto its kind, and check the filter and
+ * generator qualifiers the Filter and Generator sources carry. \a as_correction picks the
+ * correction kinds. The error messages are one set for both callers on purpose, so a script gets
+ * the same answer whichever way it adds.
+ *
+ * The qualifiers belong to their sources: naming them alongside a source that reads neither is an
+ * error, not the silent ignore it used to be -- a typo there would add the wrong kind and never
+ * say so.
+ *
+ * \return false after reporting the error; otherwise \a r_params.kind is set, with .filter and
+ * .generator for the sources that read them.
+ */
+static bool rna_paint_layer_params_from_source(const int source,
+                                               const int filter,
+                                               const int generator,
+                                               const bool as_correction,
+                                               ReportList *reports,
+                                               PaintLayerAddParams &r_params)
+{
+  /* The Gradient needs no pattern named (its line and ramp live in its payload), so its value
+   * doubles as the generator argument's "not given" default. */
+  const bool filter_given = filter != rna_paint_layer_filter_unset;
+  const bool generator_given = generator != MA_PAINT_LAYER_GENERATOR_GRADIENT;
+  /* Returns true after reporting when \a foreign_given names a qualifier this source does not
+   * read, so the caller returns false rather than silently ignoring it, as it used to. */
+  auto reject_foreign_qualifiers = [&](const bool foreign_given) -> bool {
+    if (!foreign_given) {
+      return false;
+    }
+    BKE_report(reports, RPT_ERROR, rna_paint_layer_foreign_qualifiers_error);
+    return true;
+  };
+  switch (eMaterialPaintLayerSource(source)) {
+    case MA_PAINT_LAYER_SOURCE_FILTER:
+      if (!filter_given) {
+        BKE_report(reports, RPT_ERROR, "A filter needs the filter it applies");
+        return false;
+      }
+      if (!rna_paint_layer_filter_valid(filter)) {
+        BKE_report(reports, RPT_ERROR, "Unknown filter");
+        return false;
+      }
+      if (reject_foreign_qualifiers(generator_given)) {
+        return false;
+      }
+      /* A filter changes everything below, laid by the row's own opacity, blend and mask. */
+      r_params.filter = int16_t(filter);
+      r_params.kind = as_correction ? PaintLayerAddKind::Filter : PaintLayerAddKind::Adjustment;
+      return true;
+    case MA_PAINT_LAYER_SOURCE_GENERATOR:
+      if (reject_foreign_qualifiers(filter_given)) {
+        return false;
+      }
+      if (!rna_paint_layer_generator_valid(generator)) {
+        BKE_report(reports, RPT_ERROR, "Unknown generator");
+        return false;
+      }
+      /* The Gradient is the default; the registry's other generators are the same row with the
+       * generator named, the way the Outliner's pattern kinds add them. */
+      r_params.generator = int16_t(generator);
+      r_params.kind = as_correction ? PaintLayerAddKind::GradientCorrection :
+                                      PaintLayerAddKind::Gradient;
+      return true;
+    case MA_PAINT_LAYER_SOURCE_IMAGE:
+    case MA_PAINT_LAYER_SOURCE_CONSTANT:
+      if (reject_foreign_qualifiers(filter_given || generator_given)) {
+        return false;
+      }
+      if (as_correction) {
+        r_params.kind = (source == MA_PAINT_LAYER_SOURCE_CONSTANT) ?
+                            PaintLayerAddKind::CorrectionFill :
+                            PaintLayerAddKind::Correction;
+      }
+      else {
+        r_params.kind = (source == MA_PAINT_LAYER_SOURCE_CONSTANT) ? PaintLayerAddKind::Fill :
+                                                                     PaintLayerAddKind::Paint;
+      }
+      return true;
+    case MA_PAINT_LAYER_SOURCE_STACK:
+    case MA_PAINT_LAYER_SOURCE_MESH_MAP:
+    case MA_PAINT_LAYER_SOURCE_MATERIAL:
+      if (as_correction) {
+        /* Only Image, Constant, Filter and Generator take a correction. */
+        break;
+      }
+      if (reject_foreign_qualifiers(filter_given || generator_given)) {
+        return false;
+      }
+      if (source == MA_PAINT_LAYER_SOURCE_STACK) {
+        r_params.kind = PaintLayerAddKind::Folder;
+      }
+      else if (source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
+        r_params.kind = PaintLayerAddKind::MeshMap;
+      }
+      else {
+        /* The Material source's data-block check stays with the caller, which owns the material
+         * argument. */
+        r_params.kind = PaintLayerAddKind::Material;
+      }
+      return true;
+    case MA_PAINT_LAYER_SOURCE_CURVE_PATCH:
+      if (!as_correction) {
+        /* A Curve Patch is only ever an effect of a layer, never a layer of its own. */
+        BKE_report(reports, RPT_ERROR, "A Curve Patch can only be added as an effect of a layer");
+        return false;
+      }
+      break;
+    case MA_PAINT_LAYER_SOURCE_TEXT:
+      if (!as_correction) {
+        /* A Text Decal is only ever an effect of a layer, never a layer of its own. */
+        BKE_report(reports, RPT_ERROR, "A Text Decal can only be added as an effect of a layer");
+        return false;
+      }
+      break;
+    default:
+      if (!as_correction) {
+        if (reject_foreign_qualifiers(filter_given || generator_given)) {
+          return false;
+        }
+        r_params.kind = PaintLayerAddKind::Paint;
+        return true;
+      }
+      break;
+  }
+  /* The corrections the sources above do not take. */
+  BKE_report(reports,
+             RPT_ERROR,
+             "A correction is a painted map (Image), a flat colour (Constant), a filter (Filter) "
+             "or a procedural generator (Generator)");
+  return false;
+}
+
 static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
                                                          Main *bmain,
                                                          ReportList *reports,
@@ -1257,46 +1674,25 @@ static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
                                                          bool make_active,
                                                          int source,
                                                          bool create_maps,
-                                                         Material *source_material)
+                                                         Material *source_material,
+                                                         const int filter,
+                                                         const int generator)
 {
   /* The authoring policy is the shared BKE one (#BKE_paint_layers_add_with_policy): the same
    * default names and channels every other authoring path gets. An empty name means the unique
    * default. */
   PaintLayerAddParams params;
-  switch (eMaterialPaintLayerSource(source)) {
-    case MA_PAINT_LAYER_SOURCE_CONSTANT:
-      params.kind = PaintLayerAddKind::Fill;
-      break;
-    case MA_PAINT_LAYER_SOURCE_GENERATOR:
-      params.kind = PaintLayerAddKind::Gradient;
-      break;
-    case MA_PAINT_LAYER_SOURCE_STACK:
-      params.kind = PaintLayerAddKind::Folder;
-      break;
-    case MA_PAINT_LAYER_SOURCE_MESH_MAP:
-      params.kind = PaintLayerAddKind::MeshMap;
-      break;
-    case MA_PAINT_LAYER_SOURCE_MATERIAL:
-      if (source_material == nullptr) {
-        BKE_report(reports, RPT_ERROR, "A Material layer needs the material it reads");
-        return nullptr;
-      }
-      params.kind = PaintLayerAddKind::Material;
-      params.source = source_material;
-      /* Each Material row reads a material of its own, so its settings are its own. */
-      params.bmain = bmain;
-      break;
-    case MA_PAINT_LAYER_SOURCE_CURVE_PATCH:
-      /* A Curve Patch is only ever an effect of a layer, never a layer of its own. */
-      BKE_report(reports, RPT_ERROR, "A Curve Patch can only be added as an effect of a layer");
+  if (!rna_paint_layer_params_from_source(source, filter, generator, false, reports, params)) {
+    return nullptr;
+  }
+  if (eMaterialPaintLayerSource(source) == MA_PAINT_LAYER_SOURCE_MATERIAL) {
+    if (source_material == nullptr) {
+      BKE_report(reports, RPT_ERROR, "A Material layer needs the material it reads");
       return nullptr;
-    case MA_PAINT_LAYER_SOURCE_TEXT:
-      /* A Text Decal is only ever an effect of a layer, never a layer of its own. */
-      BKE_report(reports, RPT_ERROR, "A Text Decal can only be added as an effect of a layer");
-      return nullptr;
-    default:
-      params.kind = PaintLayerAddKind::Paint;
-      break;
+    }
+    params.source = source_material;
+    /* Each Material row reads a material of its own, so its settings are its own. */
+    params.bmain = bmain;
   }
   params.name = (name[0] != '\0') ? name : nullptr;
   /* An unset optional pointer reaches the callback as null, not as a null #PointerRNA. */
@@ -5021,22 +5417,21 @@ static void rna_MaterialPaintLayer_effects_begin(CollectionPropertyIterator *ite
 static MaterialPaintLayer *rna_MaterialPaintLayer_effect_add(PointerRNA ptr,
                                                              ReportList *reports,
                                                              const char *name,
-                                                             const int source)
+                                                             const int source,
+                                                             const int filter,
+                                                             const int generator)
 {
-  if (!ELEM(source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT)) {
-    BKE_report(reports,
-               RPT_ERROR,
-               "A correction is a painted map (Image) or a flat colour (Constant)");
-    return nullptr;
-  }
   MaterialPaintLayer *layer = nullptr;
   if (Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer)) {
-    /* The policy numbers an empty name among this layer's own corrections. */
+    /* The shared authoring policy numbers an empty name among this layer's own corrections, and
+     * the Filter and Generator kinds carry the filter and generator in their params, the way the
+     * Outliner's Add does. */
     PaintLayerAddParams params;
-    params.kind = (source == MA_PAINT_LAYER_SOURCE_CONSTANT) ? PaintLayerAddKind::CorrectionFill :
-                                                               PaintLayerAddKind::Correction;
     params.anchor = layer;
     params.name = (name[0] != '\0') ? name : nullptr;
+    if (!rna_paint_layer_params_from_source(source, filter, generator, true, reports, params)) {
+      return nullptr;
+    }
     if (MaterialPaintLayer *effect = BKE_paint_layers_add_with_policy(*ma, params)) {
       return effect;
     }
@@ -6357,250 +6752,6 @@ static const EnumPropertyItem rna_enum_material_paint_layer_gradient_gizmo_chann
      0,
      "Anisotropic",
      "Show the value ramp"},
-    {0, nullptr, 0, nullptr, nullptr},
-};
-
-/* Values are #eMaterialPaintLayerFilter; 0 is "not a filter" and is only ever read. */
-/* TODO: the names and tooltips here are a second copy of the kind records in
- * `paint_layers_kind.cc`; when the kind API can expose its own RNA items, build this list from it
- * instead of naming every filter by hand. */
-static const EnumPropertyItem rna_enum_material_paint_layer_filter_items[] = {
-    {0, "NONE", 0, "None", "Not a filter"},
-    {MA_PAINT_LAYER_FILTER_INVERT, "INVERT", 0, "Invert", "Invert the colour or coverage below"},
-    {MA_PAINT_LAYER_FILTER_LEVELS, "LEVELS", 0, "Levels", "Remap the levels of what is below"},
-    {MA_PAINT_LAYER_FILTER_HSL, "HSL", 0, "Hue Saturation Value", "Shift hue, saturation, value"},
-    {MA_PAINT_LAYER_FILTER_BRIGHTNESS_CONTRAST,
-     "BRIGHTNESS_CONTRAST",
-     0,
-     "Brightness/Contrast",
-     "Brighten or darken and scale the contrast of what is below"},
-    {MA_PAINT_LAYER_FILTER_COLOR_RAMP,
-     "COLOR_RAMP",
-     0,
-     "Color Ramp",
-     "Remap the luminance of what is below through a Color Band"},
-    {MA_PAINT_LAYER_FILTER_POSTERIZE,
-     "POSTERIZE",
-     0,
-     "Posterize",
-     "Quantize what is below to a whole number of steps per channel"},
-    {MA_PAINT_LAYER_FILTER_MATH,
-     "MATH",
-     0,
-     "Math",
-     "Combine what is below with a constant operand, per channel"},
-    {MA_PAINT_LAYER_FILTER_THRESHOLD,
-     "THRESHOLD",
-     0,
-     "Threshold",
-     "Turn each channel of what is below into the two states of a comparison"},
-    {MA_PAINT_LAYER_FILTER_CLAMP,
-     "CLAMP",
-     0,
-     "Clamp",
-     "Keep each channel of what is below inside a constant range"},
-    {MA_PAINT_LAYER_FILTER_HISTOGRAM_SCAN,
-     "HISTOGRAM_SCAN",
-     0,
-     "Histogram Scan",
-     "Remap each channel of what is below through a smoothstep: a soft threshold the contrast "
-     "opens into a ramp, the one that grows and shrinks a mask"},
-    {MA_PAINT_LAYER_FILTER_HISTOGRAM_SHIFT,
-     "HISTOGRAM_SHIFT",
-     0,
-     "Histogram Shift",
-     "Roll the tonal range of each channel of what is below by one amount, wrapping back through "
-     "zero"},
-    {MA_PAINT_LAYER_FILTER_CURVES,
-     "CURVES",
-     0,
-     "RGB Curves",
-     "Remap each channel of what is below through its own curve"},
-    {MA_PAINT_LAYER_FILTER_COLOR_BALANCE,
-     "COLOR_BALANCE",
-     0,
-     "Color Balance",
-     "Balance the colours of what is below through lift, gamma and gain (or slope, offset and power)"},
-    {MA_PAINT_LAYER_FILTER_BLUR,
-     "BLUR",
-     0,
-     "Blur",
-     "Blur the colours of what is below with a box or gaussian kernel"},
-    {MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL,
-     "BLUR_DIRECTIONAL",
-     0,
-     "Blur Directional",
-     "Streak the colours of what is below along a fixed angle: a line average the radius reaches "
-     "along, mixed over the colour by its intensity"},
-    {MA_PAINT_LAYER_FILTER_DROP_SHADOW,
-     "DROP_SHADOW",
-     0,
-     "Drop Shadow",
-     "Cast a shadow off the shape of what is below: the silhouette spread, blurred and offset by "
-     "the angle and the distance, tinted by the colour"},
-    {MA_PAINT_LAYER_FILTER_MASK_OUTLINE,
-     "MASK_OUTLINE",
-     0,
-     "Mask Outline",
-     "Lay a band along the border of the grey of what is below: inside it, outside it, or on both "
-     "sides, the width the band takes and the shape its falloff walks"},
-    {MA_PAINT_LAYER_FILTER_FILL_AREA,
-     "FILL_AREA",
-     0,
-     "Fill Area",
-     "Fill what a continuous border of what is below encloses: the regions the border closes off "
-     "take the colour the border carries, diffused inward, or the solid colour"},
-    {MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT,
-     "CHANNEL_SPLIT",
-     0,
-     "Channel Split",
-     "Extract one channel of the assigned image and lay it as a grey in the channels the effect "
-     "works in, or as the coverage of the mask it is an item of"},
-    {MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK,
-     "NORMAL_TO_MASK",
-     0,
-     "Normal to Mask",
-     "Turn the normal map of the referenced layer (an Anchor Point), or of the row's own Normal "
-     "content, into a black-and-white mask: the normal rebuilds into a Height, an Edges or a Slope "
-     "field the threshold cuts"},
-    {MA_PAINT_LAYER_FILTER_SHARPEN,
-     "SHARPEN",
-     0,
-     "Sharpen",
-     "Sharpen the colours of what is below around the details a blur removes"},
-    {MA_PAINT_LAYER_FILTER_HIGH_PASS,
-     "HIGH_PASS",
-     0,
-     "High Pass",
-     "Keep the details of what is below above a blurred copy of them"},
-    {MA_PAINT_LAYER_FILTER_EDGE_DETECT,
-     "EDGE_DETECT",
-     0,
-     "Edge Detect",
-     "Outline the edges of what is below with the Sobel gradient magnitude"},
-    {MA_PAINT_LAYER_FILTER_EMBOSS,
-     "EMBOSS",
-     0,
-     "Emboss",
-     "Emboss the colours of what is below with a diagonal lighting kernel"},
-    {MA_PAINT_LAYER_FILTER_ERODE_DILATE,
-     "ERODE_DILATE",
-     0,
-     "Erode / Dilate",
-     "Shrink or grow the bright regions of what is below by the kernel's radius"},
-    {MA_PAINT_LAYER_FILTER_COLOR_ID,
-     "COLOR_ID",
-     0,
-     "Color ID",
-     "Keep the coverage where an ID Map matches the listed colours"},
-    {MA_PAINT_LAYER_FILTER_UV_ISLAND,
-     "UV_ISLAND",
-     0,
-     "UV Island",
-     "Keep the coverage on the UV islands captured from the Image Editor selection"},
-    {MA_PAINT_LAYER_FILTER_EXPOSURE,
-     "EXPOSURE",
-     0,
-     "Exposure",
-     "Scale what is below by a power of two, shift it and raise the result to a gamma"},
-    {MA_PAINT_LAYER_FILTER_DEBAND,
-     "DEBAND",
-     0,
-     "Deband / Dither",
-     "Break the bands of what is below up with a triangular noise of one quantization step, or "
-     "round it to fewer bits with that noise on top"},
-    {MA_PAINT_LAYER_FILTER_NOISE,
-     "NOISE",
-     0,
-     "Noise",
-     "Lay a gaussian, uniform, speckle or salt and pepper grain over the colours of what is below"},
-    {MA_PAINT_LAYER_FILTER_NORMAL_CONVERT,
-     "NORMAL_CONVERT",
-     0,
-     "Normal Convert",
-     "Convert the encoding of a normal map: flip its green, rebuild or clear its blue, or move its "
-     "channels between linear and sRGB"},
-    {MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL,
-     "HEIGHT_TO_NORMAL",
-     0,
-     "Height To Normal",
-     "Convert the Height the row lays into a tangent-space normal: the Sobel gradients of the "
-     "height, scaled by the intensity or the world units, encoded into the Normal channel"},
-    {MA_PAINT_LAYER_FILTER_SMOOTHSTEP,
-     "SMOOTHSTEP",
-     0,
-     "Smoothstep",
-     "Extract a range of the grey of what is below between a minimum and a maximum: the Hermite "
-     "interpolation between the edges, the smoother sibling of a threshold"},
-    {MA_PAINT_LAYER_FILTER_CONTRAST_LUMINOSITY,
-     "CONTRAST_LUMINOSITY",
-     0,
-     "Contrast Luminosity",
-     "Scale the contrast of what is below about its middle and shift it: the two sliders a "
-     "brightness and contrast control carries"},
-    {MA_PAINT_LAYER_FILTER_HEIGHT_ADJUST,
-     "HEIGHT_ADJUST",
-     0,
-     "Height Adjust",
-     "Invert, offset or multiply the height of what is below: the offset rides before the "
-     "multiply, so a zero offset result annihilates the multiply at that point"},
-    {MA_PAINT_LAYER_FILTER_PIXELATE,
-     "PIXELATE",
-     0,
-     "Pixelate",
-     "Quantize what is below into blocks of one colour: the map cut into a grid of the pixel "
-     "amount's size, every block taking the average of what it covers"},
-    {MA_PAINT_LAYER_FILTER_HSL_PERSPECTIVE,
-     "HSL_PERSPECTIVE",
-     0,
-     "HSL Perspective",
-     "Adjust the hue, saturation and lightness of what is below: the Regular mode shifts the "
-     "value channel, the Perceptive one lifts the colour toward white or black"},
-    {MA_PAINT_LAYER_FILTER_FXAA,
-     "FXAA",
-     0,
-     "FXAA",
-     "Smooth the jagged edges of what is below with a single-pass FXAA: the luminance-driven "
-     "edge blend walking the jag along its own direction"},
-    {MA_PAINT_LAYER_FILTER_BLUR_SLOPE,
-     "BLUR_SLOPE",
-     0,
-     "Blur Slope",
-     "Smear what is below along the slope of a source: the samples walk the gradient of the "
-     "noise, the blending mode saying what the walk accumulates"},
-    {MA_PAINT_LAYER_FILTER_CHANNEL_MIXER,
-     "CHANNEL_MIXER",
-     0,
-     "Channel Mixer",
-     "Mix the colour channels: each output channel is a weighted sum of the input ones plus a "
-     "constant"},
-    {MA_PAINT_LAYER_FILTER_GLOW,
-     "GLOW",
-     0,
-     "Glow",
-     "Bleed a coloured glow off the light of what is below"},
-    {MA_PAINT_LAYER_FILTER_BEVEL,
-     "BEVEL",
-     0,
-     "Bevel",
-     "Lay a distance ramp from the borders of what is below inward"},
-    {MA_PAINT_LAYER_FILTER_COLOR_MATCH,
-     "COLOR_MATCH",
-     0,
-     "Color Match",
-     "Grade the colours of what is below from a source colour to a target one"},
-    {MA_PAINT_LAYER_FILTER_TRANSFORM,
-     "TRANSFORM",
-     0,
-     "Transform Mapping",
-     "Move, rotate and scale the UV the row's content is read at: the transform the row's own "
-     "mapping applies, as an effect over every map the row reads"},
-    {MA_PAINT_LAYER_FILTER_MIRROR,
-     "MIRROR",
-     0,
-     "Mirror",
-     "Fold the UV the row's content is read at about a center, per axis: what either side of the "
-     "center shows, both sides show"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -8368,8 +8519,10 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   func = RNA_def_function(srna, "effect_add", "rna_MaterialPaintLayer_effect_add");
   RNA_def_function_ui_description(
       func,
-      "Add a content correction: a map laid over the layer's colour, painted into like a layer, or "
-      "with the Constant source one flat colour (see fill_color) laid at the correction's opacity");
+      "Add a content correction over the layer's colour: a map painted into like a layer (Image), "
+      "one flat colour at the correction's opacity (Constant), a filter (Filter, naming "
+      "\"filter\"), or a procedural generator (Generator, naming \"generator\"). The other sources "
+      "report the filter and generator as an error when given");
   RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_REPORTS);
   RNA_def_string(func,
                  "name",
@@ -8383,7 +8536,22 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
                rna_enum_material_paint_layer_source_items,
                MA_PAINT_LAYER_SOURCE_IMAGE,
                "Source",
-               "Image for a painted map, Constant for a flat colour");
+               "Image for a painted map, Constant for a flat colour, Filter or Generator for the "
+               "kinds that name their own subtype below");
+  /* The qualifiers of the Filter and Generator sources; the other sources report them as an error
+   * instead of ignoring them. */
+  RNA_def_enum(func,
+               "filter",
+               rna_enum_material_paint_layer_filter_items,
+               0,
+               "Filter",
+               "Which filter to apply, with the Filter source");
+  RNA_def_enum(func,
+               "generator",
+               rna_enum_material_paint_layer_generator_items,
+               MA_PAINT_LAYER_GENERATOR_GRADIENT,
+               "Generator",
+               "Which generator pattern to lay, with the Generator source");
   parm = RNA_def_pointer(func, "effect", "MaterialPaintLayer", "", "The new correction");
   RNA_def_function_return(func, parm);
 
@@ -8867,7 +9035,11 @@ static void rna_def_material_paint_layers(BlenderRNA *brna, PropertyRNA *cprop)
   /* The functions operate on the owning #Material, so every structural change can go through the
    * BKE description API rather than writing DNA from RNA. */
   func = RNA_def_function(srna, "new", "rna_Material_paint_layers_new");
-  RNA_def_function_ui_description(func, "Add a paint layer relative to an anchor row");
+  RNA_def_function_ui_description(
+      func,
+      "Add a paint layer relative to an anchor row. The Filter source names the filter to apply "
+      "below the row, the Generator source the pattern it lays; the other sources report the "
+      "filter and generator as an error when given");
   RNA_def_function_flag(func, FUNC_USE_MAIN | FUNC_USE_REPORTS);
   RNA_def_string(func,
                  "name",
@@ -8905,6 +9077,20 @@ static void rna_def_material_paint_layers(BlenderRNA *brna, PropertyRNA *cprop)
                   "Material",
                   "Material",
                   "The material a layer of the Material source reads");
+  /* The qualifiers of the Filter and Generator sources; the other sources report them as an error
+   * instead of ignoring them. */
+  RNA_def_enum(func,
+               "filter",
+               rna_enum_material_paint_layer_filter_items,
+               0,
+               "Filter",
+               "Which filter to apply below this row, with the Filter source");
+  RNA_def_enum(func,
+               "generator",
+               rna_enum_material_paint_layer_generator_items,
+               MA_PAINT_LAYER_GENERATOR_GRADIENT,
+               "Generator",
+               "Which generator pattern the layer lays, with the Generator source");
   parm = RNA_def_pointer(func, "layer", "MaterialPaintLayer", "", "The newly created paint layer");
   RNA_def_function_return(func, parm);
 

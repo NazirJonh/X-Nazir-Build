@@ -357,6 +357,7 @@ static const EnumPropertyItem rna_enum_user_asset_library_brush_set_items[] = {
 #  include "ED_asset_library.hh"
 #  include "ED_asset_list.hh"
 #  include "ED_asset_name_matching.hh"
+#  include "ED_outliner_stack.hh"
 #  include "ED_screen.hh"
 
 #  include "UI_interface.hh"
@@ -940,6 +941,47 @@ static void rna_userdef_asset_library_remove(bContext *C, ReportList *reports, P
   ptr->invalidate();
   USERDEF_TAG_DIRTY;
 }
+
+/** \name Paint Add Menu favorites (#UserDef.paint_add_favorites)
+ *
+ * Backing implementation of the #PaintAddFavoriteCollection RNA collection: the Add menu kinds the
+ * user pinned, stored in the preferences (the global #U) so they survive a restart and a settings
+ * sync.
+ * \{ */
+
+static bUserPaintAddFavorite *rna_userdef_paint_add_favorite_new(ReportList *reports,
+                                                                 const char *identifier)
+{
+  if (identifier == nullptr || identifier[0] == '\0') {
+    BKE_report(reports, RPT_ERROR, "Paint add favorite: identifier cannot be empty");
+    return nullptr;
+  }
+  bUserPaintAddFavorite *favorite = BKE_preferences_paint_add_favorite_add(&U, identifier);
+  if (favorite != nullptr) {
+    ed::outliner::outliner_stack_add_favorites_tag_changed();
+  }
+  return favorite;
+}
+
+static void rna_userdef_paint_add_favorite_remove(ReportList *reports, PointerRNA *favorite_ptr)
+{
+  bUserPaintAddFavorite *favorite = static_cast<bUserPaintAddFavorite *>(favorite_ptr->data);
+  if (!BKE_preferences_paint_add_favorite_remove_ptr(&U, favorite)) {
+    BKE_report(reports, RPT_ERROR, "Paint add favorite not found");
+    return;
+  }
+
+  favorite_ptr->invalidate();
+  ed::outliner::outliner_stack_add_favorites_tag_changed();
+}
+
+static void rna_userdef_paint_add_favorite_clear()
+{
+  BKE_preferences_paint_add_favorite_clear(&U);
+  ed::outliner::outliner_stack_add_favorites_tag_changed();
+}
+
+/** \} */
 
 /** \name Sculpt cursor buttons (#UserDef.sculpt_cursor_buttons)
  *
@@ -8128,6 +8170,69 @@ static void rna_def_userdef_asset_library_collection(BlenderRNA *brna, PropertyR
   RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
 }
 
+static void rna_def_userdef_paint_add_favorite(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "PaintAddFavorite", nullptr);
+  RNA_def_struct_sdna(srna, "bUserPaintAddFavorite");
+  RNA_def_struct_ui_text(
+      srna,
+      "Paint Add Favorite",
+      "A Stack Layers Add menu kind pinned to the Favorites submenu of the Add menu");
+
+  prop = RNA_def_property(srna, "identifier", PROP_STRING, PROP_NONE);
+  RNA_def_property_ui_text(
+      prop,
+      "Identifier",
+      "The stable Add kind identifier, e.g. \"PAINT\" or \"FILTER_BLUR\"; a name the stack source "
+      "no longer declares is drawn as a missing item until it is removed");
+  /* Read-only: the identifier is the unique key the pins and the Add menu carry, and the
+   * collection's `new` is what keeps it unique and non-empty; editing it from Python would go
+   * around that and could leave two favorites naming one kind. */
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_struct_name_property(srna, prop);
+  RNA_def_property_translation_context(prop, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+}
+
+static void rna_def_userdef_paint_add_favorite_collection(BlenderRNA *brna, PropertyRNA *cprop)
+{
+  StructRNA *srna;
+  FunctionRNA *func;
+  PropertyRNA *parm;
+
+  RNA_def_property_srna(cprop, "PaintAddFavoriteCollection");
+  srna = RNA_def_struct(brna, "PaintAddFavoriteCollection", nullptr);
+  RNA_def_struct_ui_text(
+      srna, "Paint Add Favorites", "Collection of the Stack Layers Add menu's pinned kinds");
+
+  func = RNA_def_function(srna, "new", "rna_userdef_paint_add_favorite_new");
+  RNA_def_function_flag(func, FUNC_NO_SELF | FUNC_USE_REPORTS);
+  RNA_def_function_ui_description(func, "Pin an Add menu kind to the Favorites submenu");
+  RNA_def_string(func,
+                 "identifier",
+                 nullptr,
+                 sizeof(bUserPaintAddFavorite::identifier),
+                 "Identifier",
+                 "The Add kind identifier, e.g. \"PAINT\" or \"FILTER_BLUR\"");
+  /* return type */
+  parm = RNA_def_pointer(func, "favorite", "PaintAddFavorite", "", "The pinned favorite");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "remove", "rna_userdef_paint_add_favorite_remove");
+  RNA_def_function_flag(func, FUNC_NO_SELF | FUNC_USE_REPORTS);
+  RNA_def_function_ui_description(func, "Unpin an Add menu kind");
+  parm = RNA_def_pointer(func, "favorite", "PaintAddFavorite", "", "");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+
+  func = RNA_def_function(srna, "clear", "rna_userdef_paint_add_favorite_clear");
+  RNA_def_function_flag(func, FUNC_NO_SELF);
+  RNA_def_function_ui_description(func, "Unpin every Add menu kind");
+}
+
 static void rna_def_userdef_extension_repos_collection(BlenderRNA *brna, PropertyRNA *cprop)
 {
   StructRNA *srna;
@@ -8423,11 +8528,21 @@ static void rna_def_userdef_filepaths(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "File Preview Type", "What type of blend preview to create");
 
   rna_def_userdef_filepaths_asset_library(brna);
+  rna_def_userdef_paint_add_favorite(brna);
 
   prop = RNA_def_property(srna, "asset_libraries", PROP_COLLECTION, PROP_NONE);
   RNA_def_property_struct_type(prop, "UserAssetLibrary");
   RNA_def_property_ui_text(prop, "Asset Libraries", "");
   rna_def_userdef_asset_library_collection(brna, prop);
+
+  prop = RNA_def_property(srna, "paint_add_favorites", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_collection_sdna(prop, nullptr, "paint_add_favorites", nullptr);
+  RNA_def_property_struct_type(prop, "PaintAddFavorite");
+  RNA_def_property_ui_text(
+      prop,
+      "Paint Add Favorites",
+      "Stack Layers Add menu kinds pinned to its Favorites submenu, in menu order");
+  rna_def_userdef_paint_add_favorite_collection(brna, prop);
 
   prop = RNA_def_property(srna, "active_asset_library", PROP_INT, PROP_NONE);
   RNA_def_property_ui_text(prop,

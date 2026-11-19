@@ -1628,6 +1628,8 @@ UserDef *BKE_blendfile_userdef_from_defaults()
   userdef->asset_browser_settings.clear_no_delete();
   /* Start with an empty per-(library, domain) catalog-memory list. */
   userdef->catalog_memory.clear_no_delete();
+  /* Start with an empty Add-menu Favorites list; nothing pins a kind by default. */
+  userdef->paint_add_favorites.clear_no_delete();
 
   {
     BKE_preferences_asset_shelf_settings_ensure_catalog_path_enabled(

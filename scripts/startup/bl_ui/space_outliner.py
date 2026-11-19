@@ -28,7 +28,6 @@ GLYPH_BRUSH = 0xE3AE
 _GLYPH_FILL = 0xE997
 _GLYPH_GRADIENT = 0xE3E9
 _GLYPH_PATTERN = 0xE3A5
-_GLYPH_ANCHOR = 0xF1CD
 
 # The add and context menus registered stack sources provide, by source idname. A source module
 # (or an add-on) calls the two helpers below from its own register/unregister; the Stack Layers
@@ -84,6 +83,34 @@ def _stack_add_button(row, glyph, fallback_icon, kind, label, *, text=""):
     props.label = label
 
 
+def _stack_draw_quick_layers(layout, *, with_text):
+    """The Paint, Fill and Material quick buttons, shared by the tool header and the Add menu.
+
+    The header packs them icon-only into one aligned row; the menu draws them with their names on.
+    """
+    _stack_add_button(layout, bpy.app.icons.glyph(GLYPH_BRUSH), 'BRUSH_DATA',
+                      'PAINT', "Add Paint Layer", text="Paint Layer" if with_text else "")
+    _stack_add_button(layout, bpy.app.icons.glyph(_GLYPH_FILL), 'GP_DRAW_FILL',
+                      'FILL', "Add Fill Layer", text="Fill Layer" if with_text else "")
+    # A layer that shows what another material shows; the Add asks which one.
+    props = layout.operator("outliner.stack_layer_add",
+                            text="Material Layer" if with_text else "", icon='MATERIAL')
+    props.type = 'MATERIAL'
+    props.label = "Add Material Layer"
+
+
+def _stack_is_paint_material(space):
+    """Whether the space shows the paint stack of a material.
+
+    The one source whose Add menu is built from the quick layers and the shared effect lists; the
+    tool header and the root Add menu ask the same question, so they answer it in one place. The
+    C++ side keeps the same split: the registered lists' own poll (`stack_add_menu_poll` in
+    outliner_stack_add_menu.cc) covers any source that declares kinds, and the Shift+A entry
+    (`outliner.stack_add_menu_call`) narrows to this question like this poll does.
+    """
+    return space.stack_source == 'PAINT_MATERIAL'
+
+
 class OUTLINER_HT_tool_header(Header):
     bl_space_type = 'OUTLINER'
     bl_region_type = 'TOOL_HEADER'
@@ -114,7 +141,7 @@ class OUTLINER_HT_tool_header(Header):
         header_start = _stack_source_header_for(space, "header_start")
         if header_start is not None:
             header_start(layout, context, space)
-        if space.stack_source == 'PAINT_MATERIAL':
+        if _stack_is_paint_material(space):
             # Which channel's value the rows below show and edit. Width is capped so the dropdown
             # does not stretch to the widest item and crowd the Add buttons.
             sub = layout.row()
@@ -123,32 +150,17 @@ class OUTLINER_HT_tool_header(Header):
 
         layout.separator_spacer()
 
-        if space.stack_source == 'PAINT_MATERIAL':
-            # The Add verb is built from the source's own kinds; the paint stack offers Paint, Fill
-            # and a Correction, so a quick-access button each stands in for the menu (the source's
-            # kind list is not exposed through RNA yet, so the buttons are written out here).
+        if _stack_is_paint_material(space):
+            # The quick layers, icon-only: the one-click shortcuts the Add menu carries with their
+            # names on. The buttons are the menu's own (see _stack_draw_quick_layers), so the two
+            # cannot drift apart.
             row = layout.row(align=True)
-            # The brush glyph, shared with the Paint rows and the Add menu; the built-in fallback is
-            # the same icon those name, so a background-mode button reads as they do.
-            _stack_add_button(row, bpy.app.icons.glyph(GLYPH_BRUSH), 'BRUSH_DATA',
-                              'PAINT', "Add Paint Layer")
-            # The Fill glyph (Material Symbols "colors"), the one the Fill rows and the Add menu
-            # use; the built-in icon stands in where no glyph icon exists (background mode).
-            _stack_add_button(row, bpy.app.icons.glyph(_GLYPH_FILL), 'GP_DRAW_FILL',
-                              'FILL', "Add Fill Layer")
-            # A layer that shows what another material shows; the Add asks which one.
-            props = row.operator("outliner.stack_layer_add", text="", icon='MATERIAL')
-            props.type = 'MATERIAL'
-            props.label = "Add Material Layer"
+            _stack_draw_quick_layers(row, with_text=False)
             # The procedural layers (a Gradient, and the patterns of the generator registry) are
             # not needed every time, so one dropdown holds them instead of a button each.
             row.menu("OUTLINER_MT_stack_layer_procedural_add", text="", icon='PLUS', use_dropdown=True)
-            # Corrections hang on the selected layer or on its mask; one menu holds them all.
-            row = layout.row(align=True)
-            # The corrections, with the newer ones in submenus. A `menu` rather than an enum button,
-            # because an enum button cannot hold a submenu; `use_dropdown` gives it the arrow the
-            # enum buttons have.
-            row.menu("OUTLINER_MT_stack_layer_effect_add", text="", icon='SHADERFX', use_dropdown=True)
+            # The full Add menu (effects, Favorites, search) has no header button: Shift+A opens it
+            # (outliner.stack_add_menu_call), and the row's context menu carries it too.
 
             # Only the add is here, as a menu of the starting masks; switching a mask off and
             # taking it away live in the row's context menu, while its slot is the one showing.
@@ -213,58 +225,62 @@ class OUTLINER_MT_stack_layer_pattern_add(Menu):
             props.label = "Add {:s} Layer".format(item.name)
 
 
-class OUTLINER_MT_stack_layer_effect_add(Menu):
-    bl_label = "Add Effect"
+class OUTLINER_MT_stack_layer_add(Menu):
+    """Everything the paint stack grows with, with the search over it (type while it is open): the
+    quick layers, the pinned Favorites, and the source's own effects.
+
+    The extension point for add-ons: append here (bpy.types.OUTLINER_MT_stack_layer_add.append)
+    and the appended items draw after ours, in this menu and in its search alike. The draw sets
+    the operator context to 'INVOKE_REGION_WIN' and leaves it set before returning, so an appended
+    callback runs under the same context our items do -- that is the contract; keep it when
+    changing this menu.
+    """
+
+    bl_label = "Add"
+    bl_options = {'SEARCH_ON_KEY_PRESS'}
+
+    @classmethod
+    def poll(cls, context):
+        space = context.space_data
+        return (
+            space is not None
+            and space.display_mode == 'STACK_LAYERS'
+            and space.stack_layers_view == 'STACK'
+            and _stack_is_paint_material(space)
+        )
 
     def draw(self, _context):
         layout = self.layout
-        # What is not a filter, a pattern or an Anchor Point stays in the list; each group below is
-        # a submenu (or the closing entries) of an operator of its own, so the lists never repeat
-        # an entry.
-        layout.operator_enum("outliner.stack_layer_effect_add", "type")
+
+        # The search over everything below, the way the node editor's Add menu has one: the generic
+        # engine draws this menu off-screen and lists its buttons, so the Favorites, the effect
+        # lists and an add-on's additions are all searchable for free. Drawn wherever this menu is
+        # the popup itself, not only in the keymap-invoked one: the header's dropdown opens with
+        # 'INVOKE_REGION_WIN', so the node menu's 'EXEC_REGION_WIN' test would hide it there. The
+        # search engine drops this operator from its own results (interface_template_search_menu.cc).
+        layout.operator_context = 'INVOKE_REGION_WIN'
+        props = layout.operator("WM_OT_search_single_menu", text="Search...", icon='VIEWZOOM')
+        props.menu_idname = "OUTLINER_MT_stack_layer_add"
+        # The pinned kinds come first, straight after the search, in the order the user keeps them;
+        # unpinning is on the same rows.
+        layout.menu("OUTLINER_MT_stack_add_favorites", text="Favorites", icon='PINNED')
         layout.separator()
-        layout.menu("OUTLINER_MT_stack_layer_effect_add_correction", text="Correction", icon='MODIFIER')
-        # The effects that move what the row reads: the entries land in the row's Effects list,
-        # and each one's own panel carries its offset, rotation, scale or fold center.
-        layout.menu(
-            "OUTLINER_MT_stack_layer_effect_add_transform", text="Transform", icon='MOD_UVPROJECT')
-        layout.operator_menu_enum(
-            "outliner.stack_layer_effect_add_new", "type", text="Filter", icon='SOLO_ON')
-        # The Painter-parity filters; an operator of its own, as its `type` enum lists only them.
-        layout.operator_menu_enum(
-            "outliner.stack_layer_effect_add_filter2", "type", text="Filter 2", icon='SOLO_ON')
-        # The generator registry's patterns (Noise, Voronoi, ...); the Gradient stays in the list
-        # above, and the pattern glyph keeps the two apart.
-        # A menu of its own rather than an enum button: `operator_menu_enum` takes no glyph value.
-        layout.menu("OUTLINER_MT_stack_layer_effect_add_pattern", text="Generate Patterns",
-                    **_stack_glyph_args(bpy.app.icons.glyph(_GLYPH_PATTERN), 'TEXTURE'))
-        # The Anchor Point and its reader close the menu, after every submenu. The reader is off
-        # while the material has no point to read; a click opens the ID Browser over the points.
+
+        # The quick layers, the same buttons the header carries, with their names on.
+        _stack_draw_quick_layers(layout, with_text=True)
+        # The procedural layers (a Gradient, and the patterns of the generator registry).
+        layout.menu("OUTLINER_MT_stack_layer_procedural_add",
+                    **_stack_glyph_args(bpy.app.icons.glyph(_GLYPH_GRADIENT), 'COLORSET_13_VEC'))
+        # An empty folder to put layers into; layers join one by dropping them onto it.
+        layout.operator("outliner.stack_layer_group_add", text="Folder", icon='NEWFOLDER')
+        # The masks, with their image entry and the map-driven filters.
+        layout.menu("OUTLINER_MT_stack_layer_mask_add", icon='MOD_MASK')
+
         layout.separator()
-        layout.operator_enum("outliner.stack_layer_effect_add_anchor", "type")
-        layout.operator("outliner.stack_layer_effect_add_anchor_reader", text="Anchor Point Reader",
-                        **_stack_glyph_args(bpy.app.icons.glyph(_GLYPH_ANCHOR), 'EMPTY_AXIS'))
-
-
-class OUTLINER_MT_stack_layer_effect_add_correction(Menu):
-    bl_label = "Correction"
-
-    def draw(self, _context):
-        self.layout.operator_enum("outliner.stack_layer_effect_add_correction", "type")
-
-
-class OUTLINER_MT_stack_layer_effect_add_transform(Menu):
-    bl_label = "Transform"
-
-    def draw(self, _context):
-        self.layout.operator_enum("outliner.stack_layer_effect_add_transform", "type")
-
-
-class OUTLINER_MT_stack_layer_effect_add_pattern(Menu):
-    bl_label = "Generate Patterns"
-
-    def draw(self, _context):
-        self.layout.operator_enum("outliner.stack_layer_effect_add_pattern", "type")
+        # The source's own effects, with a pin button beside every entry. The lists are C++: their
+        # vocabulary is the editor's kind registry, which folds the two roles of one effect into
+        # the line the current target asks for, so a new effect needs no menu change.
+        layout.menu_contents("OUTLINER_MT_stack_add_effects")
 
 
 # The map-driven mask filters: they only exist in a mask, so the Add Mask menus offer them instead of
@@ -583,7 +599,7 @@ class OUTLINER_MT_context_menu(Menu):
             # A stack row is not a data-block, so none of the common entries (assets, overrides,
             # ID management) apply to it.
             if (space.stack_layers_view == 'STACK' and
-                    space.stack_source == 'PAINT_MATERIAL'):
+                    _stack_is_paint_material(space)):
                 layout.menu("OUTLINER_MT_stack_layer_mask_add", icon='MOD_MASK')
                 # A Normal to Mask turns a row's normal map into the active row's mask: the wiring
                 # sits beside the mask adds, and its poll lists it only for a row that carries a
@@ -591,10 +607,10 @@ class OUTLINER_MT_context_menu(Menu):
                 if bpy.ops.paint.normal_to_mask_wire.poll():
                     layout.operator(
                         "paint.normal_to_mask_wire", text="Add Normal to Mask", icon='LINKED')
-                # The same contextual grouped menu the header draws: one line per thing, resolved
-                # to the active target. Keeping it here as well would be a second vocabulary.
-                layout.menu("OUTLINER_MT_stack_layer_effect_add",
-                            text="Add Effect", icon='SHADERFX')
+                # The unified Add menu, the one the header dropdown opens: the quick layers, the
+                # pinned Favorites and the effects of the source's own vocabulary, with the search
+                # over all of it.
+                layout.menu("OUTLINER_MT_stack_layer_add", text="Add...", icon='ADD')
                 if bpy.ops.outliner.stack_layer_use_as_brush_source.poll():
                     layout.menu("OUTLINER_MT_stack_layer_advanced")
                 # Switching the mask off and taking it away act on the mask being worked on: the
@@ -1221,10 +1237,7 @@ classes = (
     OUTLINER_HT_stack_footer,
     OUTLINER_MT_stack_layer_procedural_add,
     OUTLINER_MT_stack_layer_pattern_add,
-    OUTLINER_MT_stack_layer_effect_add,
-    OUTLINER_MT_stack_layer_effect_add_correction,
-    OUTLINER_MT_stack_layer_effect_add_transform,
-    OUTLINER_MT_stack_layer_effect_add_pattern,
+    OUTLINER_MT_stack_layer_add,
     OUTLINER_MT_stack_layer_mask_add,
     OUTLINER_OT_stack_layer_mask_add,
     OUTLINER_MT_stack_layer_advanced,

@@ -324,6 +324,11 @@ add_blender_test(
 )
 
 add_blender_test(
+  script_paint_add_favorites
+  --python ${CMAKE_CURRENT_LIST_DIR}/bl_paint_add_favorites.py
+)
+
+add_blender_test(
   script_pyapi_bpy_utils_units
   --python ${CMAKE_CURRENT_LIST_DIR}/bl_pyapi_bpy_utils_units.py
 )

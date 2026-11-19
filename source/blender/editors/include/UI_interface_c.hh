@@ -1322,6 +1322,15 @@ void block_direction_set(Block *block, char direction);
 void block_flag_enable(Block *block, int flag);
 void block_flag_disable(Block *block, int flag);
 void block_translate(Block *block, float x, float y);
+/**
+ * Make the popup menu \a block lay its rows of aligned buttons out like a menu of plain items: the
+ * column is sized to the widest text, and a row is stretched to it, so a trailing icon button sits
+ * at the column's right edge. Off by default (see #Block.menu_col_padding).
+ *
+ * \param has_icons: Whether the items carry an icon, which the column leaves room for.
+ * \param has_submenus: Whether the column holds submenu items, whose arrow the text measure omits.
+ */
+void block_menu_rows_fill_column_set(Block *block, bool has_icons, bool has_submenus);
 
 /**
  * Horizontal budget in pixels from a #BLOCK_POPUP_ANCHOR_LEFT popover's pinned left edge to the
@@ -2285,6 +2294,12 @@ void button_node_link_set(Button *but, bNodeSocket *socket, const float draw_col
  */
 void button_pushbutton_draw_as_overlay_set(Button *but, bool value);
 void button_pushbutton_overlay_alpha_factor_set(Button *but, float alpha_factor);
+/**
+ * Draw the push button only while the mouse is over it or over another button of its alignment
+ * group, i.e. over the row it trails in a menu. It stays clickable either way, and can only be
+ * reached by hovering it, which reveals it. For an icon toggle that most rows do not need to show.
+ */
+void button_pushbutton_show_on_row_hover_set(Button *but, bool value);
 
 void button_number_step_size_set(Button *but, float step_size);
 void button_number_precision_set(Button *but, float precision);

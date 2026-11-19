@@ -705,6 +705,18 @@ struct bUserAssetLibrary {
 #endif
 };
 
+/**
+ * A Stack Layers Add menu item pinned to the Favorites submenu (#UserDef.paint_add_favorites).
+ * The identifier is the stable Add kind name the stack source declares ("PAINT", "FILTER_BLUR",
+ * "CORRECTION_NOISE", ...); a favorite naming a kind the source no longer declares is drawn as
+ * missing until it is removed.
+ */
+struct bUserPaintAddFavorite {
+  struct bUserPaintAddFavorite *next = nullptr, *prev = nullptr;
+  /** The Add kind identifier, at most #MAX_NAME bytes. */
+  char identifier[/*MAX_NAME*/ 64] = "";
+};
+
 enum eUserExtensionRepo_Flag : uint8_t {
   /** Maintain disk cache. */
   USER_EXTENSION_REPO_FLAG_NO_CACHE = 1 << 0,
@@ -1413,6 +1425,8 @@ struct UserDef {
   ListBaseT<bUserAssetLibrary> asset_libraries = {nullptr, nullptr};
   ListBaseT<bUserExtensionRepo> extension_repos = {nullptr, nullptr};
   ListBaseT<bUserAssetBrowserSettings> asset_browser_settings = {nullptr, nullptr};
+  /** Stack Layers Add menu: the kinds the user pinned to its Favorites submenu, in menu order. */
+  ListBaseT<bUserPaintAddFavorite> paint_add_favorites = {nullptr, nullptr};
   ListBaseT<bUserAssetCatalogMemory> catalog_memory = {nullptr, nullptr};
   ListBaseT<bUserAssetShelfSettings> asset_shelves_settings = {nullptr, nullptr};
   /** Preferences → Assets → Name Matching: map types (core + custom). */

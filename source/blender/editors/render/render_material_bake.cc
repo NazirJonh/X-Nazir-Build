@@ -918,7 +918,7 @@ static bool bake_requests_render(Main &bmain,
   BLI_assert(r_images.size() == requests.size());
   Scene *scene = BKE_scene_add(&bmain, "PBR Paint Bake Scene");
   ViewLayer *view_layer = static_cast<ViewLayer *>(scene->view_layers.first);
-  STRNCPY(scene->r.engine, RE_engine_id_BLENDER_EEVEE_NEXT);
+  STRNCPY(scene->r.engine, RE_engine_id_BLENDER_EEVEE);
   scene->r.xsch = resolution;
   scene->r.ysch = resolution;
   scene->r.size = 100;
@@ -1487,6 +1487,14 @@ static void material_source_bake_ensure_impl(wmWindowManager &wm,
     if ((cached != nullptr && !cached->stale) || !g_bake_pending.add(key)) {
       return;
     }
+  }
+
+  if (win == nullptr) {
+    /* A job is ended by the event loop, which background mode has none of: it would never hand its
+     * result over. Skip, like the heavy bake paths do, and let a foreground call ask again. */
+    std::lock_guard lock(g_bake_cache_mutex);
+    g_bake_pending.remove(key);
+    return;
   }
 
   wmJob *wm_job = WM_jobs_get(&wm,
@@ -2354,7 +2362,12 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
   if (params.material == nullptr || params.targets.is_empty()) {
     return result;
   }
-  BLI_assert(params.blocking || wm != nullptr);
+  /* A job needs a window and the event loop that ends it: in background mode there is neither, so
+   * the job's `endjob` -- the one place the rendered pixels reach the maps -- would never run and
+   * the maps would stay the 1x1 placeholder. Render synchronously there, whichever mode the
+   * caller asked for. */
+  const bool blocking = params.blocking || win == nullptr || G.background;
+  BLI_assert(blocking || wm != nullptr);
 
   const int size = bake_size_clamp(params.size);
   const MaterialSourceResolve resolve = params.source_graph ?
@@ -2472,8 +2485,7 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
                                          result.layer_id,
                                          current_hash,
                                          bake_target_kind(params.source_graph,
-                                                          !constant && !params.blocking &&
-                                                              !bake_tiled),
+                                                          !constant && !blocking && !bake_tiled),
                                          bake_tiled);
       }
     }
@@ -2527,7 +2539,7 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
    * (one call per map) would leave only the last map baked. A source-graph bake resolves its
    * channels off the current graph each time -- a replaced job's set may describe a graph that no
    * longer exists, so nothing is carried. */
-  if (!params.blocking && !params.source_graph) {
+  if (!blocking && !params.source_graph) {
     for (Image &image : bmain.images) {
       ImageMaterialSource source;
       if (!material_bake_source_is_baking(image) || !BKE_image_material_source_get(image, source) ||
@@ -2587,7 +2599,7 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
     return result;
   }
 
-  if (params.blocking) {
+  if (blocking) {
     material_bake_images_startjob(job, nullptr);
     material_bake_images_endjob(job);
     material_bake_images_free(job);
@@ -2660,6 +2672,10 @@ void material_bake_layered_rows_ensure(Main &bmain,
     return;
   }
   wmWindow *win = static_cast<wmWindow *>(wm->windows.first);
+  /* In background mode there is no window and no event loop to end a job, so every row render
+   * below is synchronous: that is the only way the maps get their pixels before the script reads
+   * them. */
+  const bool effective_blocking = blocking || win == nullptr || G.background;
   /* Asked at every update rather than kept: an Image Editor opened or closed sends nothing this
    * could listen to, and the answer is a walk over a handful of areas. */
   BKE_paint_layers_preview_wanted_set(ma,
@@ -2734,7 +2750,10 @@ void material_bake_layered_rows_ensure(Main &bmain,
     link.marker = row->marker;
     /* The row being edited is rendered small for the Image Editor and scaled into its maps; the
      * render at the row's own size is for when it is left. */
-    const bool preview = !forced && BKE_paint_layers_material_row_preview_active(ma, *row);
+    /* A browser preview exists only where there is a window to show it; a synchronous background
+     * render is the data consumers read, so it is made at the row's own size. */
+    const bool preview = !effective_blocking && !forced &&
+                         BKE_paint_layers_material_row_preview_active(ma, *row);
     const int render_size = preview ? bake_size_clamp(BKE_paint_layers_preview_size_get(ma, size)) :
                                       size;
     link.preview_side = preview ? render_size : 0;
@@ -2789,7 +2808,7 @@ void material_bake_layered_rows_ensure(Main &bmain,
     params.set_material = &ma;
     params.targets = targets;
     params.size = render_size;
-    params.blocking = blocking;
+    params.blocking = effective_blocking;
     params.job_owner = row;
     params.row = link;
     /* Named: #FunctionRef does not own the callable, so a temporary lambda would dangle. */
@@ -2811,7 +2830,7 @@ void material_bake_layered_rows_ensure(Main &bmain,
        * state would only fail the same way, so the row waits for something to change. */
       BKE_paint_layers_material_bake_land(ma, link.marker, link.hash, link.source_hash, false, link.preview_side);
     }
-    else if (!blocking && (forced || BKE_paint_layers_material_row_due(ma, *row))) {
+    else if (!effective_blocking && (forced || BKE_paint_layers_material_row_due(ma, *row))) {
       /* A blocking render is over by now: nothing is in flight to remember or to mark. */
       row_renders_in_flight().add_overwrite(UUID(link.marker), row_render_state(link));
       /* A render is running for \a ma: stamp it before the worker can run, so

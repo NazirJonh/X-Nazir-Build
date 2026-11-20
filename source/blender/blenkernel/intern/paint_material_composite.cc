@@ -2083,6 +2083,22 @@ static ImBuf *composite_image_acquire(Image *image,
   if (entry.ibuf == nullptr) {
     return nullptr;
   }
+  /* A buffer restored by an undo (or reloaded beside its image) can come back without the
+   * colorspace pointer its pixels were stored in. The image's own setting is the authority, and
+   * without it the evaluator would read an sRGB buffer as scene linear -- the double-encoded
+   * result a Blur then writes. Fill it in rather than guess from the values. */
+  if (image->colorspace_settings.name[0] != '\0') {
+    const bool byte_missing =
+        entry.ibuf->byte_buffer.data != nullptr && entry.ibuf->byte_buffer.colorspace == nullptr;
+    const bool float_missing =
+        entry.ibuf->float_buffer.data != nullptr && entry.ibuf->float_buffer.colorspace == nullptr;
+    if (byte_missing) {
+      IMB_colormanagement_assign_byte_colorspace(entry.ibuf, image->colorspace_settings.name);
+    }
+    else if (float_missing) {
+      IMB_colormanagement_assign_float_colorspace(entry.ibuf, image->colorspace_settings.name);
+    }
+  }
   r_locks.append(entry);
   return entry.ibuf;
 }

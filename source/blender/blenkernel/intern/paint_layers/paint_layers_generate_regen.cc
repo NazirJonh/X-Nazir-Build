@@ -2024,25 +2024,43 @@ void BKE_paint_layers_undo_validate(Main &bmain)
 
     /* A bake cache whose maps the decode freed is not a cache any more: clearing the hash makes the
      * planner render the row again. A Material row whose source the decode freed reads nothing. */
+    const auto clear_bake = [&](MaterialPaintLayer &layer) {
+      dangling |= undo_dangling_id_clear(layer.material, live);
+      if (layer.bake == nullptr) {
+        return;
+      }
+      bool row_dangling = undo_dangling_id_clear(layer.bake->coverage, live);
+      for (Image *&image : layer.bake->images) {
+        row_dangling |= undo_dangling_id_clear(image, live);
+      }
+      dangling |= row_dangling;
+      if (row_dangling) {
+        paint_layers_bake_tiles_clear(*layer.bake);
+        layer.bake->hash[0] = 0;
+        layer.bake->hash[1] = 0;
+        bake_invalidated = true;
+      }
+    };
     BKE_paint_layers_foreach(
         ma, [&](MaterialPaintLayer &row, MaterialPaintLayer * /*parent*/) -> bool {
-          dangling |= undo_dangling_id_clear(row.material, live);
-          if (row.bake == nullptr) {
-            return true;
+          clear_bake(row);
+          /* #BKE_paint_layers_foreach stays on rows and folder children: effects and mask items
+           * keep bakes of their own beside them, and the decode frees their maps the same way. */
+          for (MaterialPaintLayer &effect : row.effects) {
+            clear_bake(effect);
           }
-          bool row_dangling = undo_dangling_id_clear(row.bake->coverage, live);
-          for (Image *&image : row.bake->images) {
-            row_dangling |= undo_dangling_id_clear(image, live);
-          }
-          dangling |= row_dangling;
-          if (row_dangling) {
-            paint_layers_bake_tiles_clear(*row.bake);
-            row.bake->hash[0] = 0;
-            row.bake->hash[1] = 0;
-            bake_invalidated = true;
+          for (MaterialPaintLayer &item : row.mask_stack) {
+            clear_bake(item);
           }
           return true;
         });
+
+    /* A bake whose maps the decode re-read now holds the file's pixels under the hash this
+     * session stamped: the hash is no longer an answer, and keeping the tree would keep the
+     * restored colours on screen. */
+    if (BKE_paint_layers_bake_restored_maps_invalidate(ma)) {
+      bake_invalidated = true;
+    }
 
     /* The generated trees a material owns, which a decode may have kept as they were while the
      * maps and groups they name were freed. The material's own tree holds the group instances. */

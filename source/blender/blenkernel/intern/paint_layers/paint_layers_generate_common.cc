@@ -20,6 +20,7 @@
 #include "BLI_listbase.h"
 #include "BLI_math_base.h"
 #include "BLI_math_vector.h"
+#include "BLI_set.hh"
 #include "BLI_string.h"
 #include "BLI_ustring.hh"
 #include "BLI_utildefines.h"
@@ -29,6 +30,7 @@
 #include "BKE_idprop.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_library.hh"
+#include "BKE_main.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
@@ -455,8 +457,31 @@ bNode *instance_find(const Material &ma, const bUUID &owner_uid)
 
 void tree_clear_nodes(Main &bmain, bNodeTree &tree)
 {
+  /* An undo can free an ID a node names (the source's image, a bake map) while the runtime tree
+   * still holds the pointer. Removing such a node would decrement the freed ID's user count: drop
+   * the stale reference first, the rebuild then names the current IDs. */
+  const bool any_named = [&]() {
+    for (const bNode &node : tree.nodes) {
+      if (node.id != nullptr) {
+        return true;
+      }
+    }
+    return false;
+  }();
+  Set<const ID *> live_ids;
+  if (any_named) {
+    ID *main_id = nullptr;
+    FOREACH_MAIN_ID_BEGIN (&bmain, main_id) {
+      live_ids.add(main_id);
+    }
+    FOREACH_MAIN_ID_END;
+  }
+
   Vector<bNode *> nodes;
   for (bNode &node : tree.nodes) {
+    if (any_named && node.id != nullptr && !live_ids.contains(node.id)) {
+      node.id = nullptr;
+    }
     nodes.append(&node);
   }
   for (bNode *node : nodes) {

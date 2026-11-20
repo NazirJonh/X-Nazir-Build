@@ -585,7 +585,10 @@ bool paint_layer_row_result_run(Main &bmain,
   const bool heavy = cpu_needed &&
                      ((source != nullptr && BKE_paint_layers_bake_is_heavy(owner, *source)) ||
                       size >= PAINT_LAYERS_HEAVY_BAKE_SIZE);
-  if (heavy) {
+  /* A job's `endjob` runs from the event loop, which background mode does not have: a job started
+   * there would never deliver its result. The inline compute below is the same picture, so it is
+   * what a headless run takes. */
+  if (heavy && win != nullptr) {
     wmJob *wm_job = WM_jobs_get(&wm,
                                 win,
                                 &owner,

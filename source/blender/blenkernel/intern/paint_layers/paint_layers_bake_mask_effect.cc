@@ -12,8 +12,9 @@
  * one-line branches that route to them.
  *
  * The same file holds the bake side of a CPU-computed *content* effect that owns its result
- * (#paint_layer_effect_owns_result): one map per channel the effect filters, written whole from the
- * effect cache's compute.
+ * (#paint_layer_effect_owns_result): one map per channel the effect filters, written from the
+ * effect cache's compute -- whole on a fresh bake, and over the rectangle the compute answers for
+ * when only pixel edits are pending (see #bake_effect_row_write).
  */
 
 #include <memory>
@@ -21,6 +22,7 @@
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
 #include "BLI_math_base.h"
+#include "BLI_rect.h"
 #include "BLI_vector.hh"
 
 #include "BKE_paint.hh"
@@ -103,7 +105,16 @@ bool mask_effect_deferred_by_stroke(const Material &ma, const MaterialPaintLayer
   if (!has_map) {
     return false;
   }
-  if (!bake_row_subscription_changed(ma, layer)) {
+  bool changed = bake_row_subscription_changed(ma, layer);
+  if (!changed) {
+    /* An effect of a Material row reads the row's source, and a stroke paints that source: the
+     * row's subscription reports those pixels even though the effect's own subscription does not
+     * hold the live source map. The effect waits for the same stroke the row does. */
+    const MaterialPaintLayer *owner = BKE_paint_layers_correction_owner(ma, layer);
+    changed = owner != nullptr && paint_layer_kind_has_flag(*owner, PAINT_LAYER_KIND_READS_SOURCE) &&
+              bake_row_subscription_changed(ma, *owner);
+  }
+  if (!changed) {
     return false;
   }
   uint32_t hash[2];
@@ -198,6 +209,12 @@ static void bake_mask_effect_grey_write(Image &image,
  * one render per object and UV tile of its block, each into its own tile of one tiled map, and the
  * bake keeps the tile records and identities a row's per-object bake does. Without them it is the one
  * shared map it always was.
+ *
+ * There is no region path here, unlike #bake_effect_row_write: the grey is written whole because the
+ * mask effect cache behind it computes whole -- it has no regional update, so the cache cannot
+ * answer with a region of the grey that is current with the inputs. A stroke defers the grey until
+ * it ends (#BKE_paint_layers_bake_row_is_deferred), so the whole-canvas write lands once, after the
+ * stroke. Giving the cache a changed region is phase E.
  */
 bool bake_mask_effect_row_write(Main &bmain,
                                 Material &ma,
@@ -320,7 +337,10 @@ int bake_effect_size_for(const Material &ma, const MaterialPaintLayer &effect)
   return 0;
 }
 
-bool bake_effect_row_write(Main &bmain, Material &ma, MaterialPaintLayer &effect)
+bool bake_effect_row_write(Main &bmain,
+                           Material &ma,
+                           MaterialPaintLayer &effect,
+                           const rcti *changed_region)
 {
   const MaterialPaintLayer *row = BKE_paint_layers_correction_owner(ma, effect);
   if (row == nullptr) {
@@ -329,6 +349,10 @@ bool bake_effect_row_write(Main &bmain, Material &ma, MaterialPaintLayer &effect
   bke::paint_perf::ScopedTimer perf_total("effect.own_bake.total");
   Vector<int> written_channels;
   int size = 0;
+  /* Whether every channel the effect filters ended current: one the compute answered with a valid
+   * region is written below, one it answered with an empty one already holds the result in its map,
+   * and only a channel the compute could not answer leaves the bake stale. */
+  bool all_channels_current = true;
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
     const int channel = int(info.channel);
     if (!paint_layer_effect_filters(ma, effect, channel)) {
@@ -336,25 +360,65 @@ bool bake_effect_row_write(Main &bmain, Material &ma, MaterialPaintLayer &effect
     }
     /* One channel at a time: the compute is a whole canvas of float RGBA, and the buffer is let go
      * before the next channel's is made, so the peak holds one buffer and one map. */
+    /* A channel whose map the bake does not hold yet cannot take a partial write -- an image created
+     * just now has no previous result for the region outside the write to keep -- so such a channel
+     * computes whole whatever the caller asked. */
+    const bool has_map = effect.bake != nullptr && effect.bake->images[channel] != nullptr;
+    rcti valid_region;
+    BLI_rcti_init(&valid_region, 0, 0, 0, 0);
     std::shared_ptr<ImBuf> result = paint_layer_owned_effect_result_compute(
-        ma, *row, effect, channel, PAINT_TILE_NUMBER_BASE);
+        ma,
+        *row,
+        effect,
+        channel,
+        PAINT_TILE_NUMBER_BASE,
+        (changed_region != nullptr && has_map) ? changed_region : nullptr,
+        &valid_region);
     if (result == nullptr || result->float_data() == nullptr) {
+      /* The input cannot be rendered: the map keeps what it holds, which is stale until a plan the
+       * input can answer. */
+      all_channels_current = false;
       continue;
     }
     const int width = result->x;
     const int height = result->y;
+    if (width <= 0 || height <= 0) {
+      /* A buffer with no texels is no answer either: the map keeps what it holds, stale the same
+       * way. */
+      all_channels_current = false;
+      continue;
+    }
+    /* The compute answers for texels of the buffer it returned; keep the region it names within. */
+    valid_region.xmin = clamp_i(valid_region.xmin, 0, width);
+    valid_region.xmax = clamp_i(valid_region.xmax, 0, width);
+    valid_region.ymin = clamp_i(valid_region.ymin, 0, height);
+    valid_region.ymax = clamp_i(valid_region.ymax, 0, height);
+    /* An empty valid region says the current inputs move no texel of the result: the map already is
+     * the picture the bake owes, and only the subscription is left holding the edits that turned out
+     * not to move it. Nothing is written here; the finalize below re-creates the subscription with a
+     * drain, which is what lets the row stop being stale. */
+    if (BLI_rcti_is_empty(&valid_region)) {
+      /* Nothing moved: the cache entry stays, and the next regional patch builds on it the way it
+       * would after a write -- the LRU budget, not the bake, decides how long it stands. */
+      continue;
+    }
     /* The side the first channel lands at is the bake's: the maps share one size number. */
     if (size == 0) {
       size = width;
     }
-    if (width <= 0 || height <= 0 || size <= 0) {
-      continue;
-    }
     MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(effect);
     bake->size = size;
+    /* The map the write would land in, and the identity that tells a reuse from a replacement: a
+     * map #bake_service_image finds of another size or format is freed and a fresh blank one made,
+     * whose texels outside the rectangle hold no previous result. The session id survives a reuse
+     * and a fresh image gets a new one, so it is trusted where a freed map may hand its address
+     * back to the allocator. */
+    Image *map_before = bake->images[channel];
+    const uint32_t map_uid_before = map_before != nullptr ? map_before->id.session_uid : 0;
     Image *image = bake_service_image(
         bmain, effect, channel, size, info.is_color, bake_channel_needs_float(effect, info), 0);
     if (image == nullptr) {
+      all_channels_current = false;
       continue;
     }
     /* The nearest sample of the result, each axis independently, written straight into the map's own
@@ -365,8 +429,33 @@ bool bake_effect_row_write(Main &bmain, Material &ma, MaterialPaintLayer &effect
      * is kept in the map. */
     const bool keeps_alpha = paint_layer_kind_result_has_alpha(effect);
     const float *src = result->float_data();
+    /* The map rectangle the valid region of the result lands in, or whole when no region was asked
+     * or the map cannot take one. A map texel x samples result texel min(x * width / size,
+     * width - 1) -- the fill lambda below, the same numbers the full write reads the result by --
+     * so the result columns [xmin, xmax) are read by the map columns [xmin * size / width, xmax *
+     * size / width) rounded up: a map column below the ceil still samples a texel the compute left
+     * as it was, stale in the result, over a map texel that already holds that stale value, and
+     * rounding either end down (or out) would write it.
+     *
+     * Only a partial write into the map that was already there is safe. A map #bake_service_image
+     * replaced (its size or format moved) is written whole: the cache answers for the whole
+     * buffer, so the full write is correct without a second compute, and a partial one would leave
+     * the fresh map black outside the rectangle. Whole-canvas valid regions round to the whole
+     * map, and a channel that was computed whole -- no region asked, or no map for the region to
+     * land in -- writes whole, as it did before the region path. */
+    const bool regional = changed_region != nullptr && has_map && map_before != nullptr &&
+                          image->id.session_uid == map_uid_before;
+    int map_rect[4] = {0, 0, 0, 0};
+    const int *rect = nullptr;
+    if (regional) {
+      map_rect[0] = clamp_i(int((int64_t(valid_region.xmin) * size + width - 1) / width), 0, size);
+      map_rect[1] = clamp_i(int((int64_t(valid_region.ymin) * size + height - 1) / height), 0, size);
+      map_rect[2] = clamp_i(int((int64_t(valid_region.xmax) * size + width - 1) / width), 0, size);
+      map_rect[3] = clamp_i(int((int64_t(valid_region.ymax) * size + height - 1) / height), 0, size);
+      rect = map_rect;
+    }
     bake_write_image_rows(
-        *image, info.is_color, nullptr, 0,
+        *image, info.is_color, rect, 0,
         [&](const int y, const int map_width, float *r_row) {
           const int src_y = paint_layer_nearest_resample_texel(y, size, height);
           const float *src_row = src + int64_t(src_y) * width * 4;
@@ -382,13 +471,48 @@ bool bake_effect_row_write(Main &bmain, Material &ma, MaterialPaintLayer &effect
         });
     written_channels.append(channel);
     result.reset();
-    /* The bake holds the result now: the cache entry is a copy kept for nothing while it stands. */
-    paint_layer_owned_effect_cache_drop(ma, effect, channel, PAINT_TILE_NUMBER_BASE);
+    /* The entry the bake computed through stays: it is the living result the next regional patch
+     * builds on -- dropping it would turn every bake into a full recompute again. The LRU budget
+     * is what retires it, the same way it retires the preview's own results. */
+  }
+  /* A channel the compute could not answer -- no result, no texels, no map -- leaves the bake
+   * stale: finalizing would stamp the hash and re-create the subscription as if every filtered map
+   * held the current result, while one of them still shows an older picture. The channels already
+   * written stay (they are current), no map is released, and the next plan computes the row again
+   * -- whole when its description moved, by region otherwise. */
+  if (!all_channels_current) {
+    if (effect.bake != nullptr) {
+      /* The hash the bake still carries may describe an older, successful pass -- a map restored
+       * by an undo keeps the hash stored with it, while the input needed to fill it is not ready.
+       * Stamping nothing here would leave #BKE_paint_layers_bake_is_valid answering true for a map
+       * this pass could not confirm, so the caller would keep showing the restored pixels. Dropping
+       * the hash makes the next plan ask for the channels again. */
+      effect.bake->hash[0] = 0;
+      effect.bake->hash[1] = 0;
+    }
+    perf_total.note("kind=%d channels=%d incomplete",
+                    int(effect.kind_subtype),
+                    int(written_channels.size()));
+    return !written_channels.is_empty();
   }
   if (written_channels.is_empty()) {
+    /* Every filtered channel ended current without a write: the maps hold the result the current
+     * inputs compute, so the bake is done -- only its subscription still reports the edits the
+     * compute answered with empty regions. The finalize stamps the hash and re-creates the
+     * subscription with a drain, and the caller learns false, as it does for a bake that wrote
+     * nothing: no map changed, so no map needs the commit's updates. */
+    BKE_paint_layers_bake_finalize(ma, effect);
+    perf_total.note("kind=%d channels=0 up_to_date", int(effect.kind_subtype));
     return false;
   }
-  bake_stale_channel_maps_release(bmain, effect, written_channels);
+  /* Only the whole-canvas compute releases the maps it left out. A regional write runs only while
+   * the description stands -- a change of the effect's channel set moves the structural hash and
+   * comes to the writer as a whole compute -- so every filtered channel of a regional bake is
+   * current: written, or already holding the result. A map the write left out then is not a record
+   * the effect stopped laying but a current map, and releasing it would drop it from the row. */
+  if (changed_region == nullptr) {
+    bake_stale_channel_maps_release(bmain, effect, written_channels);
+  }
   BKE_paint_layers_bake_finalize(ma, effect);
   perf_total.note("kind=%d size=%d channels=%d",
                   int(effect.kind_subtype),

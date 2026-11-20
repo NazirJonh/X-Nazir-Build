@@ -367,6 +367,14 @@ bool BKE_paint_layers_material_row_due(const Material &ma, const MaterialPaintLa
   if (bake_row_is_hidden(ma, layer)) {
     return false;
   }
+  /* A stroke edits the row's own maps or its source's: the source render waits for the hand to
+   * stop, then the plan after the stroke renders it once. Without this an Always row -- a Material
+   * row with a CPU effect, say -- re-rendered its source at every dab. */
+  if (BKE_paint_layers_bake_stroke_active_get() &&
+      BKE_paint_layers_bake_row_is_deferred(ma, layer))
+  {
+    return false;
+  }
   /* The active row is the one being edited. In Auto its graph is shown live in the shader, but the
    * Image Editor's composite reads only the rendered maps, so while one shows this material the row
    * is rendered as a preview; with none open there is nothing to keep current and the render waits

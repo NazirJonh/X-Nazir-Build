@@ -516,6 +516,10 @@ static bool bake_effect_channel_compute(const Material &ma,
     return false;
   }
   const int channel = int(info.channel);
+  /* The job computes whole in this version: its localized material copy holds no previous effect
+   * cache entry for a region to patch, so an offered rectangle would miss and compute the whole
+   * canvas anyway. Giving the job the planner's region and a regional map write is a follow-up
+   * (patch 04 / a separate task); until then its commit writes every channel whole. */
   std::shared_ptr<ImBuf> result = paint_layer_owned_effect_result_compute(
       ma, *row, effect, channel, PAINT_TILE_NUMBER_BASE);
   if (result == nullptr || result->float_buffer.data == nullptr || result->x <= 0 ||

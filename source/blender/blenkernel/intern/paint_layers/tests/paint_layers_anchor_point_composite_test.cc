@@ -259,6 +259,34 @@ class PaintLayersAnchorPointCompositeTest : public PaintLayersTestBase {
 };
 
 /* -------------------------------------------------------------------- */
+/** \name Color management
+ * \{ */
+
+TEST_F(PaintLayersAnchorPointCompositeTest, a_map_without_a_buffer_colorspace_reads_in_its_images_space)
+{
+  /* A byte map in sRGB whose buffer came back from an undo without the colorspace pointer: the
+   * evaluator must decode it as the image's own setting says, not read the sRGB levels as scene
+   * linear -- a Blur would then encode them a second time and the map would come out brighter. */
+  Image *image = add_image("Flat", 4, 128, 128, 128);
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
+  ASSERT_NE(ibuf, nullptr);
+  ibuf->byte_buffer.colorspace = nullptr;
+  BKE_image_release_ibuf(image, ibuf, lock);
+
+  add_layer_with_image("Flat", image);
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, pixels, width, height));
+  const float expected = 0.2158605f; /* 128/255 as scene linear. */
+  EXPECT_NEAR(linear_pixel(pixels, width, 0, 0)[0], expected, 0.005f);
+  EXPECT_NEAR(linear_pixel(pixels, width, width - 1, height - 1)[0], expected, 0.005f);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Baked readers
  * \{ */
 

@@ -417,6 +417,20 @@ std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute_region(
         store.touch(i);
         return color;
       }
+      if (change == ePixelChange::Region && changed_region == nullptr &&
+          BKE_paint_layers_bake_stroke_active_get())
+      {
+        /* The preview asks for the effect while a stroke paints its input. Recomputing the whole
+         * canvas at every dab is what the stroke deferral already avoids for the bake; the
+         * composite keeps the last result until the stroke ends, then the next ask recomputes it
+         * once. A region-offering caller (the bake) still patches / recomputes as before. */
+        std::shared_ptr<ImBuf> color = entry.color;
+        if (r_valid_region != nullptr) {
+          BLI_rcti_init(r_valid_region, 0, 0, 0, 0);
+        }
+        store.touch(i);
+        return color;
+      }
       if (change == ePixelChange::Region && changed_region != nullptr) {
         /* The entry was found by the full key equality above -- parameters, tile and both input
          * fingerprints -- so it names this call's own base: the only thing left to judge is how

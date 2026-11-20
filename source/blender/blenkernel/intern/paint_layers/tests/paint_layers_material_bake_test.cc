@@ -14,6 +14,7 @@
 
 #include "paint_layers_generate_test_fixture.hh"
 
+#include <algorithm>
 #include <array>
 #include <string>
 
@@ -39,6 +40,7 @@
 #include "DNA_node_tree_interface_types.h"
 #include "DNA_windowmanager_types.h"
 
+#include "../paint_layers_bake_intern.hh"
 #include "../paint_layers_generate_intern.hh"
 #include "../paint_layers_intern.hh"
 #include "../paint_layers_kind.hh"
@@ -155,18 +157,39 @@ class PaintLayersMaterialBakeTest : public PaintLayersGenerateTest {
     return nullptr;
   }
 
-  /** What the editor does before a render starts: the side, the state it starts from, the maps. */
+  /** What the editor does before a render starts: the side, the state it starts from, the maps.
+   * \param map_size: the maps' own size when a test needs more than the fixture's 8x8: the render
+   *        would hand maps of the bake side, and the bake subscription's regions are 256-pixel
+   *        chunks, so a canvas larger than one chunk is what lets a partial write stay partial. */
   void start_render(MaterialPaintLayer &row,
                     const Span<const int> channels,
                     uint32_t r_hash[2],
                     uint32_t r_source_hash[2],
-                    const int size = 64)
+                    const int size = 64,
+                    const int map_size = 0)
   {
     ASSERT_TRUE(BKE_paint_layers_bake_size_set(*ma, row, size));
     BKE_paint_layers_material_bake_stamp_get(*ma, row, r_hash, r_source_hash);
     Vector<Image *> images;
     for (const int channel : channels) {
-      images.append(add_image(channel == PAINT_MATERIAL_CHANNEL_ALPHA ? "Alpha" : "Map"));
+      if (map_size > 0) {
+        const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        images.append(BKE_image_add_generated(bmain,
+                                              map_size,
+                                              map_size,
+                                              channel == PAINT_MATERIAL_CHANNEL_ALPHA ? "Alpha" :
+                                                                                        "Map",
+                                              32,
+                                              false,
+                                              IMA_GENTYPE_BLANK,
+                                              color,
+                                              false,
+                                              false,
+                                              false));
+      }
+      else {
+        images.append(add_image(channel == PAINT_MATERIAL_CHANNEL_ALPHA ? "Alpha" : "Map"));
+      }
     }
     Vector<int> channel_values(channels.begin(), channels.end());
     BKE_paint_layers_material_bake_apply(*bmain, *ma, row, size, channel_values, images);
@@ -1823,16 +1846,33 @@ class PaintLayersOwnedEffectTest : public PaintLayersMaterialBakeTest {
   {
     BKE_paint_layers_effect_cache_free_all();
     BKE_paint_layers_bake_stroke_active_set(false);
+    BKE_paint_layers_bake_drag_clear_all();
     PaintLayersMaterialBakeTest::TearDown();
   }
 
+  /** Makes the planner compute on the main thread for the test's scope, then restores the flag. */
+  struct ScopedBackground {
+    bool saved;
+    ScopedBackground() : saved(G.background)
+    {
+      G.background = true;
+    }
+    ~ScopedBackground()
+    {
+      G.background = saved;
+    }
+  };
+
   /** A Material row whose Base Color and Roughness maps have landed, with a box Blur on it. */
-  MaterialPaintLayer *add_row_with_blur(MaterialPaintLayer **r_blur)
+  MaterialPaintLayer *add_row_with_blur(MaterialPaintLayer **r_blur,
+                                        const int size = 64,
+                                        const int map_size = 0)
   {
     MaterialPaintLayer *row = add_material_row(*source);
     EXPECT_NE(row, nullptr);
     uint32_t hash[2], source_hash[2];
-    start_render(*row, Span<const int>(base_color_roughness, 2), hash, source_hash);
+    start_render(
+        *row, Span<const int>(base_color_roughness, 2), hash, source_hash, size, map_size);
     EXPECT_TRUE(BKE_paint_layers_material_bake_land(*ma, row->marker, hash, source_hash, true));
     MaterialPaintLayer *blur = BKE_paint_layers_filter_add(*ma, row, MA_PAINT_LAYER_FILTER_BLUR);
     EXPECT_NE(blur, nullptr);
@@ -1842,6 +1882,75 @@ class PaintLayersOwnedEffectTest : public PaintLayersMaterialBakeTest {
     BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
     *r_blur = blur;
     return row;
+  }
+
+  /** Write \a value into the RGB of every texel of \a rect; the alpha stays opaque. */
+  static void write_map_rect(Image &image, const rcti &rect, const uchar value)
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(&image, nullptr, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    if (ibuf == nullptr) {
+      return;
+    }
+    uchar *pixels = ibuf->byte_data_for_write();
+    ASSERT_NE(pixels, nullptr);
+    if (pixels != nullptr) {
+      for (const int y : IndexRange(rect.ymin, BLI_rcti_size_y(&rect))) {
+        for (const int x : IndexRange(rect.xmin, BLI_rcti_size_x(&rect))) {
+          uchar *texel = pixels + (int64_t(y) * ibuf->x + x) * 4;
+          texel[0] = value;
+          texel[1] = value;
+          texel[2] = value;
+          texel[3] = 255;
+        }
+      }
+    }
+    BKE_image_release_ibuf(&image, ibuf, lock);
+  }
+
+  /** Report \a rect as changed in \a image's pixel journal, the way a paint writer does. */
+  static void mark_map_rect(Image &image, const rcti &rect)
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(&image, nullptr, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    if (ibuf == nullptr) {
+      return;
+    }
+    BKE_image_partial_update_mark_region(
+        &image, BKE_image_get_tile(&image, PAINT_TILE_NUMBER_BASE), ibuf, &rect);
+    BKE_image_release_ibuf(&image, ibuf, lock);
+  }
+
+  /** Write \a value into \a rect, then report it as the dirty band of a dab. */
+  static void edit_map_rect(Image &image, const rcti &rect, const uchar value)
+  {
+    write_map_rect(image, rect, value);
+    mark_map_rect(image, rect);
+  }
+
+  /** The stored RGBA bytes of \a image, row by row. */
+  static Vector<uchar> read_map(Image &image)
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(&image, nullptr, &lock);
+    EXPECT_NE(ibuf, nullptr);
+    Vector<uchar> pixels;
+    if (ibuf != nullptr && ibuf->byte_buffer.data != nullptr) {
+      const int64_t count = int64_t(ibuf->x) * ibuf->y * 4;
+      pixels.reinitialize(count);
+      std::copy(ibuf->byte_buffer.data, ibuf->byte_buffer.data + count, pixels.begin());
+    }
+    if (ibuf != nullptr) {
+      BKE_image_release_ibuf(&image, ibuf, lock);
+    }
+    return pixels;
+  }
+
+  static uchar map_byte_at(const Vector<uchar> &pixels, const int width, const int x, const int y)
+  {
+    return pixels[(int64_t(y) * width + x) * 4];
   }
 
   /** The Image Textures reading \a image in \a tree and the groups under it. */
@@ -2032,6 +2141,363 @@ TEST_F(PaintLayersOwnedEffectTest, a_new_render_of_the_source_stales_the_result)
   BKE_paint_layers_bake_notice_changes(*ma);
   EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *blur));
   EXPECT_TRUE(run_bake_job());
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+}
+
+/**
+ * The inline writer with a changed rectangle writes only the part of the map the effect cache
+ * answers for, and that part is the picture a full rebake of the same inputs gives. The texel left
+ * outside the write keeps what the earlier bake put there -- a full write would have recomputed
+ * it.
+ */
+TEST_F(PaintLayersOwnedEffectTest, a_regional_write_matches_the_full_one_and_leaves_the_rest)
+{
+  MaterialPaintLayer *blur = nullptr;
+  MaterialPaintLayer *row = add_row_with_blur(&blur);
+  ASSERT_NE(blur, nullptr);
+  Image *base_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(base_map, nullptr);
+  int canvas_w = 0;
+  int canvas_h = 0;
+  BKE_image_get_size(base_map, nullptr, &canvas_w, &canvas_h);
+  ASSERT_GE(canvas_w, 8);
+  ASSERT_GE(canvas_h, 8);
+  /* A flat grey the blur keeps flat, so a missing part of the write is visible. */
+  const rcti whole{0, canvas_w, 0, canvas_h};
+  write_map_rect(*base_map, whole, 120);
+  mark_map_rect(*base_map, whole);
+
+  ASSERT_TRUE(bake_effect_row_write(*bmain, *ma, *blur)) << "the first bake writes whole";
+  Image *effect_map = blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(effect_map, nullptr);
+  int width = 0;
+  int height = 0;
+  BKE_image_get_size(effect_map, nullptr, &width, &height);
+  ASSERT_EQ(width, canvas_w);
+  ASSERT_EQ(height, width);
+  EXPECT_EQ(paint_layer_effect_cache_entry_count(), 1)
+      << "the write keeps its cache entry; the next regional patch builds on it";
+
+  /* A texel far from the edit: a regional write leaves it alone, a whole one computes it. */
+  write_map_rect(*effect_map, rcti{0, 1, 0, 1}, 255);
+  const rcti dirty{5, 7, 3, 5};
+  edit_map_rect(*base_map, dirty, 200);
+
+  ASSERT_TRUE(bake_effect_row_write(*bmain, *ma, *blur, &dirty));
+  const Vector<uchar> regional = read_map(*effect_map);
+  ASSERT_EQ(regional.size(), int64_t(width) * height * 4);
+  EXPECT_EQ(map_byte_at(regional, width, 0, 0), 255)
+      << "the regional write left the texel outside the edit as it was";
+
+  /* A full rebake of the same inputs is the picture the regional write must have produced. */
+  paint_layer_owned_effect_cache_drop(
+      *ma, *blur, int(PAINT_MATERIAL_CHANNEL_BASE_COLOR), PAINT_TILE_NUMBER_BASE);
+  ASSERT_TRUE(bake_effect_row_write(*bmain, *ma, *blur));
+  const Vector<uchar> full = read_map(*effect_map);
+  ASSERT_EQ(full.size(), regional.size());
+  EXPECT_NE(map_byte_at(full, width, 0, 0), 255) << "the full write recomputed the texel";
+  for (const int y : IndexRange(height)) {
+    for (const int x : IndexRange(width)) {
+      if (x == 0 && y == 0) {
+        continue; /* The one texel the regional write left as it found it, by design. */
+      }
+      EXPECT_NEAR(map_byte_at(regional, width, x, y), map_byte_at(full, width, x, y), 2)
+          << "the regional write's texel " << x << "," << y;
+    }
+  }
+}
+
+/**
+ * A map #bake_service_image replaced (another size or format) is blank, so a partial write into it
+ * would leave every texel outside the rectangle black. The writer must fall back to the whole
+ * buffer the cache answers with, without a second compute.
+ */
+TEST_F(PaintLayersOwnedEffectTest, a_replaced_map_is_written_whole)
+{
+  MaterialPaintLayer *blur = nullptr;
+  MaterialPaintLayer *row = add_row_with_blur(&blur);
+  ASSERT_NE(blur, nullptr);
+  Image *base_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(base_map, nullptr);
+  int canvas_w = 0;
+  int canvas_h = 0;
+  BKE_image_get_size(base_map, nullptr, &canvas_w, &canvas_h);
+  ASSERT_GE(canvas_w, 8);
+  ASSERT_GE(canvas_h, 8);
+  const rcti whole{0, canvas_w, 0, canvas_h};
+  write_map_rect(*base_map, whole, 120);
+  mark_map_rect(*base_map, whole);
+
+  ASSERT_TRUE(bake_effect_row_write(*bmain, *ma, *blur));
+  ASSERT_NE(blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], nullptr);
+
+  /* Another size is another map: the writer will make a blank one at the result's size. */
+  Image *replaced = bake_service_image(
+      *bmain, *blur, int(PAINT_MATERIAL_CHANNEL_BASE_COLOR), canvas_w * 2, true, false, 0);
+  ASSERT_NE(replaced, nullptr);
+  EXPECT_EQ(blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], replaced);
+
+  const rcti dirty{5, 7, 3, 5};
+  edit_map_rect(*base_map, dirty, 200);
+  ASSERT_TRUE(bake_effect_row_write(*bmain, *ma, *blur, &dirty));
+
+  Image *written = blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(written, nullptr);
+  int width = 0;
+  int height = 0;
+  BKE_image_get_size(written, nullptr, &width, &height);
+  EXPECT_EQ(width, canvas_w) << "the map takes the result's size again";
+  EXPECT_EQ(height, canvas_w);
+  const Vector<uchar> pixels = read_map(*written);
+  ASSERT_EQ(pixels.size(), int64_t(width) * height * 4);
+  /* Away from the edit the flat input's blur is the same flat grey, not the blank black a partial
+   * write into the replaced map would leave. */
+  const int band_x0 = std::max(dirty.xmin - 1, 0);
+  const int band_x1 = std::min(dirty.xmax + 1, width);
+  const int band_y0 = std::max(dirty.ymin - 1, 0);
+  const int band_y1 = std::min(dirty.ymax + 1, height);
+  for (const int y : IndexRange(height)) {
+    for (const int x : IndexRange(width)) {
+      if (x >= band_x0 && x < band_x1 && y >= band_y0 && y < band_y1) {
+        continue; /* The band the edit moves, which either write fills. */
+      }
+      EXPECT_NEAR(map_byte_at(pixels, width, x, y), 120, 3)
+          << "a replaced map is written whole, texel " << x << "," << y;
+    }
+  }
+}
+
+/**
+ * A bake made at the coarse drag size owes a whole one, so the inline planner may not hand its
+ * region to the writer: the texel outside the region keeps what the full write recomputes.
+ */
+TEST_F(PaintLayersOwnedEffectTest, a_drag_reduced_bake_is_written_whole)
+{
+  MaterialPaintLayer *blur = nullptr;
+  /* The partial-update log reports an edit as the 256-pixel chunks it touches: on a smaller canvas
+   * the edit's chunk is the whole canvas and the planner rightly falls back to a whole write. The
+   * edit below sits in the first chunk, the canary outside it, so the maps themselves are 512. */
+  MaterialPaintLayer *row = add_row_with_blur(&blur, 512, 512);
+  ASSERT_NE(blur, nullptr);
+  Image *base_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(base_map, nullptr);
+  int canvas_w = 0;
+  int canvas_h = 0;
+  BKE_image_get_size(base_map, nullptr, &canvas_w, &canvas_h);
+  ASSERT_GE(canvas_w, 8);
+  ASSERT_GE(canvas_h, 8);
+  const rcti whole{0, canvas_w, 0, canvas_h};
+  write_map_rect(*base_map, whole, 120);
+  mark_map_rect(*base_map, whole);
+
+  /* A background session has no job to own the effect, so the planner computes it here. */
+  ScopedBackground background;
+  bool changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  ASSERT_NE(blur->bake, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur))
+      << "the inline plan finalized the effect before the edit";
+  EXPECT_EQ(paint_layer_effect_cache_entry_count(), 1)
+      << "the inline write kept the entry the next region builds on";
+  Image *effect_map = blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(effect_map, nullptr);
+  const uint32_t effect_map_uid = effect_map->id.session_uid;
+  int width = 0;
+  int height = 0;
+  BKE_image_get_size(effect_map, nullptr, &width, &height);
+  ASSERT_EQ(width, canvas_w);
+  ASSERT_EQ(height, width);
+  const int canary_x = width - 1;
+  const int canary_y = height - 1;
+
+  /* A texel far from the edit: a regional write leaves it, a whole one computes it. */
+  write_map_rect(*effect_map, rcti{canary_x, canary_x + 1, canary_y, canary_y + 1}, 255);
+  const rcti dirty{5, 7, 3, 5};
+  edit_map_rect(*base_map, dirty, 200);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  int reported[4] = {};
+  ASSERT_TRUE(BKE_paint_layers_bake_changed_region(*ma, *blur, reported))
+      << "the edit reached the effect's subscription as a rectangle";
+  EXPECT_LE(reported[0], dirty.xmin);
+  EXPECT_GE(reported[1], dirty.xmax);
+  EXPECT_LE(reported[2], dirty.ymin);
+  EXPECT_GE(reported[3], dirty.ymax);
+  uint32_t current_hash[2];
+  BKE_paint_layers_bake_hash(*ma, *blur, current_hash);
+  ASSERT_EQ(current_hash[0], blur->bake->hash[0]);
+  ASSERT_EQ(current_hash[1], blur->bake->hash[1]);
+
+  /* Without a reduced bake the planner hands its region on: the texel outside it stands. */
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  Image *after_map = blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(after_map, nullptr);
+  EXPECT_EQ(after_map, effect_map) << "the regional write must reuse the map, not replace it";
+  EXPECT_EQ(after_map->id.session_uid, effect_map_uid);
+  {
+    int after_w = 0;
+    int after_h = 0;
+    BKE_image_get_size(after_map, nullptr, &after_w, &after_h);
+    EXPECT_EQ(after_w, width);
+    EXPECT_EQ(after_h, height);
+    EXPECT_EQ(blur->bake->size, width);
+    const Vector<uchar> regional = read_map(*after_map);
+    EXPECT_EQ(map_byte_at(regional, width, canary_x, canary_y), 255)
+        << "the inline planner wrote the region only, as the test's canary expects";
+  }
+
+  /* The reduced-size bake owes a whole one (see #bake_drag_reduced_owes): the planner may not lay
+   * a region into it, so the next write recomputes the texel the regional one left alone. */
+  write_map_rect(*effect_map, rcti{canary_x, canary_x + 1, canary_y, canary_y + 1}, 255);
+  edit_map_rect(*base_map, rcti{1, 3, 3, 5}, 200);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  bake_drag_reduced_remember(*ma, *blur, width);
+
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  Image *whole_map = blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(whole_map, nullptr);
+  const Vector<uchar> pixels = read_map(*whole_map);
+  EXPECT_NE(map_byte_at(pixels, width, canary_x, canary_y), 255)
+      << "the drag-reduced bake was recomputed whole, not patched by region";
+  EXPECT_NEAR(map_byte_at(pixels, width, canary_x, canary_y), 120, 3);
+  bake_drag_reduced_forget(*ma, *blur);
+}
+
+/**
+ * A Material row reads its source: a stroke painting that source's map is an edit of the row's
+ * input even though it does not run inside the row. The row's own source render waits for the
+ * stroke to end, like a painted row's content effect waits for a stroke inside it.
+ */
+TEST_F(PaintLayersOwnedEffectTest, a_source_pixel_stroke_defers_the_material_rows_render)
+{
+  /* The stroke paints a live map of the source material: the row reads it through its source and
+   * subscribes to it, exactly as it does for a painted Source. */
+  const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *source_map = BKE_image_add_generated(
+      bmain, 64, 64, "StrokeSource", 32, false, IMA_GENTYPE_BLANK, color, false, false, false);
+  ASSERT_NE(source_map, nullptr);
+  texture_link(*source, *source_map, "Base Color");
+
+  MaterialPaintLayer *blur = nullptr;
+  MaterialPaintLayer *row = add_row_with_blur(&blur);
+  ASSERT_NE(blur, nullptr);
+  ASSERT_NE(row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], nullptr);
+  /* The editor subscribes after a landed render; the test plays that call so the mark below
+   * reaches the row's subscription. */
+  BKE_paint_layers_bake_subscribe(*ma, *row);
+  ASSERT_TRUE(bake_effect_row_write(*bmain, *ma, *blur));
+  ASSERT_NE(blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], nullptr);
+  EXPECT_FALSE(BKE_paint_layers_material_row_due(*ma, *row));
+
+  BKE_paint_layers_bake_stroke_active_set(true);
+  BKE_image_partial_update_mark_full_update(source_map);
+  BKE_paint_layers_bake_notice_changes(*ma);
+
+  EXPECT_TRUE(BKE_paint_layers_bake_row_is_deferred(*ma, *row))
+      << "a source stroke defers the row even with no active marker inside it";
+  EXPECT_TRUE(BKE_paint_layers_bake_row_is_deferred(*ma, *blur))
+      << "the effect reads the row's source too: its own bake waits for the same stroke";
+  EXPECT_FALSE(BKE_paint_layers_material_row_due(*ma, *row))
+      << "the source render waits for the stroke to end";
+
+  BKE_paint_layers_bake_stroke_active_set(false);
+  EXPECT_FALSE(BKE_paint_layers_bake_row_is_deferred(*ma, *row));
+  EXPECT_FALSE(BKE_paint_layers_bake_row_is_deferred(*ma, *blur));
+  EXPECT_TRUE(BKE_paint_layers_material_row_due(*ma, *row))
+      << "the stroke is over: the source render is due again";
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_freed_bake_map_is_replaced_not_dereferenced)
+{
+  MaterialPaintLayer *blur = nullptr;
+  MaterialPaintLayer *row = add_row_with_blur(&blur);
+  ASSERT_NE(blur, nullptr);
+  ASSERT_TRUE(bake_effect_row_write(*bmain, *ma, *blur));
+  Image *map = blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(map, nullptr);
+
+  /* An undo or a file reset can free the map while the runtime bake slot still points at it: the
+   * next write must make a new map, not read the freed image. */
+  BKE_id_free(bmain, map);
+  Image *replacement = bake_service_image(
+      *bmain, *blur, int(PAINT_MATERIAL_CHANNEL_BASE_COLOR), 64, true, false, 0);
+  ASSERT_NE(replacement, nullptr);
+  EXPECT_EQ(blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], replacement);
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_failed_compute_does_not_keep_the_bake_valid)
+{
+  MaterialPaintLayer *blur = nullptr;
+  MaterialPaintLayer *row = add_row_with_blur(&blur);
+  ASSERT_NE(blur, nullptr);
+  ASSERT_TRUE(bake_effect_row_write(*bmain, *ma, *blur));
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+
+  /* An undo can restore the effect's map (and with it the hash of the pass that filled it) while
+   * the source it is computed from cannot be read yet. The pass then answers nothing, and the map
+   * it left is the restored one, not the current input: the bake must stop calling itself valid, or
+   * the planner would keep showing those restored pixels and never ask again. */
+  Material *source_material = row->material;
+  row->material = nullptr;
+  EXPECT_FALSE(bake_effect_row_write(*bmain, *ma, *blur));
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+  row->material = source_material;
+
+  /* With the source back the next pass fills the map and stamps the hash as usual. */
+  EXPECT_TRUE(bake_effect_row_write(*bmain, *ma, *blur));
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_map_restored_by_an_undo_stales_the_bake)
+{
+  MaterialPaintLayer *blur = nullptr;
+  add_row_with_blur(&blur);
+  ASSERT_NE(blur, nullptr);
+  ASSERT_TRUE(bake_effect_row_write(*bmain, *ma, *blur));
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+
+  /* A memfile undo re-reads a changed map as a new Image, with a fresh runtime version, while the
+   * hash stored beside the row rides the decoded material: the map is not the raster the pass wrote
+   * any more, so the bake must stop calling itself current and the planner must fill it again. */
+  Image *map = blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(map, nullptr);
+  const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *re_read = BKE_image_add_generated(bmain,
+                                           64,
+                                           64,
+                                           "Blur 1 Base Color Bake",
+                                           32,
+                                           false,
+                                           IMA_GENTYPE_BLANK,
+                                           black,
+                                           false,
+                                           false,
+                                           false);
+  ASSERT_NE(re_read, nullptr);
+  blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR] = re_read;
+  BKE_id_free(bmain, map);
+
+  /* Validity alone sees it: the hash still matches, but the map is not the one it was stamped on,
+   * so nothing shows it as the current result even before the undo hook runs. */
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+  EXPECT_TRUE(BKE_paint_layers_bake_restored_maps_invalidate(*ma));
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+  /* Already stale: a second check has nothing left to invalidate and must not keep asking for a
+   * rebuild. */
+  EXPECT_FALSE(BKE_paint_layers_bake_restored_maps_invalidate(*ma));
+}
+
+TEST_F(PaintLayersOwnedEffectTest, an_untouched_bake_survives_an_undo_check)
+{
+  MaterialPaintLayer *blur = nullptr;
+  add_row_with_blur(&blur);
+  ASSERT_NE(blur, nullptr);
+  ASSERT_TRUE(bake_effect_row_write(*bmain, *ma, *blur));
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+
+  /* An undo that touched no map of this bake leaves the record matching: no re-bake is owed, and
+   * the invalidation must not report one. */
+  EXPECT_TRUE(BKE_paint_layers_bake_maps_are_current(*ma, *blur));
+  EXPECT_FALSE(BKE_paint_layers_bake_restored_maps_invalidate(*ma));
   EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
 }
 

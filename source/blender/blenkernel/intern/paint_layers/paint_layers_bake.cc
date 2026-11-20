@@ -1024,6 +1024,26 @@ void BKE_paint_layers_bake_subscribe(Material &ma, MaterialPaintLayer &layer)
    * this map. */
   BakeLayerSubscription entry;
   entry.marker = layer.marker;
+  /* What the pass stamped the hash from, at the versions the maps have now: #BakeMapRef. Taken
+   * here, where every path that writes a bake and finalizes it passes, so the record always
+   * describes the raster the hash stands for. */
+  std::array<BakeMapRef, PAINT_MATERIAL_CHANNEL_NUM> map_refs{};
+  BakeMapRef coverage_ref;
+  if (layer.bake != nullptr) {
+    for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+      const Image *image = layer.bake->images[channel];
+      map_refs[channel] = {
+          image,
+          image != nullptr ? image->id.session_uid : 0,
+          image != nullptr ? image->runtime->pixel_version.load(std::memory_order_relaxed) : 0};
+    }
+    const Image *coverage = layer.bake->coverage;
+    coverage_ref = {coverage,
+                    coverage != nullptr ? coverage->id.session_uid : 0,
+                    coverage != nullptr ?
+                        coverage->runtime->pixel_version.load(std::memory_order_relaxed) :
+                        0};
+  }
   Vector<Image *> images;
   /* A row whose bake holds its content alone reads none of its own mask: the mask is live over the
    * map, so a stroke into it leaves the cache current and the view unblinking. */
@@ -1051,6 +1071,10 @@ void BKE_paint_layers_bake_subscribe(Material &ma, MaterialPaintLayer &layer)
       }
     }
     runtime.layers.append(std::move(entry));
+    if (layer.bake != nullptr) {
+      runtime.baked_maps.add_overwrite(layer.marker, map_refs);
+      runtime.baked_coverage.add_overwrite(layer.marker, coverage_ref);
+    }
   }
   /* Writing a bake changes whether the row is substituted, which is topology: rebuild. */
   ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
@@ -1078,6 +1102,111 @@ void BKE_paint_layers_bake_subscriptions_validate(Main &bmain)
       }
     }
   }
+}
+
+/* Whether \a image is still the data-block #ref was taken from, with the pixels it had then. */
+static bool bake_map_ref_is_current(const Image *image, const BakeMapRef &ref)
+{
+  if (image != ref.image) {
+    return false;
+  }
+  if (image == nullptr) {
+    return true;
+  }
+  return image->id.session_uid == ref.session_uid && image->runtime != nullptr &&
+         image->runtime->pixel_version.load(std::memory_order_relaxed) == ref.pixel_version;
+}
+
+bool BKE_paint_layers_bake_maps_are_current(const Material &ma, const MaterialPaintLayer &layer)
+{
+  if (layer.bake == nullptr) {
+    return true;
+  }
+  std::lock_guard lock(bake_runtime_mutex());
+  const BakeMaterialRuntime *runtime = bake_runtime().lookup_ptr(ma.id.session_uid);
+  if (runtime == nullptr || runtime->owner != &ma) {
+    /* A depsgraph copy answers for the original's bake, and only the original's maps are the ones
+     * the runtime recorded: never judge a copy by them. */
+    return true;
+  }
+  const auto *maps = runtime->baked_maps.lookup_ptr(layer.marker);
+  const BakeMapRef *coverage = runtime->baked_coverage.lookup_ptr(layer.marker);
+  if (maps == nullptr && coverage == nullptr) {
+    return true;
+  }
+  if (maps != nullptr) {
+    for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+      if (!bake_map_ref_is_current(layer.bake->images[channel], (*maps)[channel])) {
+        return false;
+      }
+    }
+  }
+  if (coverage != nullptr && !bake_map_ref_is_current(layer.bake->coverage, *coverage)) {
+    return false;
+  }
+  return true;
+}
+
+bool BKE_paint_layers_bake_restored_maps_invalidate(Material &ma)
+{
+  bool invalidated = false;
+  std::lock_guard lock(bake_runtime_mutex());
+  BakeMaterialRuntime *runtime = bake_runtime().lookup_ptr(ma.id.session_uid);
+  if (runtime == nullptr || runtime->owner != &ma) {
+    return false;
+  }
+  const auto check = [&](MaterialPaintLayer &layer) {
+    if (layer.bake == nullptr) {
+      return;
+    }
+    const auto *maps = runtime->baked_maps.lookup_ptr(layer.marker);
+    const BakeMapRef *coverage = runtime->baked_coverage.lookup_ptr(layer.marker);
+    if (maps == nullptr && coverage == nullptr) {
+      /* No record (a file that predates it, or a layer never baked here): the hash stays the only
+       * answer, as it was before. */
+      return;
+    }
+    bool restored = false;
+    if (maps != nullptr) {
+      for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+        if (!bake_map_ref_is_current(layer.bake->images[channel], (*maps)[channel])) {
+          restored = true;
+          break;
+        }
+      }
+    }
+    if (!restored && coverage != nullptr) {
+      restored = !bake_map_ref_is_current(layer.bake->coverage, *coverage);
+    }
+    if (!restored) {
+      return;
+    }
+    if (layer.bake->hash[0] == 0 && layer.bake->hash[1] == 0) {
+      /* Already stale: the planner owes this map anyway, and reporting a change again would keep
+       * the tree marked for a rebuild every time the same undo is re-checked. */
+      return;
+    }
+    /* The map is not the one the hash was stamped on, so the hash describes a raster this session
+     * no longer holds: the planner has to fill the map again. */
+    paint_layers_bake_tiles_clear(*layer.bake);
+    layer.bake->hash[0] = 0;
+    layer.bake->hash[1] = 0;
+    invalidated = true;
+  };
+  /* #BKE_paint_layers_foreach visits rows and folder children only: effects and mask items keep
+   * their own bakes beside the row, and a Blur effect's map is exactly the one an undo restores. */
+  BKE_paint_layers_foreach(
+      ma, [&](MaterialPaintLayer &row, MaterialPaintLayer * /*parent*/) -> bool {
+        check(row);
+        for (MaterialPaintLayer &effect : row.effects) {
+          check(effect);
+        }
+        for (MaterialPaintLayer &item : row.mask_stack) {
+          check(item);
+        }
+        return true;
+      });
+  return invalidated;
 }
 
 /* The subscription record of \a marker's bake, copied out under the runtime lock; false when the
@@ -1136,9 +1265,17 @@ static bool bake_content_row_deferred_by_stroke(const Material &ma, const Materi
   if (!BKE_paint_layers_bake_stroke_active_get()) {
     return false;
   }
-  /* The first bake has nothing to defer to. */
+  /* The first bake has nothing to defer to. Any map counts as landed: a row whose content needs no
+   * coverage (an opaque Material source) still has its channels' maps to keep. */
   const MaterialPaintLayerBake *bake = layer.bake;
-  if (bake == nullptr || bake->coverage == nullptr) {
+  if (bake == nullptr) {
+    return false;
+  }
+  bool has_map = bake->coverage != nullptr;
+  for (const Image *image : bake->images) {
+    has_map = has_map || image != nullptr;
+  }
+  if (!has_map) {
     return false;
   }
   if (!bake_row_subscription_changed(ma, layer)) {
@@ -2361,6 +2498,15 @@ bool BKE_paint_layers_bake_row_is_deferred(const Material &ma, const MaterialPai
      * map the effect reads must not recompute the whole canvas at every dab. */
     return mask_effect_deferred_by_stroke(ma, layer);
   }
+  /* A row that reads a source is edited by a stroke in that source as well: the source maps are
+   * the row's input, and the subscription reports them, so the source render waits for the stroke
+   * even though the marker is not inside the row. The active-marker gate below is for a stroke
+   * inside a row whose own maps it edits. */
+  if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE) &&
+      bake_content_row_deferred_by_stroke(ma, layer))
+  {
+    return true;
+  }
   /* The active row and its ancestors stay live: the user is editing inside them, and the bake
    * catches up once the active marker leaves the subtree. */
   if (!BKE_paint_layers_subtree_contains(layer, ma.active_layer_marker)) {
@@ -3298,6 +3444,77 @@ static bool bake_object_tile_write(
   return true;
 }
 
+/**
+ * The changed rectangle an owned effect's regional write may take, in the effect's canvas pixels,
+ * or null when the whole canvas has to be computed. \a r_region is filled when a rectangle is
+ * returned. The trust rules are the row's own region path's below, plus the steps of the effect's
+ * input that move texels:
+ *
+ * A rectangle only describes pixel edits of the maps the effect reads, so it is trusted when the
+ * maps stand (a partial write cannot fill a fresh map -- its untouched region would keep no
+ * previous result), the subscription reports one, and the structural hash still matches the bake:
+ * a moved hash says the description changed too, and a rectangle-only compute would keep the old
+ * content outside it. An unset hash is a bake that never landed, so it is refused the way
+ * #BKE_paint_layers_bake_is_valid refuses it. A bake made at the coarse drag size is owed a whole
+ * one and its pixels are no canvas the region can be laid in, so it is refused as
+ * #bake_drag_reduced_owes reports it. A step of the input that moves texels -- a projection folded
+ * under the row, a Decal frame, the row's transform effects, the row's own mapping, a remapping of
+ * an effect below the effect -- sends a changed rectangle of a source map anywhere in the result,
+ * so the whole canvas is computed again. The effect's own slot (a Channel Split) the kernel
+ * samples at the slot's own size, so an edit of its pixels has no rectangle in the canvas either.
+ *
+ * An owned effect's bake is one non-tiled map at the base tile, not shared per object and not read
+ * from a source, so the tile readiness, shared-map and source reasons
+ * #BKE_paint_layers_bake_is_valid also checks cannot apply to it: the hash, drag and slot tests
+ * above are all this predicate needs.
+ */
+static const rcti *bake_effect_region_resolve(const Material &ma,
+                                              const MaterialPaintLayer &effect,
+                                              rcti &r_region)
+{
+  if (effect.bake == nullptr || !bake_row_has_maps(effect)) {
+    return nullptr;
+  }
+  if (bake_drag_reduced_owes(ma, effect)) {
+    return nullptr;
+  }
+  if (paint_layer_effect_slot_image(effect) != nullptr) {
+    return nullptr;
+  }
+  int region[4];
+  if (!BKE_paint_layers_bake_changed_region(ma, effect, region)) {
+    return nullptr;
+  }
+  uint32_t current_hash[2];
+  BKE_paint_layers_bake_hash(ma, effect, current_hash);
+  if (current_hash[0] != effect.bake->hash[0] || current_hash[1] != effect.bake->hash[1] ||
+      (current_hash[0] == 0 && current_hash[1] == 0))
+  {
+    return nullptr;
+  }
+  const MaterialPaintLayer *row = BKE_paint_layers_correction_owner(ma, effect);
+  if (row == nullptr || bake_subtree_has_decal_effect(*row) ||
+      bake_subtree_folds_projection(ma, *row) || BKE_paint_layers_mapping_remaps(ma, *row) ||
+      !BKE_paint_layers_active_transform_effects(ma, *row).is_empty())
+  {
+    return nullptr;
+  }
+  /* The effects below the owned one are steps of its input: one that remaps (a Mirror, a laid map
+   * moved by its own mapping) sends an edit of its map anywhere in the result, as a Decal does. */
+  for (const MaterialPaintLayer &below : row->effects) {
+    if (BLI_uuid_equal(below.marker, effect.marker)) {
+      break;
+    }
+    if ((below.flag & MA_PAINT_LAYER_ENABLED) != 0 && BKE_paint_layers_mapping_remaps(ma, below)) {
+      return nullptr;
+    }
+  }
+  /* The subscription's rectangle is in the pixels of the maps the effect reads, which are the row's
+   * canvas -- the canvas the compute renders the result at. */
+  BLI_rcti_init(&r_region, region[0], region[1], region[2], region[3]);
+  return &r_region;
+}
+
 bool BKE_paint_layers_bake_plan_run(Main &bmain,
                                     Material &ma,
                                     bool *r_changed,
@@ -3368,7 +3585,8 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
     for (int index = int(rows.size()) - 1; index >= 0; index--) {
       MaterialPaintLayer &layer = *rows[index];
       BakeRowRelease release = BakeRowRelease::Keep;
-      if (!bake_row_is_due(ma, layer, view, release)) {
+      const bool due = bake_row_is_due(ma, layer, view, release);
+      if (!due) {
         changed |= bake_row_release_apply(bmain, ma, layer, release);
         continue;
       }
@@ -3391,10 +3609,19 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
         continue;
       }
       if (paint_layer_is_owned_effect(ma, layer)) {
-        /* The effect's result is one map per channel it filters, written whole from the effect
-         * cache's compute: a stroke defers it (#BKE_paint_layers_bake_row_is_deferred), so no region
-         * path is wanted here. */
-        if (bake_effect_row_write(bmain, ma, layer)) {
+        /* The effect's result is one map per channel it filters, written from the effect cache's
+         * compute. This is the inline path only: every owned effect is heavy and leaves the main
+         * thread, and the worker job computes and writes the maps whole until a follow-up gives
+         * the job the region (its localized copy carries no previous cache entry to patch). Here,
+         * when the maps stand and the subscription reports pixel edits the description still
+         * agrees with, only the rectangle the compute answers for is written
+         * (#bake_effect_region_resolve holds the trust rules). A stroke defers the compute
+         * (#BKE_paint_layers_bake_row_is_deferred), so the region a write takes is the one the
+         * stroke left behind, and the finalize's drain lets the subscription start from what the
+         * write landed. */
+        rcti effect_region;
+        const rcti *effect_region_ptr = bake_effect_region_resolve(ma, layer, effect_region);
+        if (bake_effect_row_write(bmain, ma, layer, effect_region_ptr)) {
           changed = true;
         }
         continue;
@@ -3417,10 +3644,12 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
         bake_drag_reduced_remember(ma, layer, full_size);
       }
       if (mask_effect) {
-        /* The item's grey is one map of its own, written whole: a stroke into the mask defers it
-         * (#BKE_paint_layers_bake_row_is_deferred), so no region path is wanted here. A grey that
-         * reads the surface is written per object and UV tile, into the tiles the objects' blocks
-         * name, like a row's per-object bake. */
+        /* The item's grey is one map of its own, written whole: the mask effect cache behind it
+         * computes whole and has no regional update yet (phase E), so there is no region of the
+         * grey the cache could answer for, and a stroke into the mask defers it
+         * (#BKE_paint_layers_bake_row_is_deferred), so the whole write lands once, after the stroke.
+         * A grey that reads the surface is written per object and UV tile, into the tiles the
+         * objects' blocks name, like a row's per-object bake. */
         PaintLayersBakeTargets targets;
         if (paint_layers_bake_node_reads_surface(ma, layer)) {
           paint_layers_bake_targets_resolve(ma, layer, view, size, targets);

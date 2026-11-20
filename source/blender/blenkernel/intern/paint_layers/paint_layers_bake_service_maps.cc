@@ -21,6 +21,7 @@
 #include "BKE_image.hh"
 #include "BKE_image_partial_update.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_main.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_target.hh"
@@ -54,6 +55,21 @@ static bool bake_image_is_float(Image &image)
 {
   const ImageTile *tile = BKE_image_get_tile(&image, 0);
   return tile != nullptr && (tile->gen_flag & IMA_GEN_FLOAT) != 0;
+}
+
+/**
+ * Whether \a image is still one of \a bmain's images. A bake record is runtime data: an undo or a
+ * file reset can free a map while the slot keeps the pointer, and the next write must make a new
+ * one instead of reading the freed image. The address is compared without dereferencing it.
+ */
+static bool bake_service_image_is_live(const Main &bmain, const Image *image)
+{
+  for (const Image &live : bmain.images) {
+    if (&live == image) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -104,6 +120,10 @@ Image *bake_service_image(Main &bmain,
   };
   const int tile_num = tile_numbers.is_empty() ? object_num : int(tile_numbers.size());
   Image **slot = bake_service_slot(layer, channel);
+  if (*slot != nullptr && !bake_service_image_is_live(bmain, *slot)) {
+    /* The undo/reset freed the map but left the runtime slot: forget it and build a new one. */
+    *slot = nullptr;
+  }
   if (*slot != nullptr) {
     int slot_width = 0;
     int slot_height = 0;

@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -30,6 +31,8 @@
 #include "BKE_paint_layers_tile.hh"
 
 #include "BKE_image_partial_update.hh"
+
+#include "BLI_rect.h"
 
 #include "DNA_material_types.h"
 
@@ -183,10 +186,25 @@ int bake_effect_size_for(const Material &ma, const MaterialPaintLayer &effect);
 
 /**
  * Compute the result of the effect \a effect that owns it and write it into the effect's own bake:
- * one map per channel the effect filters, written whole, then the bake's hash and subscription. The
- * effect cache's copies are dropped once their map holds them. True when any map was written.
+ * one map per channel the effect filters, then the bake's hash and subscription. The effect
+ * cache's entry the compute answered through stays: it is the base the next regional patch builds
+ * on, and only the cache's LRU budget retires it. True when any map was written.
+ *
+ * \param changed_region: the rectangle of the effect's canvas whose inputs changed since the maps
+ *        were last written, or null to compute the whole canvas. Only the main-thread (inline)
+ *        writer of the planner takes a region; the worker job does not accept one yet and writes
+ *        every channel whole. Only the part of each map the compute answers for is written: a
+ *        channel the compute returns an empty valid region for is skipped, its map already holding
+ *        the result, and when no channel ends up writing, the finalize still runs -- the hash is
+ *        stamped and the subscription re-created with a drain -- so the row stops being stale
+ *        without its maps being touched. A channel whose map #bake_service_image replaced is
+ *        written whole from the buffer the compute answered with; only a channel the compute could
+ *        not answer leaves the bake unfinalized and stale for the next plan.
  */
-bool bake_effect_row_write(Main &bmain, Material &ma, MaterialPaintLayer &effect);
+bool bake_effect_row_write(Main &bmain,
+                           Material &ma,
+                           MaterialPaintLayer &effect,
+                           const rcti *changed_region = nullptr);
 
 /**
  * Whether the effect \a effect that owns its result has none current and nothing keeps it from
@@ -215,6 +233,23 @@ struct BakeLayerSubscription {
   bool has_region = false;
   int xmin = 0, xmax = 0, ymin = 0, ymax = 0;
   Vector<BakeSubscriptionSource> sources;
+};
+
+/**
+ * A map a layer's bake wrote, as the pass that stamped the layer's hash saw it: the Image, its
+ * session id and the pixel version it had then. A memfile undo re-reads a changed image from the
+ * file into a new data-block (and a new #ImageRuntime), while the hash stored beside the row rides
+ * the decoded material. Comparing the two tells a map the decode rolled back from the one this
+ * session wrote. Both readers are safe against a freed image: #BKE_paint_layers_undo_validate
+ * compares only after it checked the pointers against the live set, and
+ * #BKE_paint_layers_bake_maps_are_current short-circuits on an address that no longer matches, so
+ * a pointer from the read is dereferenced only when the identity already agrees.
+ */
+struct BakeMapRef {
+  const Image *image = nullptr;
+  /** #ID::session_uid, so a new data-block that reuses the freed one's address is still another map. */
+  uint32_t session_uid = 0;
+  uint64_t pixel_version = 0;
 };
 
 /** The hashes a Material row's bake was started from and did not land from: not retried as is. */
@@ -249,6 +284,12 @@ struct BakeMaterialRuntime {
    * (the source, the row) or for an explicit retry.
    */
   Map<UUID, BakeFailure> failed;
+  /**
+   * The maps each layer's last bake wrote, by layer marker (#BakeMapRef). Filled where the hash is
+   * stamped, compared after a memfile decode: see #BakeMapRef.
+   */
+  Map<UUID, std::array<BakeMapRef, PAINT_MATERIAL_CHANNEL_NUM>> baked_maps;
+  Map<UUID, BakeMapRef> baked_coverage;
   /**
    * The shape each Material row last gave its group (#paint_layer_material_live_signature), by
    * marker: what the scene update compares against to know a source edit changed what the

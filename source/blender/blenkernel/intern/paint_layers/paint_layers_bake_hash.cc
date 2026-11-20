@@ -567,16 +567,21 @@ bool BKE_paint_layers_bake_is_valid(const Material &ma, const MaterialPaintLayer
   /* The structural hash cannot see pixel edits; the runtime subscription, drained by
    * #BKE_paint_layers_bake_notice_changes, reports those. A layer with no subscription is trusted
    * on its hash alone. */
-  std::lock_guard lock(bake_runtime_mutex());
-  const BakeMaterialRuntime *runtime = bake_runtime().lookup_ptr(ma.id.session_uid);
-  if (runtime != nullptr) {
-    for (const BakeLayerSubscription &entry : runtime->layers) {
-      if (BLI_uuid_equal(entry.marker, layer.marker) && entry.changed) {
-        return false;
+  {
+    std::lock_guard lock(bake_runtime_mutex());
+    const BakeMaterialRuntime *runtime = bake_runtime().lookup_ptr(ma.id.session_uid);
+    if (runtime != nullptr) {
+      for (const BakeLayerSubscription &entry : runtime->layers) {
+        if (BLI_uuid_equal(entry.marker, layer.marker) && entry.changed) {
+          return false;
+        }
       }
     }
   }
-  return true;
+  /* The hash and the subscription describe the inputs; the maps themselves may have been replaced
+   * under the same hash by an undo or a reload that re-read them from the file. Only an Image this
+   * session wrote with these pixels can be shown as the current result. */
+  return BKE_paint_layers_bake_maps_are_current(ma, layer);
 }
 
 void BKE_paint_layers_bake_finalize(Material &ma, MaterialPaintLayer &layer)

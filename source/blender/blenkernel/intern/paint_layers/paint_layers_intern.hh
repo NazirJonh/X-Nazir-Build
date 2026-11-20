@@ -1668,6 +1668,25 @@ bool BKE_paint_layers_tree_shape_moved(const Material &ma);
 void BKE_paint_layers_bake_subscribe(Material &ma, MaterialPaintLayer &layer);
 
 /**
+ * After a memfile decode: clear the bake hash of every row whose maps the decode re-read as other
+ * data-blocks than the pass that stamped the hash wrote (see #BakeMapRef). Without it a map that
+ * came back from the file keeps being shown as the current result of this session's inputs -- an
+ * undo of a resize leaves the restored, older colours on screen and no bake asks for them again.
+ *
+ * Must run on the main thread, after the decode's dangling pointers were cleared.
+ * \return whether any hash was cleared.
+ */
+bool BKE_paint_layers_bake_restored_maps_invalidate(Material &ma);
+
+/**
+ * Whether the maps \a layer's bake holds are still the ones its hash was stamped on (see
+ * #BakeMapRef). False when an undo or a reload re-read one as another data-block with other
+ * pixels, even though the hash stored beside the row still matches: validity asks this, so a
+ * restored map stops being shown as the current result and the planner fills it again.
+ */
+bool BKE_paint_layers_bake_maps_are_current(const Material &ma, const MaterialPaintLayer &layer);
+
+/**
  * Write \a values (straight RGBA floats) into \a image, encoding each texel the way the map's own
  * buffer keeps it -- the transformation the worker job applies to a render before it holds it.
  * Exposed so the bake tests can hold the job's write to the same code a synchronous bake runs.
@@ -2144,10 +2163,12 @@ std::shared_ptr<ImBuf> paint_layer_owned_effect_result_compute(const Material &m
                                                                rcti *r_valid_region = nullptr);
 
 /**
- * Drop the cache's entry of the effect \a effect in \a channel: its bake holds the result now, and
- * the entry is a copy kept for nothing while the bake stands. The compute above no longer drops
- * the entry before it runs -- its key sees everything an edit of the row's mapping or of the
- * effects below moves -- so this is the explicit reset a bake makes when it takes the result over.
+ * Drop the cache's entry of the effect \a effect in \a channel: the explicit reset a caller makes
+ * when it takes the result over and wants the entry gone. The bake does not drop the entry it
+ * computed through -- that entry is the base the next regional patch builds on, and only the
+ * cache's LRU budget retires it -- so only the worker job's whole-map commit resets it here. The
+ * compute above never drops an entry before it runs: its key sees everything an edit of the row's
+ * mapping or of the effects below moves.
  */
 void paint_layer_owned_effect_cache_drop(const Material &ma,
                                          const MaterialPaintLayer &effect,

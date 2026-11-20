@@ -2690,6 +2690,32 @@ TEST_F(PaintLayersEffectTest, a_kind_without_region_exact_answers_the_whole_canv
   expect_results_close(*answered, *full, 1e-5f);
 }
 
+TEST_F(PaintLayersEffectTest, a_stroke_pins_the_preview_effect_until_it_ends)
+{
+  Image *image = add_shade_image("Row", 255, 0);
+  MaterialPaintLayer *row = add_paint_layer("Row", image);
+  MaterialPaintLayer *blur = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 1));
+  prime_pixel_journal(*image);
+
+  std::shared_ptr<ImBuf> first = owned_effect_result(*row, *blur);
+  ASSERT_NE(first, nullptr);
+
+  BKE_paint_layers_bake_stroke_active_set(true);
+  edit_image_rect(*image, rcti{5, 7, 3, 5}, 200);
+  std::shared_ptr<ImBuf> pinned = owned_effect_result(*row, *blur);
+  ASSERT_NE(pinned, nullptr);
+  EXPECT_EQ(pinned.get(), first.get())
+      << "the preview keeps the last effect result while the stroke paints its input";
+
+  BKE_paint_layers_bake_stroke_active_set(false);
+  std::shared_ptr<ImBuf> updated = owned_effect_result(*row, *blur);
+  ASSERT_NE(updated, nullptr);
+  EXPECT_NE(updated.get(), first.get()) << "the stroke is over: the effect is computed again";
+  EXPECT_TRUE(results_differ(*updated, *first, 1e-5f));
+}
+
 TEST_F(PaintLayersEffectTest, a_scalar_input_edit_is_not_served_from_the_old_cpu_result)
 {
   /* Only a Fill's own map carries a mapping, so the row is built the way the bake tests build one.

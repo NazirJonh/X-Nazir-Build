@@ -38,6 +38,7 @@
 
 #include "../paint_material_composite_internal.hh"
 #include "paint_layers_composite_intern.hh"
+#include "paint_layers_effect_params_layout.hh"
 #include "paint_layers_kind.hh"
 
 #include "DNA_image_types.h"
@@ -114,16 +115,12 @@ static int effect_pass_clamp_radius(const int radius, const int width, const int
   return std::clamp(radius, 1, std::max(width, height));
 }
 
-/* The two schemas that carry a colour ahead of scalars: the packing lays a colour's three channels
- * across three slots at its place in the schema order, so the scalars after it sit at packed
- * positions the kind's own enum (which numbers the schema's parameters, one each) does not name.
- * Every scalar before the colour keeps the enum's own index, which is why the plans below read the
- * leading ones through it and these constants only past it. */
-constexpr int COLOR_MATCH_PACKED_TARGET = 4;
-constexpr int COLOR_MATCH_PACKED_VARIATION = 7;
-constexpr int FILL_AREA_PACKED_COLOR = 5;
-constexpr int FILL_AREA_PACKED_BLUR = 8;
-constexpr int FILL_AREA_PACKED_ITERATIONS = 9;
+/* The kinds whose schema carries a colour ahead of scalars read their packed positions through the
+ * layout blocks of #paint_layers_effect_params_layout.hh, the one place they are named: the
+ * packing lays a colour's three channels across three slots at its place in the schema order, so
+ * the scalars after it sit at positions the kind's own enum (which numbers the schema's
+ * parameters, one each) does not name. Every scalar before the colour keeps the enum's own index,
+ * which is why the plans below read the leading ones through it and the blocks only past it. */
 
 void BKE_paint_layers_effect_pass_plan(eMaterialPaintLayerFilter filter,
                                        const float *params,
@@ -755,16 +752,16 @@ void BKE_paint_layers_effect_pass_plan(eMaterialPaintLayerFilter filter,
       grade.reach = 0;
       /* The mask is meaningless without a reach. */
       grade.axis_mask = PAINT_LAYER_EFFECT_AXIS_NONE;
-      grade.params.x = params[COLOR_MATCH_PACKED_TARGET + 0];
-      grade.params.y = params[COLOR_MATCH_PACKED_TARGET + 1];
-      grade.params.z = params[COLOR_MATCH_PACKED_TARGET + 2];
-      grade.params.w = params[COLOR_MATCH_PACKED_VARIATION];
+      grade.params.x = params[bke::paint_filter_params::ColorMatch::target_color + 0];
+      grade.params.y = params[bke::paint_filter_params::ColorMatch::target_color + 1];
+      grade.params.z = params[bke::paint_filter_params::ColorMatch::target_color + 2];
+      grade.params.w = params[bke::paint_filter_params::ColorMatch::variation];
       /* The variation's three amounts ride in #params2 -- the shader reads them there, the packed
        * first float4 the correction pass pushes carrying the picked flag and the source colour
        * instead. */
-      grade.params2.x = params[COLOR_MATCH_PACKED_VARIATION + 1];
-      grade.params2.y = params[COLOR_MATCH_PACKED_VARIATION + 2];
-      grade.params2.z = params[COLOR_MATCH_PACKED_VARIATION + 3];
+      grade.params2.x = params[bke::paint_filter_params::ColorMatch::variation_hue];
+      grade.params2.y = params[bke::paint_filter_params::ColorMatch::variation_chroma];
+      grade.params2.z = params[bke::paint_filter_params::ColorMatch::variation_luma];
       grade.params2.w = 0.0f;
       break;
     }
@@ -781,15 +778,16 @@ void BKE_paint_layers_effect_pass_plan(eMaterialPaintLayerFilter filter,
        * and the steps reach the whole canvas on both axes and the region incrementality is off, the
        * JFA's own policy; the diffusion reads its four neighbours only, one texel of reach. */
       /* The schema packs the fill colour across three slots, so the blur and the iterations after
-       * it sit at the packed positions the constants above name; the scalars before it keep the
+       * it sit at the packed positions the layout block names; the scalars before it keep the
        * enum's own index. */
       const int source = effect_pass_param_int(params, PAINT_LAYER_FILL_AREA_SOURCE);
       const float threshold = params[PAINT_LAYER_FILL_AREA_THRESHOLD];
       const bool debug = params[PAINT_LAYER_FILL_AREA_DEBUG] != 0.0f;
       const int uv_border = effect_pass_param_int(params, PAINT_LAYER_FILL_AREA_UV_BORDER);
       const int color_mode = effect_pass_param_int(params, PAINT_LAYER_FILL_AREA_COLOR_MODE);
-      const int blur = effect_pass_param_int(params, FILL_AREA_PACKED_BLUR);
-      const int iterations = effect_pass_param_int(params, FILL_AREA_PACKED_ITERATIONS);
+      const int blur = effect_pass_param_int(params, bke::paint_filter_params::FillArea::blur);
+      const int iterations = effect_pass_param_int(
+          params, bke::paint_filter_params::FillArea::iterations);
       /* The parameterizations the flood cannot express are the CPU's, each refused with an empty
        * plan the gather falls back on: the debug lays a grey ramp of the CPU's own region numbers,
        * which the flooding's labels do not name; the largest-region classification asks a reduction
@@ -873,9 +871,9 @@ void BKE_paint_layers_effect_pass_plan(eMaterialPaintLayerFilter filter,
       tail.params.y = 0.0f;
       tail.params.z = 0.0f;
       tail.params.w = 0.0f;
-      tail.params2.x = params[FILL_AREA_PACKED_COLOR + 0];
-      tail.params2.y = params[FILL_AREA_PACKED_COLOR + 1];
-      tail.params2.z = params[FILL_AREA_PACKED_COLOR + 2];
+      tail.params2.x = params[bke::paint_filter_params::FillArea::color + 0];
+      tail.params2.y = params[bke::paint_filter_params::FillArea::color + 1];
+      tail.params2.z = params[bke::paint_filter_params::FillArea::color + 2];
       tail.params2.w = 0.0f;
       tail.alpha_from_kernel = true;
       /* The blur the CPU lays over the finished fill: the colour, the tail's alpha riding along. */
@@ -938,21 +936,11 @@ EffectReach BKE_paint_layers_effect_reach(eMaterialPaintLayerFilter filter, cons
    * reads: these kinds have a plan now, but their result at a texel is fed by the whole canvas (a
    * distance field, a flood, a statistic) or by the canvas size (the block grid, the UV a slot is
    * sampled at, the world scale), and a plan evaluated at the one-texel bound below would classify
-   * them as pointwise or local and let a stroke elsewhere skip their bake. */
-  switch (filter) {
-    case MA_PAINT_LAYER_FILTER_GLOW:
-    case MA_PAINT_LAYER_FILTER_BEVEL:
-    case MA_PAINT_LAYER_FILTER_COLOR_MATCH:
-    case MA_PAINT_LAYER_FILTER_DROP_SHADOW:
-    case MA_PAINT_LAYER_FILTER_MASK_OUTLINE:
-    case MA_PAINT_LAYER_FILTER_FILL_AREA:
-    case MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL:
-    case MA_PAINT_LAYER_FILTER_PIXELATE:
-    case MA_PAINT_LAYER_FILTER_BLUR_SLOPE:
-    case MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT:
-      return EffectReach::WholeMap;
-    default:
-      break;
+   * them as pointwise or local and let a stroke elsewhere skip their bake. The kind table names
+   * them once (#PAINT_LAYER_KIND_EFFECT_WHOLE_MAP), so a new such kind is one registry flag, not
+   * a second list to keep in step with the tests' own. */
+  if (paint_layer_effect_whole_map(int16_t(filter))) {
+    return EffectReach::WholeMap;
   }
   /* The plan's one-texel size bound only clamps a radius upwards to one, so it classifies every
    * kind without measuring a canvas. An empty plan is a kind the plan does not describe (a

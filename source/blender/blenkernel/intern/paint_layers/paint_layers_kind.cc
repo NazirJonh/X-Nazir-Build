@@ -1144,7 +1144,7 @@ static const PaintLayerKindInfo kinds[] = {
      blur_params,
      int(std::size(blur_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_GPU_COMPUTED)},
+              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_EFFECT_REGION_EXACT)},
     /* A line average at an angle: one pass of one kernel, not separable like the box blur's pair,
      * which reaches both ways at once along the line it samples. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
@@ -1155,7 +1155,7 @@ static const PaintLayerKindInfo kinds[] = {
      blur_directional_params,
      int(std::size(blur_directional_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_GPU_COMPUTED)},
+              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_EFFECT_REGION_EXACT)},
     /* A shadow cast off the row's own shape: the silhouette is spread, blurred and offset before
      * it is tinted. Its result is a layer with an alpha of its own, so the shadow shows on the
      * empty map around a stroke. In a mask the tint is a grey of itself (the mask kind normalizes),
@@ -1171,7 +1171,8 @@ static const PaintLayerKindInfo kinds[] = {
      int(std::size(drop_shadow_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
               PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_MASK_NEEDS_LUMA |
-              PAINT_LAYER_KIND_RESULT_HAS_ALPHA)},
+              PAINT_LAYER_KIND_RESULT_HAS_ALPHA | PAINT_LAYER_KIND_EFFECT_WHOLE_MAP |
+              PAINT_LAYER_KIND_EFFECT_REGION_EXACT)},
     /* A band along the border of the shape: a distance field from the border, banded by the width
      * and softened by the blur -- the Bevel's transform, taken as the edge band rather than the
      * ramp. A content row's result is a ring layer of its own (alpha = band, colour = Color) read
@@ -1187,7 +1188,8 @@ static const PaintLayerKindInfo kinds[] = {
      mask_outline_params,
      int(std::size(mask_outline_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_RESULT_HAS_ALPHA)},
+              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_RESULT_HAS_ALPHA |
+              PAINT_LAYER_KIND_EFFECT_WHOLE_MAP | PAINT_LAYER_KIND_EFFECT_REGION_EXACT)},
     /* What a continuous border encloses: the plan floods the label field (the border and the map's
      * edge the background, the flooding steps over it), diffuses the border's colours inward and
      * writes the fill out with the coverage the flooding named, so the combined preview computes it
@@ -1207,7 +1209,8 @@ static const PaintLayerKindInfo kinds[] = {
      int(std::size(fill_area_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
               PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_MASK_NEEDS_LUMA |
-              PAINT_LAYER_KIND_RESULT_HAS_ALPHA)},
+              PAINT_LAYER_KIND_RESULT_HAS_ALPHA | PAINT_LAYER_KIND_EFFECT_WHOLE_MAP |
+              PAINT_LAYER_KIND_EFFECT_REGION_EXACT)},
     /* One channel of an assigned image (an ORM map, say) laid as a grey in the channels the row
      * works in: the resample of the slot is a whole-map pass the effect cache computes, so it
      * needs the bake like the Bevel does. The row's own slot is the one map it reads: the
@@ -1224,7 +1227,8 @@ static const PaintLayerKindInfo kinds[] = {
      channel_split_params,
      int(std::size(channel_split_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_RESULT_HAS_ALPHA),
+              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_RESULT_HAS_ALPHA |
+              PAINT_LAYER_KIND_EFFECT_WHOLE_MAP),
      /* #PaintLayerKindInfo::map_paintable, no_stroke_reason, reads_image_slot. */
      false,
      nullptr,
@@ -1248,7 +1252,8 @@ static const PaintLayerKindInfo kinds[] = {
      normal_to_mask_params,
      int(std::size(normal_to_mask_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_READS_ANCHOR_POINT | PAINT_LAYER_KIND_RESULT_HAS_ALPHA),
+              PAINT_LAYER_KIND_READS_ANCHOR_POINT | PAINT_LAYER_KIND_RESULT_HAS_ALPHA |
+              PAINT_LAYER_KIND_EFFECT_REGION_EXACT),
      /* #PaintLayerKindInfo::map_paintable, no_stroke_reason, reads_image_slot. */
      false,
      nullptr,
@@ -1271,7 +1276,9 @@ static const PaintLayerKindInfo kinds[] = {
      height_to_normal_params,
      int(std::size(height_to_normal_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_NORMAL_SAFE),
+              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_NORMAL_SAFE |
+              PAINT_LAYER_KIND_EFFECT_WHOLE_MAP |
+              PAINT_LAYER_KIND_EFFECT_REGION_EXACT),
      /* #PaintLayerKindInfo::map_paintable, no_stroke_reason, reads_image_slot. */
      false,
      nullptr,
@@ -1320,8 +1327,8 @@ static const PaintLayerKindInfo kinds[] = {
      effect_or_mask_roles,
      pixelate_params,
      int(std::size(pixelate_params)),
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_GPU_COMPUTED)},
+     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_EFFECT_WHOLE_MAP)},
     /* The hue and saturation shift the way the Hue/Saturation node does; the mode says what the
      * lightness moves, the Regular's value channel or the Perceptive lift toward white. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
@@ -1341,8 +1348,8 @@ static const PaintLayerKindInfo kinds[] = {
      effect_or_mask_roles,
      nullptr,
      0,
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_GPU_COMPUTED)},
+     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_EFFECT_REGION_EXACT)},
     /* The walk along the slope of a source: the samples the quality names take the direction the
      * gradient names, the blending mode saying what they accumulate. The plan lays the driver's
      * blur, the driver itself and the walk over the original, so the combined preview computes it
@@ -1355,7 +1362,7 @@ static const PaintLayerKindInfo kinds[] = {
      blur_slope_params,
      int(std::size(blur_slope_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_GPU_COMPUTED)},
+              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_EFFECT_WHOLE_MAP)},
     /* Unsharp masking keeps an HDR value above one: only the negative side is clamped. The same
      * open-above-one policy as Exposure and High Pass, unlike Noise and Channel Mixer. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
@@ -1366,7 +1373,7 @@ static const PaintLayerKindInfo kinds[] = {
      sharpen_params,
      int(std::size(sharpen_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_GPU_COMPUTED)},
+              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_EFFECT_REGION_EXACT)},
     /* The detail is a difference against a blurred copy, so an HDR value above one stays above it;
      * only the negative side is clamped. The same open-above-one policy as Exposure and Sharpen. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
@@ -1377,7 +1384,7 @@ static const PaintLayerKindInfo kinds[] = {
      high_pass_params,
      int(std::size(high_pass_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_GPU_COMPUTED)},
+              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_EFFECT_REGION_EXACT)},
     /* The Sobel gradient magnitude: a full-range step reads as one, a flat area as zero. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
      MA_PAINT_LAYER_FILTER_EDGE_DETECT,
@@ -1387,7 +1394,7 @@ static const PaintLayerKindInfo kinds[] = {
      nullptr,
      0,
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_GPU_COMPUTED)},
+              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_EFFECT_REGION_EXACT)},
     /* A diagonal 3x3 lighting kernel: a flat colour is its own result, an edge takes the light. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
      MA_PAINT_LAYER_FILTER_EMBOSS,
@@ -1397,7 +1404,7 @@ static const PaintLayerKindInfo kinds[] = {
      nullptr,
      0,
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_GPU_COMPUTED)},
+              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_EFFECT_REGION_EXACT)},
     /* The extreme of a square window per channel: min and max are separable, so the kernel is one
      * pass per axis like the box blur's. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
@@ -1408,7 +1415,7 @@ static const PaintLayerKindInfo kinds[] = {
      erode_dilate_params,
      int(std::size(erode_dilate_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_GPU_COMPUTED)},
+              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_EFFECT_REGION_EXACT)},
     /* A glow screens its colour under the content, so it stays bounded where the colour is. Its
      * source is choked to [0, 1] by the same bound: an HDR texel above one does not brighten the
      * glow, unlike the open-topped Sharpen and High Pass. The same clamp zeros the mask at a
@@ -1424,7 +1431,9 @@ static const PaintLayerKindInfo kinds[] = {
      glow_params,
      int(std::size(glow_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_MASK_NEEDS_LUMA)},
+              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_MASK_NEEDS_LUMA |
+              PAINT_LAYER_KIND_EFFECT_WHOLE_MAP |
+              PAINT_LAYER_KIND_EFFECT_REGION_EXACT)},
     /* A bevel replaces the colour with a distance ramp from the content's borders: its alpha, or
      * its luminance when the source says so -- an opaque row bevels by the dark side of its paint.
      * The plan floods the distance field (the JFA passes) and reads the ramp off it, so the
@@ -1437,7 +1446,8 @@ static const PaintLayerKindInfo kinds[] = {
      bevel_params,
      int(std::size(bevel_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_GPU_COMPUTED)},
+              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_EFFECT_WHOLE_MAP |
+              PAINT_LAYER_KIND_EFFECT_REGION_EXACT)},
     /* The grade moves every texel by the distance between the target colour and the source one --
      * the input's own average, which the live graph cannot express and the plan reduces down a
      * pyramid to the 1x1 apex the grade reads, so the combined preview computes it on the GPU like
@@ -1453,7 +1463,9 @@ static const PaintLayerKindInfo kinds[] = {
      color_match_params,
      int(std::size(color_match_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_MASK_NEEDS_LUMA)},
+              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_MASK_NEEDS_LUMA |
+              PAINT_LAYER_KIND_EFFECT_WHOLE_MAP |
+              PAINT_LAYER_KIND_EFFECT_REGION_EXACT)},
     /* The gamma leaves a non-positive value alone and has no upper bound, so an HDR value above
      * one passes through: only the negative side is clamped. The same policy as Sharpen and High
      * Pass. */

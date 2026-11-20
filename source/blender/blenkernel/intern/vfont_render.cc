@@ -319,7 +319,7 @@ static void vfont_render_fill_rect(
   }
   for (const int y : IndexRange(iy0, iy1 - iy0)) {
     float *pixel = buffer + (size_t(y) * side + ix0) * 4;
-    for (const int x : IndexRange(ix0, ix1 - ix0)) {
+    for ([[maybe_unused]] const int x : IndexRange(ix0, ix1 - ix0)) {
       pixel[0] = 1.0f;
       pixel[1] = 1.0f;
       pixel[2] = 1.0f;

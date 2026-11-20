@@ -316,6 +316,38 @@ enum PaintLayerKindFlag : uint32_t {
    * no part in it: a mask effect's buffer has no alpha to cast from or to lay.
    */
   PAINT_LAYER_KIND_RESULT_HAS_ALPHA = 1 << 15,
+  /**
+   * A #PAINT_LAYER_KIND_NEEDS_BAKE effect whose result at a texel is fed by the whole canvas (a
+   * distance field, a flood, a whole-canvas statistic) or by the canvas size (a block grid, the UV
+   * a slot is sampled at, a world scale), so a stroke elsewhere moves it and the coverage culling
+   * cannot skip its bake. #BKE_paint_layers_effect_reach reads this flag instead of naming the
+   * kinds in its own list, so a new such kind sets the flag here -- the one place -- and a plan
+   * evaluated at a one-texel bound can no longer classify it as pointwise by accident.
+   *
+   * This flag and #PAINT_LAYER_KIND_EFFECT_REGION_EXACT are orthogonal: this one is about
+   * bake-culling reach (does a stroke elsewhere invalidate the result?), while REGION_EXACT is
+   * about the geometry of the cache patch (can the kernel run on a small buffer?). A flood kind
+   * such as Fill Area or Bevel needs the whole canvas to compute its result (hence WHOLE_MAP) yet
+   * its CPU kernel is a local function of the buffer coordinates it receives (hence REGION_EXACT).
+   * The compatibility of both flags on the same kind is confirmed in patch 02, which introduces
+   * #paint_layer_effect_region_update_supported.
+   */
+  PAINT_LAYER_KIND_EFFECT_WHOLE_MAP = 1 << 16,
+  /**
+   * A #PAINT_LAYER_KIND_NEEDS_BAKE effect whose CPU kernel is a local function of the buffer
+   * coordinates it is given: the region patch can run the whole kernel over a small buffer and copy
+   * the interior back. The kinds that read the absolute texel coordinates or the buffer's own size
+   * (a Noise's texel hash, a Pixelate's block grid, a Channel Split's UV, a Blur Slope's driver)
+   * leave it off; a new effect kind leaves it off until proven local, which refuses the region
+   * patch rather than laying a shifted result. The parameterizations that break the locality are
+   * not the flag's to name: a Color Match's picked variation and a Height To Normal's world units
+   * stay parameterized checks at the region gate
+   * (#paint_layer_effect_region_update_supported).
+   *
+   * This flag and #PAINT_LAYER_KIND_EFFECT_WHOLE_MAP are orthogonal: see that flag's doc for the
+   * reasoning.
+   */
+  PAINT_LAYER_KIND_EFFECT_REGION_EXACT = 1 << 17,
 };
 
 struct PaintLayerKindInfo {
@@ -1310,6 +1342,26 @@ inline bool paint_layer_kind_writes_only_colour_channels(const MaterialPaintLaye
 inline bool paint_layer_kind_result_has_alpha(const MaterialPaintLayer &row)
 {
   return paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_RESULT_HAS_ALPHA);
+}
+
+/** Whether the effect kind \a filter's result at a texel is fed by the whole canvas or by the
+ * canvas size (#PAINT_LAYER_KIND_EFFECT_WHOLE_MAP), so the coverage culling cannot skip its bake.
+ * False for a kind the registry does not name, which the plan classifies on its own. */
+inline bool paint_layer_effect_whole_map(const int16_t filter)
+{
+  const PaintLayerKindInfo *info = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER, filter);
+  return info != nullptr && (info->flags & PAINT_LAYER_KIND_EFFECT_WHOLE_MAP) != 0;
+}
+
+/** Whether \a row's kind is a local function of the buffer coordinates it is given
+ * (#PAINT_LAYER_KIND_EFFECT_REGION_EXACT), so the region patch may run the whole kernel over a
+ * small buffer. False for a kind the registry does not name: a new kind leaves the flag off until
+ * proven local, which refuses the region patch rather than laying a shifted result. The
+ * parameterizations that break the locality stay parameterized checks at the region gate. */
+inline bool paint_layer_effect_region_exact(const MaterialPaintLayer &row)
+{
+  const PaintLayerKindInfo *info = paint_layer_kind_of(row);
+  return info != nullptr && (info->flags & PAINT_LAYER_KIND_EFFECT_REGION_EXACT) != 0;
 }
 
 /** Whether \a row is the inert Anchor Point marker. */

@@ -6,7 +6,9 @@
  * The parameters and the RNA of the filter kinds: the CPU-computed effects (Blur, Sharpen, High
  * Pass, Edge Detect, Emboss, Erode / Dilate) and the pointwise filters added beside them (Exposure,
  * Deband / Dither, Normal Convert, Channel Mixer): their schema, their roles and the enum name each
- * reads back.
+ * reads back. The GPU-computed mask gate is read here too: the kinds whose flag opens it,
+ * the greys the runner brings back to one luminance, and the parameterizations that stay with the
+ * CPU.
  */
 
 #include "testing/testing.h"
@@ -19,15 +21,18 @@
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_composite.hh"
 
 #include "RNA_access.hh"
 #include "RNA_prototypes.hh"
 
 #include "BLI_index_range.hh"
+#include "BLI_set.hh"
 #include "BLI_uuid.h"
 
 #include "DNA_material_types.h"
 
+#include <array>
 #include <string>
 
 #include "../paint_layers_intern.hh"
@@ -1462,6 +1467,186 @@ TEST_F(PaintLayersFilterKindsTest, rna_channel_mixer_reaches_the_payload)
   RNA_property_float_range(&payload, green, &range_min, &range_max);
   EXPECT_FLOAT_EQ(range_min, -2.0f);
   EXPECT_FLOAT_EQ(range_max, 2.0f);
+}
+
+TEST_F(PaintLayersFilterKindsTest, gpu_computed_kinds_walk_the_registry)
+{
+  /* The mask effect's compute calls #BKE_paint_layers_effect_is_gpu_computed before its CPU
+   * kernel; the gate's kind half is the registry's answer. The walk runs over the whole filter
+   * enum up to and including the last enumerator (#MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK): a kind
+   * flagged GPU-computed past the bound must extend the walk, or the gate would silently stay
+   * closed on it. */
+  constexpr int last_filter = int(MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK);
+  Set<int> gpu_computed_filters;
+  for (int filter = int(MA_PAINT_LAYER_FILTER_INVERT); filter <= last_filter; filter++)
+  {
+    const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER, filter);
+    if (kind == nullptr) {
+      continue;
+    }
+    if ((kind->allowed_roles & paint_layer_role_bit(MA_PAINT_LAYER_ROLE_EFFECT)) == 0) {
+      /* A map-coverage operator (a Color ID) is never a content correction, so the walk has no
+       * question for it: it cannot be added as an effect to begin with. */
+      continue;
+    }
+    Material *ma = BKE_material_add(bmain, "PhaseEMaskGateMat");
+    MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
+    ASSERT_NE(row, nullptr);
+    MaterialPaintLayer *effect = BKE_paint_layers_filter_add(
+        *ma, row, eMaterialPaintLayerFilter(filter));
+    ASSERT_NE(effect, nullptr) << "filter " << filter;
+    EXPECT_EQ(BKE_paint_layers_effect_is_gpu_computed(*effect),
+              (kind->flags & PAINT_LAYER_KIND_GPU_COMPUTED) != 0)
+        << "filter " << filter;
+    if ((kind->flags & PAINT_LAYER_KIND_GPU_COMPUTED) != 0) {
+      gpu_computed_filters.add(filter);
+      /* The mask gate only ever sees a mask item: the roles decide which GPU-computed kinds it
+       * can be asked about. The Height To Normal is a content correction only -- a mask item has
+       * no channel of its own to lay a normal into -- so the gate never fires for it there. */
+      effect->role = MA_PAINT_LAYER_ROLE_MASK_ITEM;
+      const bool mask_item = paint_layer_kind_role_allowed(*effect);
+      EXPECT_EQ(mask_item, filter != int(MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL))
+          << "filter " << filter;
+      if (mask_item) {
+        EXPECT_TRUE(paint_layer_mask_item_bakes_effect(*effect)) << "filter " << filter;
+      }
+      effect->role = MA_PAINT_LAYER_ROLE_EFFECT;
+    }
+  }
+  /* The membership, not the count, is the contract: the neighbourhood kernels, the pointwise Noise
+   * and the pass-chain kinds -- the set the plan test walks as well. */
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_BLUR)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_FXAA)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_SHARPEN)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_HIGH_PASS)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_EDGE_DETECT)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_EMBOSS)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_ERODE_DILATE)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_NOISE)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_GLOW)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_PIXELATE)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_BEVEL)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_MASK_OUTLINE)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_DROP_SHADOW)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_BLUR_SLOPE)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_COLOR_MATCH)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_FILL_AREA)));
+
+  /* The transform kinds are excluded: they bake as mask items through the transform branch of
+   * #paint_layer_mask_item_bakes_effect without the GPU flag, so the gate stays closed on them
+   * and the CPU resample answers as it did. */
+  for (const eMaterialPaintLayerFilter filter :
+       {MA_PAINT_LAYER_FILTER_TRANSFORM, MA_PAINT_LAYER_FILTER_MIRROR})
+  {
+    const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER, filter);
+    ASSERT_NE(kind, nullptr) << "filter " << filter;
+    EXPECT_TRUE((kind->flags & PAINT_LAYER_KIND_TRANSFORMS_INPUT) != 0) << "filter " << filter;
+    EXPECT_FALSE((kind->flags & PAINT_LAYER_KIND_GPU_COMPUTED) != 0) << "filter " << filter;
+    EXPECT_TRUE((kind->allowed_roles & paint_layer_role_bit(MA_PAINT_LAYER_ROLE_MASK_ITEM)) != 0)
+        << "filter " << filter;
+  }
+}
+
+TEST_F(PaintLayersFilterKindsTest, luma_kinds_are_exactly_the_flagged_set)
+{
+  /* The provider's result rides the same rule the CPU kernel's answer does
+   * (#mask_effect_grey_normalize): a kind whose kernel can leave a grey input colored -- the tint
+   * of a Glow, the per-channel grain of a Noise, the grade of a Color Match, the layer colours of
+   * a Drop Shadow and a Fill Area -- is brought back through the luminance, and the kind table's
+   * #PAINT_LAYER_KIND_MASK_NEEDS_LUMA says which. The mask runner reads the same flag, so the
+   * membership is the contract: exactly these five, and no other kind can lay a colored mask
+   * silently on either path. */
+  const eMaterialPaintLayerFilter luma_kinds[] = {MA_PAINT_LAYER_FILTER_DROP_SHADOW,
+                                                  MA_PAINT_LAYER_FILTER_FILL_AREA,
+                                                  MA_PAINT_LAYER_FILTER_GLOW,
+                                                  MA_PAINT_LAYER_FILTER_COLOR_MATCH,
+                                                  MA_PAINT_LAYER_FILTER_NOISE};
+  constexpr int last_filter = int(MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK);
+  Set<int> flagged;
+  for (int filter = int(MA_PAINT_LAYER_FILTER_INVERT); filter <= last_filter; filter++)
+  {
+    const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER, filter);
+    if (kind == nullptr) {
+      continue;
+    }
+    if ((kind->flags & PAINT_LAYER_KIND_MASK_NEEDS_LUMA) != 0) {
+      flagged.add(filter);
+      /* The greying is only reachable through the mask form the gate serves: each flagged kind is
+       * one the provider can be asked about, laid as a mask item as well. */
+      EXPECT_TRUE((kind->flags & PAINT_LAYER_KIND_GPU_COMPUTED) != 0) << "filter " << filter;
+      EXPECT_TRUE((kind->allowed_roles & paint_layer_role_bit(MA_PAINT_LAYER_ROLE_MASK_ITEM)) != 0)
+          << "filter " << filter;
+    }
+  }
+  EXPECT_EQ(flagged.size(), sizeof(luma_kinds) / sizeof(*luma_kinds));
+  for (const eMaterialPaintLayerFilter filter : luma_kinds) {
+    EXPECT_TRUE(flagged.contains(int(filter))) << "filter " << filter;
+  }
+}
+
+TEST_F(PaintLayersFilterKindsTest, refused_parameterizations_give_an_empty_plan)
+{
+  /* The provider answers a grey only where the plan builder lays one: the parameterizations the
+   * flood and the pyramid cannot serve are the CPU's, the gate's fallback computing them bit for
+   * bit. The plans are read through the same pure function the plan test uses -- the schema
+   * defaults build, a refused parameterization answers empty, and there is nothing for the
+   * provider to compute there. */
+  Vector<PaintLayerEffectPass> passes;
+
+  /* The Color Match grades the input's own average down the pyramid; a picked source is the one
+   * parameterization the reduction cannot serve, the CPU keeping the pick exact. */
+  std::array<float, 11> match_default{0.0f,
+                                      0.5f,
+                                      0.5f,
+                                      0.5f,
+                                      0.25f,
+                                      0.5f,
+                                      0.75f,
+                                      0.0f,
+                                      0.1f,
+                                      0.2f,
+                                      0.3f};
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_COLOR_MATCH, match_default.data(), 64, 64, passes);
+  EXPECT_FALSE(passes.is_empty()) << "the defaults are the plan's own parameterization";
+  match_default[0] = 1.0f;
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_COLOR_MATCH, match_default.data(), 64, 64, passes);
+  EXPECT_TRUE(passes.is_empty()) << "the picked match stays with the CPU";
+
+  /* The Fill Area's flood refuses the debug's ramp of region numbers, the largest-region
+   * classification (a reduction over the regions the flood does not walk) and the source mode
+   * with no iteration to diffuse with. */
+  std::array<float, 10> fill_default{float(PAINT_LAYER_FILL_AREA_SOURCE_ALPHA),
+                                     0.5f,
+                                     0.0f,
+                                     float(PAINT_LAYER_FILL_AREA_UV_BORDER_IGNORE),
+                                     float(PAINT_LAYER_FILL_AREA_COLOR_MODE_SOURCE),
+                                     1.0f,
+                                     0.5f,
+                                     0.25f,
+                                     0.0f,
+                                     24.0f};
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_FILL_AREA, fill_default.data(), 64, 64, passes);
+  EXPECT_FALSE(passes.is_empty()) << "the defaults are the flood's own parameterization";
+  fill_default[2] = 1.0f;
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_FILL_AREA, fill_default.data(), 64, 64, passes);
+  EXPECT_TRUE(passes.is_empty()) << "the debug's region ramp stays with the CPU";
+  fill_default[2] = 0.0f;
+  fill_default[3] = float(PAINT_LAYER_FILL_AREA_UV_BORDER_FILL);
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_FILL_AREA, fill_default.data(), 64, 64, passes);
+  EXPECT_TRUE(passes.is_empty()) << "the largest-region classification stays with the CPU";
+  fill_default[3] = float(PAINT_LAYER_FILL_AREA_UV_BORDER_IGNORE);
+  fill_default[9] = 0.0f;
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_FILL_AREA, fill_default.data(), 64, 64, passes);
+  EXPECT_TRUE(passes.is_empty()) << "the source mode with no iteration stays with the CPU";
 }
 
 }  // namespace blender::bke::tests

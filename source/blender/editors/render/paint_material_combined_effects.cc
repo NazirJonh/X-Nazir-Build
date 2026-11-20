@@ -2144,7 +2144,7 @@ bool combined_preview_gpu_effects_run(
                                                                                 width,
                                                                                 height,
                                                                                 job.images,
-                                                                                PaintLayerEffectGpuKeyExtras{
+                                                                                PaintLayerEffectKeyExtras{
                                                                                     job.chain_hash,
                                                                                     job.input_scalar_hash},
                                                                                 effect_gpu_hooks,
@@ -2659,8 +2659,8 @@ bool combined_preview_gpu_effects_run(
                                                 job.input_size.x,
                                                 job.input_size.y,
                                                 job.images,
-                                                PaintLayerEffectGpuKeyExtras{job.chain_hash,
-                                                                             job.input_scalar_hash},
+                                                PaintLayerEffectKeyExtras{job.chain_hash,
+                                                                          job.input_scalar_hash},
                                                 tile_number);
       rendered++;
       last_kind = int(job.correction->filter);

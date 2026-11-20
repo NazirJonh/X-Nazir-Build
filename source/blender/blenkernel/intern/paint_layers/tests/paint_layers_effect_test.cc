@@ -274,6 +274,102 @@ class PaintLayersEffectTest : public PaintLayersGenerateTest {
     return image;
   }
 
+  /** Mark the first edit of \a image whole. The pixel journal does not know a buffer's size before
+   * its first record, so that record is always "everything"; every later mark is the rectangle it
+   * names, which is what lets a test report a real dab. */
+  void prime_pixel_journal(Image &image)
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(&image, nullptr, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    if (ibuf == nullptr) {
+      return;
+    }
+    const rcti whole{0, ibuf->x, 0, ibuf->y};
+    BKE_image_partial_update_mark_region(
+        &image, BKE_image_get_tile(&image, 1001), ibuf, &whole);
+    BKE_image_release_ibuf(&image, ibuf, lock);
+  }
+
+  /** Write \a value into the RGB of every texel of \a rect (alpha stays opaque) and report exactly
+   * that rectangle to the pixel journal, the way a stroke's dirty band reaches the caches. */
+  void edit_image_rect(Image &image, const rcti &rect, const uchar value)
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(&image, nullptr, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    if (ibuf == nullptr) {
+      return;
+    }
+    uchar *pixels = ibuf->byte_data_for_write();
+    ASSERT_NE(pixels, nullptr);
+    if (pixels == nullptr) {
+      BKE_image_release_ibuf(&image, ibuf, lock);
+      return;
+    }
+    for (const int y : IndexRange(rect.ymin, BLI_rcti_size_y(&rect))) {
+      for (const int x : IndexRange(rect.xmin, BLI_rcti_size_x(&rect))) {
+        uchar *texel = pixels + (int64_t(y) * ibuf->x + x) * 4;
+        texel[0] = value;
+        texel[1] = value;
+        texel[2] = value;
+        texel[3] = 255;
+      }
+    }
+    BKE_image_partial_update_mark_region(
+        &image, BKE_image_get_tile(&image, 1001), ibuf, &rect);
+    BKE_image_release_ibuf(&image, ibuf, lock);
+  }
+
+  /** The result of \a effect on \a row's content in \a channel through the effect cache, offering
+   * the rectangle a caller's map is missing and reading back the rectangle the answer is current
+   * over. */
+  std::shared_ptr<ImBuf> owned_effect_result(MaterialPaintLayer &row,
+                                             MaterialPaintLayer &effect,
+                                             const rcti *changed_region = nullptr,
+                                             rcti *r_valid_region = nullptr,
+                                             const eMaterialPaintChannel channel = kColor)
+  {
+    return paint_layer_owned_effect_result_compute(
+        *ma, row, effect, int(channel), PAINT_TILE_NUMBER_BASE, changed_region, r_valid_region);
+  }
+
+  /** Every float of two effect results, within \a tolerance. */
+  static void expect_results_close(const ImBuf &a, const ImBuf &b, const float tolerance)
+  {
+    ASSERT_NE(a.float_data(), nullptr);
+    ASSERT_NE(b.float_data(), nullptr);
+    ASSERT_EQ(a.x, b.x);
+    ASSERT_EQ(a.y, b.y);
+    const int64_t count = int64_t(a.x) * a.y * 4;
+    for (const int64_t i : IndexRange(count)) {
+      EXPECT_NEAR(a.float_data()[i], b.float_data()[i], tolerance) << "component " << i;
+    }
+  }
+
+  /** Whether the two results differ anywhere by more than \a tolerance. */
+  static bool results_differ(const ImBuf &a, const ImBuf &b, const float tolerance)
+  {
+    if (a.x != b.x || a.y != b.y) {
+      return true;
+    }
+    const int64_t count = int64_t(a.x) * a.y * 4;
+    for (const int64_t i : IndexRange(count)) {
+      if (std::abs(a.float_data()[i] - b.float_data()[i]) > tolerance) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  static void expect_rect_equal(const rcti &actual, const rcti &expected)
+  {
+    EXPECT_EQ(actual.xmin, expected.xmin);
+    EXPECT_EQ(actual.ymin, expected.ymin);
+    EXPECT_EQ(actual.xmax, expected.xmax);
+    EXPECT_EQ(actual.ymax, expected.ymax);
+  }
+
   /** The composite of Base Color as straight scene-linear RGBA at the stack's dimensions. */
   bool render_channel(Vector<float> &r_pixels, int &r_width, int &r_height)
   {
@@ -2443,6 +2539,216 @@ TEST_F(PaintLayersEffectTest, the_budget_bounds_what_the_cache_keeps)
 }
 
 /* -------------------------------------------------------------------- */
+/** \name Regional CPU effect cache update
+ * \{ */
+
+TEST_F(PaintLayersEffectTest, a_region_patch_matches_a_full_compute_and_names_its_band)
+{
+  Image *image = add_shade_image("Row", 255, 0);
+  MaterialPaintLayer *row = add_paint_layer("Row", image);
+  MaterialPaintLayer *blur = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 1));
+  /* The first journal record is "everything"; priming it makes the dab below a rectangle. */
+  prime_pixel_journal(*image);
+
+  std::shared_ptr<ImBuf> first = owned_effect_result(*row, *blur);
+  ASSERT_NE(first, nullptr);
+  ASSERT_EQ(first->x, 8);
+  ASSERT_EQ(first->y, 8);
+  ASSERT_EQ(paint_layer_effect_cache_entry_count(), 1);
+
+  /* Brighten a small rectangle of the dark half, the way a stroke reports its dirty band. */
+  const rcti dirty{5, 7, 3, 5};
+  edit_image_rect(*image, dirty, 255);
+  rcti valid;
+  BLI_rcti_init(&valid, 0, 0, 0, 0);
+  std::shared_ptr<ImBuf> patched = owned_effect_result(*row, *blur, &dirty, &valid);
+  ASSERT_NE(patched, nullptr);
+  EXPECT_NE(patched.get(), first.get()) << "a patch lands in a clone, not in the standing result";
+  EXPECT_EQ(paint_layer_effect_cache_entry_count(), 1) << "the patch replaces the entry";
+  EXPECT_EQ(paint_layer_effect_cache_bytes(), size_t(first->x) * first->y * sizeof(float[4]))
+      << "the entry accounts one result, not the old one beside it";
+
+  /* The cache's answer must be the picture a fresh full render of the edited input gives. */
+  paint_layer_owned_effect_cache_drop(*ma, *blur, int(kColor), PAINT_TILE_NUMBER_BASE);
+  std::shared_ptr<ImBuf> full = owned_effect_result(*row, *blur);
+  ASSERT_NE(full, nullptr);
+  expect_results_close(*patched, *full, 1e-5f);
+
+  /* The answer names the band a caller can write: at least the dirty rectangle grown by the
+   * kernel's one-texel reach, inside the canvas. The cache may answer one halo wider -- the
+   * patch's own valid band is grown again into the caller's missing band -- but everything it
+   * names is current, so the write is still exact. */
+  rcti read_band;
+  BKE_paint_layers_effect_region_clip(dirty, 1, first->x, first->y, read_band);
+  EXPECT_TRUE(BLI_rcti_inside_rcti(&valid, &read_band))
+      << "valid " << valid.xmin << "," << valid.ymin << "-" << valid.xmax << "," << valid.ymax;
+  rcti canvas;
+  BLI_rcti_init(&canvas, 0, first->x, 0, first->y);
+  EXPECT_TRUE(BLI_rcti_inside_rcti(&canvas, &valid));
+  EXPECT_LT(BLI_rcti_size_x(&valid), first->x)
+      << "a regional answer did not narrow the band to the whole canvas";
+}
+
+TEST_F(PaintLayersEffectTest, a_region_patch_leaves_the_previous_readers_buffer_untouched)
+{
+  Image *image = add_shade_image("Row", 255, 0);
+  MaterialPaintLayer *row = add_paint_layer("Row", image);
+  MaterialPaintLayer *blur = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 1));
+  prime_pixel_journal(*image);
+
+  std::shared_ptr<ImBuf> first = owned_effect_result(*row, *blur);
+  ASSERT_NE(first, nullptr);
+  Vector<float> snapshot(int64_t(first->x) * first->y * 4);
+  std::copy(first->float_data(), first->float_data() + snapshot.size(), snapshot.begin());
+
+  const rcti dirty{5, 7, 3, 5};
+  edit_image_rect(*image, dirty, 255);
+  std::shared_ptr<ImBuf> patched = owned_effect_result(*row, *blur, &dirty);
+  ASSERT_NE(patched, nullptr);
+  EXPECT_NE(patched.get(), first.get());
+  for (const int64_t i : IndexRange(snapshot.size())) {
+    EXPECT_FLOAT_EQ(first->float_data()[i], snapshot[i])
+        << "the clone-before-copy keeps the buffer a previous reader holds intact";
+  }
+  EXPECT_TRUE(results_differ(*patched, *first, 1e-5f))
+      << "the patched result is the new picture, not the one the old reader holds";
+
+  /* And the clone is the current picture: the same answer a fresh full render gives. */
+  paint_layer_owned_effect_cache_drop(*ma, *blur, int(kColor), PAINT_TILE_NUMBER_BASE);
+  std::shared_ptr<ImBuf> full = owned_effect_result(*row, *blur);
+  ASSERT_NE(full, nullptr);
+  expect_results_close(*patched, *full, 1e-5f);
+}
+
+TEST_F(PaintLayersEffectTest, a_full_map_change_answers_the_whole_canvas)
+{
+  Image *image = add_shade_image("Row", 255, 0);
+  MaterialPaintLayer *row = add_paint_layer("Row", image);
+  MaterialPaintLayer *blur = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 1));
+  prime_pixel_journal(*image);
+
+  std::shared_ptr<ImBuf> first = owned_effect_result(*row, *blur);
+  ASSERT_NE(first, nullptr);
+
+  /* A reload or a size change names no rectangle: the cache must compute whole, and the answer
+   * must name the whole canvas so the caller writes all of it. */
+  BKE_image_partial_update_mark_full_update(image);
+  const rcti dirty{5, 7, 3, 5};
+  rcti valid;
+  BLI_rcti_init(&valid, 0, 0, 0, 0);
+  std::shared_ptr<ImBuf> answered = owned_effect_result(*row, *blur, &dirty, &valid);
+  ASSERT_NE(answered, nullptr);
+  EXPECT_NE(answered.get(), first.get()) << "a full change computes a new result";
+  rcti canvas;
+  BLI_rcti_init(&canvas, 0, first->x, 0, first->y);
+  expect_rect_equal(valid, canvas);
+
+  paint_layer_owned_effect_cache_drop(*ma, *blur, int(kColor), PAINT_TILE_NUMBER_BASE);
+  std::shared_ptr<ImBuf> full = owned_effect_result(*row, *blur);
+  ASSERT_NE(full, nullptr);
+  expect_results_close(*answered, *full, 1e-5f);
+}
+
+TEST_F(PaintLayersEffectTest, a_kind_without_region_exact_answers_the_whole_canvas)
+{
+  /* A Normal to Mask normalizes its field by a whole-buffer percentile window, and its Height mode
+   * solves a multi-level Poisson system: a crop would move both. The registry keeps the kind out
+   * of the regional path (the bake's gate reads the flag), so an offered rectangle must fall back
+   * to the full compute and name the whole canvas. */
+  Image *image = add_normal_image("Normal", 128, 128, 255);
+  MaterialPaintLayer *row = add_paint_layer("Row", image, PAINT_MATERIAL_CHANNEL_NORMAL);
+  const float black[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  add_constant_channel(*row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, black);
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*effect,
+                                             PAINT_LAYER_NORMAL_TO_MASK_MODE,
+                                             PAINT_LAYER_NORMAL_TO_MASK_SLOPE));
+  prime_pixel_journal(*image);
+
+  std::shared_ptr<ImBuf> first = owned_effect_result(*row, *effect);
+  ASSERT_NE(first, nullptr);
+
+  const rcti dirty{5, 7, 3, 5};
+  edit_image_rect(*image, dirty, 255);
+  rcti valid;
+  BLI_rcti_init(&valid, 0, 0, 0, 0);
+  std::shared_ptr<ImBuf> answered = owned_effect_result(*row, *effect, &dirty, &valid);
+  ASSERT_NE(answered, nullptr);
+  rcti canvas;
+  BLI_rcti_init(&canvas, 0, first->x, 0, first->y);
+  expect_rect_equal(valid, canvas);
+
+  paint_layer_owned_effect_cache_drop(*ma, *effect, int(kColor), PAINT_TILE_NUMBER_BASE);
+  std::shared_ptr<ImBuf> full = owned_effect_result(*row, *effect);
+  ASSERT_NE(full, nullptr);
+  expect_results_close(*answered, *full, 1e-5f);
+}
+
+TEST_F(PaintLayersEffectTest, a_scalar_input_edit_is_not_served_from_the_old_cpu_result)
+{
+  /* Only a Fill's own map carries a mapping, so the row is built the way the bake tests build one.
+   * The mapping rides no map version and no effect correction: only the key's input scalar
+   * fingerprint can tell the blur its input moved. */
+  Image *map = add_shade_image("Row", 220, 40);
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "Row", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_source(*ma, row, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, row, kColor), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(*ma, row, kColor, map));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, row, true));
+  MaterialPaintLayer *blur = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 1));
+
+  std::shared_ptr<ImBuf> before = owned_effect_result(*row, *blur);
+  ASSERT_NE(before, nullptr);
+  ASSERT_EQ(paint_layer_effect_cache_entry_count(), 1);
+
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_rotation(*ma, row, 0.5f));
+  std::shared_ptr<ImBuf> after = owned_effect_result(*row, *blur);
+  ASSERT_NE(after, nullptr);
+  EXPECT_EQ(paint_layer_effect_cache_entry_count(), 1) << "the new key replaced the entry";
+  EXPECT_NE(before.get(), after.get());
+  EXPECT_TRUE(results_differ(*before, *after, 1e-4f))
+      << "a scalar edit must not be served from the cached result of the old input";
+}
+
+TEST_F(PaintLayersEffectTest, an_edit_below_an_effect_recomputes_the_effect_above_it)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 220, 40));
+  MaterialPaintLayer *lower = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_TRUE(
+      paint_layer_kind_param_int_set(*lower, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*lower, PAINT_LAYER_BLUR_RADIUS, 1));
+  MaterialPaintLayer *upper = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_TRUE(
+      paint_layer_kind_param_int_set(*upper, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*upper, PAINT_LAYER_BLUR_RADIUS, 1));
+
+  std::shared_ptr<ImBuf> before = owned_effect_result(*row, *upper);
+  ASSERT_NE(before, nullptr);
+  ASSERT_EQ(paint_layer_effect_cache_entry_count(), 2);
+
+  /* The upper effect's own parameters stand; its input is what the lower effect lays, so only the
+   * key's chain fingerprint can tell the cache the base moved. */
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*lower, PAINT_LAYER_BLUR_RADIUS, 4));
+  std::shared_ptr<ImBuf> after = owned_effect_result(*row, *upper);
+  ASSERT_NE(after, nullptr);
+  EXPECT_EQ(paint_layer_effect_cache_entry_count(), 2) << "the new key replaced both entries";
+  EXPECT_NE(before.get(), after.get());
+  EXPECT_TRUE(results_differ(*before, *after, 1e-4f))
+      << "an edit of an effect below must recompute the effect above it";
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Noise
  * \{ */
 
@@ -4202,9 +4508,9 @@ TEST_F(PaintLayersEffectTest, the_gpu_effect_cache_drops_a_material_with_its_tex
 /* -------------------------------------------------------------------- */
 /** \name GPU Effect Pass Plan, Region & Key
  *
- * The pure half of the GPU effect pass: the pass plan, the neighbourhood halo, the region arithmetic
- * and the two GPU-only key fingerprints, all decided from the effect's kind, parameters and
- * description without a GPU. \{ */
+ * The pure half of the GPU effect pass: the pass plan, the neighbourhood halo, the region
+ * arithmetic and the two input-key fingerprints the CPU and GPU caches share, all decided from the
+ * effect's kind, parameters and description without a GPU. \{ */
 
 TEST_F(PaintLayersEffectTest, the_halo_matches_each_kernels_total_coverage)
 {
@@ -4572,6 +4878,26 @@ TEST_F(PaintLayersEffectTest, every_filter_declares_its_reach)
     EXPECT_EQ(BKE_paint_layers_effect_reach(eMaterialPaintLayerFilter(value), params), found->reach)
         << "filter " << value;
   }
+}
+
+TEST_F(PaintLayersEffectTest, a_normal_to_mask_is_not_a_region_exact_kind)
+{
+  /* The field is normalized by a robust 1-99 percentile window over the whole buffer -- even the
+   * Slope mode's locally built field -- and the Height mode solves it with a multi-level Poisson
+   * relaxation, so a value depends on far texels of the canvas. The regional CPU path may not run
+   * the kernel on a crop: the window and the far field would move. The registry is the one place
+   * the refusal lives, and the bake's regional gate reads it. */
+  const PaintLayerKindInfo *info = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER,
+                                                         MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK);
+  ASSERT_NE(info, nullptr);
+  EXPECT_EQ(info->flags & PAINT_LAYER_KIND_EFFECT_REGION_EXACT, 0)
+      << "a whole-buffer field cannot be patched from a small buffer";
+
+  /* One kind's refusal, not a blanket rule: a neighbourhood kind still carries the flag. */
+  const PaintLayerKindInfo *blur = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER,
+                                                         MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_NE(blur, nullptr);
+  EXPECT_NE(blur->flags & PAINT_LAYER_KIND_EFFECT_REGION_EXACT, 0);
 }
 
 TEST_F(PaintLayersEffectTest, the_pass_plan_matches_each_kernels_shape)
@@ -5757,8 +6083,8 @@ TEST_F(PaintLayersEffectTest, the_gpu_cache_keys_on_the_chain_and_scalar_fingerp
 
   /* Published under one fingerprint, the same effect is a hit; a different chain or input-scalar
    * fingerprint is a new key and a re-render (the entry of the old parameters is dropped). */
-  const PaintLayerEffectGpuKeyExtras first_key{0xAAu, 0xBBu};
-  const PaintLayerEffectGpuKeyExtras other_scalar{0xAAu, 0xCCu};
+  const PaintLayerEffectKeyExtras first_key{0xAAu, 0xBBu};
+  const PaintLayerEffectKeyExtras other_scalar{0xAAu, 0xCCu};
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
                 *ma, *blur, kColor, 8, 8, no_images, first_key, hooks, nullptr, &resource),
             PaintLayerEffectGpuState::Render);

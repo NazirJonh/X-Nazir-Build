@@ -2115,19 +2115,39 @@ bool paint_layer_effect_dimensions_resolve(
 /**
  * Compute the result of \a effect, which owns it (#paint_layer_effect_owns_result), on \a row's
  * content in \a channel for \a tile_number, ignoring the bake it keeps: the entry of the effect
- * cache is dropped first, so the result is computed from the description as it is now (the row's
- * mapping is no part of the cache key). The buffer is float RGBA, premultiplied, at the input's
- * size. Null when the input cannot be rendered.
+ * cache answers when it can, and is computed from the description as it is now when it cannot (the
+ * key folds the input's scalar content, the row's mapping included, so an entry keyed before such
+ * an edit misses). The buffer is float RGBA, premultiplied, at the input's size. Null when the
+ * input cannot be rendered.
+ *
+ * \param changed_region: the rectangle the caller (a bake that knows the stroke's region) offers
+ * for a regional update of a live cache entry, in the input's texel grid, or null for the old
+ * terms -- any map change recomputes the whole buffer. The rectangle actually patched is the one
+ * the entry's own staleness names, read from the maps themselves; the offered band decides what
+ * the caller learns about the answer, not what is patched. Offer it only when the bake's staleness
+ * is exactly that band of map-pixel edits -- a staleness the bake hash moved for (a parameter, a
+ * mapping) must come as null, for the answer to be written whole.
+ * \param r_valid_region: the rectangle of the answer that a map-writing caller can lay from it.
+ * The answer is current as a whole whichever way the compute answered, so an offered band comes
+ * back grown by the halo and clamped to the canvas -- the band the caller's map is missing, plus
+ * what the kernel reads past it. The whole canvas when no band was offered, when the band cannot
+ * be narrowed (the maps reach the canvas through a remapping), or after a full compute. Empty when
+ * the offered band was empty (nothing moved that a write could narrow) or the compute failed.
  */
 std::shared_ptr<ImBuf> paint_layer_owned_effect_result_compute(const Material &ma,
                                                                const MaterialPaintLayer &row,
                                                                const MaterialPaintLayer &effect,
                                                                int channel,
-                                                               int tile_number);
+                                                               int tile_number,
+                                                               const rcti *changed_region =
+                                                                   nullptr,
+                                                               rcti *r_valid_region = nullptr);
 
 /**
  * Drop the cache's entry of the effect \a effect in \a channel: its bake holds the result now, and
- * the entry is a copy kept for nothing while the bake stands.
+ * the entry is a copy kept for nothing while the bake stands. The compute above no longer drops
+ * the entry before it runs -- its key sees everything an edit of the row's mapping or of the
+ * effects below moves -- so this is the explicit reset a bake makes when it takes the result over.
  */
 void paint_layer_owned_effect_cache_drop(const Material &ma,
                                          const MaterialPaintLayer &effect,

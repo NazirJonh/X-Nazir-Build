@@ -115,7 +115,7 @@ PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get(const Material &m
                                                               const int width,
                                                               const int height,
                                                               const Span<Image *> images,
-                                                              const PaintLayerEffectGpuKeyExtras &key_extras,
+                                                              const PaintLayerEffectKeyExtras &key_extras,
                                                               const PaintLayerEffectGpuHooks &hooks,
                                                               rcti *r_dirty_region,
                                                               void **r_resource,
@@ -230,7 +230,7 @@ void BKE_paint_layers_effect_gpu_cache_publish(const Material &ma,
                                                const int width,
                                                const int height,
                                                const Span<Image *> images,
-                                               const PaintLayerEffectGpuKeyExtras &key_extras,
+                                               const PaintLayerEffectKeyExtras &key_extras,
                                                const int tile_number)
 {
   const EffectCacheKey key{ma.id.session_uid,

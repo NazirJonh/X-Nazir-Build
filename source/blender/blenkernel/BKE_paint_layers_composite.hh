@@ -765,12 +765,13 @@ void BKE_paint_layers_effect_region_clip(const rcti &dirty,
 bool paint_correction_is_effect(const PaintMaterialCompositeCorrection &correction);
 
 /**
- * A fingerprint of the effects that precede the effect_marker in a row's content corrections, in order:
- * each one's marker and its own parameter hash. The result of an earlier effect is part of the input
- * of a later one, so a change to an earlier effect -- its parameters or its place in the order --
- * must re-key the later effect's GPU cache entry. The CPU effect hash of a single effect does not
- * know about the rest of the row; this fingerprint is the GPU-only half of that. Corrections that
- * are not effects (their marker is nil) carry no fingerprint here.
+ * A fingerprint of the effects that precede the effect_marker in a row's content corrections, in
+ * order: each one's marker and its own parameter hash. The result of an earlier effect is part of
+ * the input of a later one, so a change to an earlier effect -- its parameters or its place in the
+ * order -- must re-key the later effect's cache entry, in the CPU row cache and the GPU cache
+ * alike. The effect hash of a single effect does not know about the rest of the row; this
+ * fingerprint is that missing half. Corrections that are not effects (their marker is nil) carry
+ * no fingerprint here.
  */
 uint64_t BKE_paint_layers_effect_chain_hash(
     Span<const PaintMaterialCompositeCorrection> corrections, const bUUID &effect_marker);
@@ -779,12 +780,13 @@ uint64_t BKE_paint_layers_effect_chain_hash(
  * A fingerprint of the described effect input's non-map scalar content -- the row's flat colour, its
  * adjustment filter and parameters, the filters, colours and opacities of the corrections below
  * the effect, and every gradient generator's payload and Anchor Point reader's slice hash in the
- * same description, and the input's transform steps (Mirror, Transform Mapping): a map version does not carry those, and a change to one alone would otherwise
- * serve a result computed from the old pixels. The slot map an effect's kernel samples itself (a
- * Channel Split's, #PaintMaterialCompositeImageLayer::slot_image) joins by identity, its pixels
- * being outside every map version the description carries too. Together with the map versions it
- * names everything a re-render would read; it keys the GPU entry beyond the CPU hash. Pure: it
- * reads the description only, so it is testable without a GPU.
+ * same description, and the input's transform steps (Mirror, Transform Mapping): a map version
+ * does not carry those, and a change to one alone would otherwise serve a result computed from the
+ * old pixels. The slot map an effect's kernel samples itself (a Channel Split's,
+ * #PaintMaterialCompositeImageLayer::slot_image) joins by identity, its pixels being outside every
+ * map version the description carries too. Together with the map versions it names everything a
+ * re-render would read; it keys a cache entry beyond the effect's own hash, in the CPU row cache
+ * and the GPU cache alike. Pure: it reads the description only, so it is testable without a GPU.
  */
 uint64_t BKE_paint_layers_effect_input_scalar_hash(
     const PaintMaterialCompositeImageLayer &input_entry);
@@ -849,22 +851,23 @@ enum class PaintLayerEffectGpuState : uint8_t {
 
 /**
  * The two fingerprints that key an effect cache entry beyond the effect's own hash. Both are read
- * from the description alone, both are zero when they describe nothing (a lone effect on a plain
- * map input), and the row effect cache leaves them zero so they cannot split a key; the GPU cache
- * fills both, and the mask effect cache (CPU) fills the chain half with the mask built up to the
- * item.
+ * from the description alone and both are zero when they describe nothing (a lone effect on a
+ * plain map input). They are shared by every effect cache -- the CPU row cache, the CPU mask cache
+ * and the GPU cache -- since all three key on the same described input: the row cache fills both
+ * from the description it computes from, the GPU cache fills both for its jobs, and the mask
+ * effect cache (CPU) fills the chain half with the mask built up to the item.
  */
-struct PaintLayerEffectGpuKeyExtras {
-  /** The ordered fingerprint of the effects that precede this one in its row, whose GPU results
-   * feed its input (see #BKE_paint_layers_effect_chain_hash). For a mask effect item, the hash of
-   * the mask built up to it. */
+struct PaintLayerEffectKeyExtras {
+  /** The ordered fingerprint of the effects that precede this one in its row, whose results feed
+   * its input (see #BKE_paint_layers_effect_chain_hash). For a mask effect item, the hash of the
+   * mask built up to it. */
   uint64_t chain_hash = 0;
   /** The fingerprint of the input's non-map scalar content (see
    * #BKE_paint_layers_effect_input_scalar_hash). */
   uint64_t input_scalar_hash = 0;
 };
 
-bool operator==(const PaintLayerEffectGpuKeyExtras &a, const PaintLayerEffectGpuKeyExtras &b);
+bool operator==(const PaintLayerEffectKeyExtras &a, const PaintLayerEffectKeyExtras &b);
 
 /**
  * The texture holding \a effect's GPU result, asking for one when the cache has none or the input
@@ -882,12 +885,13 @@ bool operator==(const PaintLayerEffectGpuKeyExtras &a, const PaintLayerEffectGpu
  *        slice cache checks both, see #anchor_slice_region_is_exact). Until it does, the whole texture
  *        is re-rendered and the rectangle is only carried.
  * \param r_resource: the texture, valid for #Hit and #Render.
- * \param key_extras: the two GPU-only fingerprints -- an ordered hash of the effects that precede
- *        this one in the row (whose GPU results feed this effect's input), and a hash of the input's
- *        non-map scalar content (a flat colour, an adjustment, a filter's parameters) that no map
- *        version carries. They key the GPU entry beyond the CPU effect hash, which knows only this
- *        effect's own parameters; leave both zero for an effect with neither. The publish below must
- *        pass the same value, so a hit reads on identical content.
+ * \param key_extras: the two fingerprints of the input beyond the effect's own parameters -- an
+ *        ordered hash of the effects that precede this one in the row (whose results feed this
+ *        effect's input), and a hash of the input's non-map scalar content (a flat colour, an
+ *        adjustment, a filter's parameters, transform steps) that no map version carries. They
+ *        key the entry beyond the CPU effect hash, which knows only this effect's own parameters;
+ *        leave both zero for an effect with neither. The publish below must pass the same value,
+ *        so a hit reads on identical content.
  */
 PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get(const Material &ma,
                                                                const MaterialPaintLayer &effect,
@@ -895,7 +899,7 @@ PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get(const Material &m
                                                                int width,
                                                                int height,
                                                                Span<Image *> images,
-                                                               const PaintLayerEffectGpuKeyExtras &key_extras,
+                                                               const PaintLayerEffectKeyExtras &key_extras,
                                                                const PaintLayerEffectGpuHooks &hooks,
                                                                rcti *r_dirty_region,
                                                                void **r_resource,
@@ -915,7 +919,7 @@ void BKE_paint_layers_effect_gpu_cache_publish(const Material &ma,
                                                int width,
                                                int height,
                                                Span<Image *> images,
-                                               const PaintLayerEffectGpuKeyExtras &key_extras,
+                                               const PaintLayerEffectKeyExtras &key_extras,
                                                int tile_number = PAINT_TILE_NUMBER_AUTO);
 
 /**

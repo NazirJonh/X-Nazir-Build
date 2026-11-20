@@ -1243,7 +1243,12 @@ static const PaintLayerKindInfo kinds[] = {
      * the Normal's encoding and lays a grey, so it is not NORMAL_SAFE: it reads the Normal
      * (READS_CHANNEL) and never takes part in it, and the grey it lays goes to the colour channels
      * alone (WRITES_ONLY_COLOUR_CHANNELS, which makes the effect's own Normal record the input's
-     * switch). */
+     * switch).
+     * No #PAINT_LAYER_KIND_EFFECT_REGION_EXACT: the field is normalized by a robust 1-99
+     * percentile window over the whole buffer (even the Slope mode's locally built field), and the
+     * Height mode solves it with a multi-level Poisson relaxation, so a value depends on the whole
+     * canvas. A crop would move the window and the far texels, which no finite halo can restore --
+     * the regional path must fall back to the full compute. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
      MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK,
      "Normal to Mask",
@@ -1252,8 +1257,7 @@ static const PaintLayerKindInfo kinds[] = {
      normal_to_mask_params,
      int(std::size(normal_to_mask_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_READS_ANCHOR_POINT | PAINT_LAYER_KIND_RESULT_HAS_ALPHA |
-              PAINT_LAYER_KIND_EFFECT_REGION_EXACT),
+              PAINT_LAYER_KIND_READS_ANCHOR_POINT | PAINT_LAYER_KIND_RESULT_HAS_ALPHA),
      /* #PaintLayerKindInfo::map_paintable, no_stroke_reason, reads_image_slot. */
      false,
      nullptr,

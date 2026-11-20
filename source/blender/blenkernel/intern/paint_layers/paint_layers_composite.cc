@@ -1269,7 +1269,10 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
                                                             const bool describe_only,
                                                             Vector<Image *> *r_images,
                                                             Image **r_bake_image = nullptr,
-                                                            PaintLayerSurfaceRef painted_object = nullptr);
+                                                            PaintLayerSurfaceRef painted_object =
+                                                                nullptr,
+                                                            const rcti *changed_region = nullptr,
+                                                            rcti *r_valid_region = nullptr);
 
 /**
  * Append the CPU-computed effect \a effect to \a out as a correction carrying the map the effect
@@ -2850,22 +2853,14 @@ static bool anchor_slice_region_is_exact(const Material &ma,
  * float buffer per (material, row, channel, parameters), with the input rendered through the same
  * description the bake renders -- the row's content up to the effect, before its mask and opacity
  * -- and the kernel applied over it. Freshness follows the slice cache: the entry remembers the
- * version of every map the input was rendered from, and any edit of one recomputes the whole
- * buffer (a neighbourhood reads past an edited rectangle, so a region update would have to carry a
- * halo; a recompute is the simple correct thing until that is wanted).
+ * version of every map the input was rendered from, and an edit of one recomputes what moved --
+ * the whole buffer when the change cannot be narrowed (a reload, a remapping between a map and
+ * the canvas), or a region patch when it can: the input re-rendered on the changed rectangle
+ * grown by the kernel's halo, the kernel run over the small buffer whole, and the interior copied
+ * back into the cached result. The region arithmetic is the GPU plan's own
+ * (#BKE_paint_layers_effect_halo, #BKE_paint_layers_effect_region_is_exact), so both paths name
+ * the same valid rectangle for the same stroke.
  * \{ */
-
-/** One cached effect: the result buffer, the maps the input was rendered from, the size and the
- * byte cost, keyed by #EffectCacheKey. */
-struct EffectCacheEntry {
-  EffectCacheKey key;
-  int width = 0;
-  int height = 0;
-  std::shared_ptr<ImBuf> color;
-  /** The maps the input was rendered from, with the versions they had. */
-  Vector<AnchorSliceSource> synced;
-  size_t bytes = 0;
-};
 
 /**
  * Total memory the effect cache may hold: a 4K RGBA float buffer is 256 MiB per effect, and this
@@ -2959,7 +2954,7 @@ uint64_t paint_layer_effect_hash(const MaterialPaintLayer &effect, const int cha
   return hash;
 }
 
-bool operator==(const PaintLayerEffectGpuKeyExtras &a, const PaintLayerEffectGpuKeyExtras &b)
+bool operator==(const PaintLayerEffectKeyExtras &a, const PaintLayerEffectKeyExtras &b)
 {
   return a.chain_hash == b.chain_hash && a.input_scalar_hash == b.input_scalar_hash;
 }
@@ -3132,6 +3127,193 @@ static bool paint_layer_effect_compute(const Material &ma,
   return true;
 }
 
+/**
+ * Whether the CPU kernel of \a effect is a local function of the input's neighbourhood, so a
+ * region patch can run the whole kernel over a small buffer and copy the interior back. The kinds
+ * refused first are the ones the kind table names with no
+ * #PAINT_LAYER_KIND_EFFECT_REGION_EXACT -- the single place a new in-local kind registers its
+ * refusal -- because their result reads more than the halo names; the halo
+ * (#BKE_paint_layers_effect_halo) and the region arithmetic are the GPU plan's, and the plan's
+ * reaches do not bound these reads:
+ * - A Noise grains by the hash of the texel's absolute coordinates: the small buffer's texel
+ *   (x, y) stands for the canvas's (x + xmin, y + ymin), and the grain would land shifted.
+ * - A Pixelate cuts the buffer into a grid of the amount's blocks per side -- the block size and
+ *   the grid origin both derive from the buffer's own size, which the small buffer does not share.
+ * - A Channel Split samples its slot map at the texel's own UV, `x / buffer width`, which on the
+ *   small buffer is a different axis of the map than the canvas texel's.
+ * - A Blur Slope walks the gradient of a driver it builds itself: the noise mode tiles it by
+ *   `x / buffer width` like the Channel Split, and the previous-input mode's taps span the
+ *   intensity across the original, farther than the plan's one-texel reach names.
+ * The parameterizations a kind cannot name in the table stay as the checks below: a Color Match
+ * with a picked source and the variation on jitters by the absolute texel (the non-picked source
+ * is a whole-map statistic, whose whole-canvas halo degenerates the region path on its own, and a
+ * picked one without the variation is pointwise), and a Height To Normal in world units scales the
+ * slope by the buffer's own max dimension (`surface_size / max(width, height)`), which the small
+ * buffer does not share.
+ * The whole-canvas kinds (a Fill Area's flood, a Bevel's or a Mask Outline's distance field, a
+ * non-picked Color Match's reduce) are not named: their plan reaches the whole canvas on both
+ * axes, the halo grows the region past it, and the region path refuses itself below -- the full
+ * compute is the same work without the clone.
+ */
+static bool paint_layer_effect_region_update_supported(const MaterialPaintLayer &effect)
+{
+  if (!paint_layer_effect_region_exact(effect)) {
+    return false;
+  }
+  switch (eMaterialPaintLayerFilter(effect.kind_subtype)) {
+    case MA_PAINT_LAYER_FILTER_COLOR_MATCH:
+      return !(paint_layer_kind_param_bool_get(effect, PAINT_LAYER_COLOR_MATCH_VARIATION) &&
+               paint_layer_kind_param_bool_get(effect, PAINT_LAYER_COLOR_MATCH_SOURCE_PICKED));
+    case MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL:
+      return !paint_layer_kind_param_bool_get(effect, PAINT_LAYER_HEIGHT_TO_NORMAL_WORLD_UNITS);
+    default:
+      return true;
+  }
+}
+
+/**
+ * The regional update the effect cache runs instead of #paint_layer_effect_compute when a live
+ * entry's maps moved by one rectangle: the input re-rendered on the changed region grown by the
+ * halo twice, the whole kernel run over the small buffer, and the interior -- the changed region
+ * grown by the halo once, the rectangle the patch makes correct -- copied line by line, RGB and
+ * alpha, into a private copy of the cached result. The kernel is not changed: it reads and writes
+ * a whole #ImBuf, and the small buffer is one, so the full kernel over it is the full compute
+ * restricted to the region -- the reads of every texel of the interior stay inside the small
+ * buffer (or clamp at an edge the canvas bounds, which the full compute clamps the same way).
+ * \a cached is the entry's own buffer, and stays untouched: the patch lands in a clone, so a
+ * frame still laying the cached result keeps its pixels.
+ *
+ * False refuses the patch -- a kind the gate above names, a remapping between a map and the
+ * canvas, a whole-canvas halo -- and the caller falls back to the full compute. The versions are
+ * taken after the small render, the same rule the full compute stamps by.
+ */
+static bool paint_layer_effect_region_compute(
+    const Material &ma,
+    const MaterialPaintLayer &row,
+    const MaterialPaintLayer &effect,
+    const int channel,
+    const int tile_number,
+    const PaintLayerSurfaceRef painted_object,
+    const PaintMaterialCompositeImageLayer &dims_entry,
+    const Span<Image *> images,
+    const bool from_slot,
+    const std::shared_ptr<ImBuf> &cached,
+    const rcti &changed,
+    std::shared_ptr<ImBuf> &r_patched,
+    Vector<AnchorSliceSource> &r_synced,
+    rcti &r_valid)
+{
+  bke::paint_perf::ScopedTimer perf_total("effect.cpu.region");
+  const int width = cached->x;
+  const int height = cached->y;
+  if (!paint_layer_effect_region_update_supported(effect) ||
+      !BKE_paint_layers_effect_region_is_exact(dims_entry, images, width, height))
+  {
+    return false;
+  }
+
+  float params[PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM] = {};
+  composite_filter_params(effect, params);
+  const int halo = BKE_paint_layers_effect_halo(
+      eMaterialPaintLayerFilter(effect.kind_subtype), params, width, height);
+  rcti valid;
+  BKE_paint_layers_effect_region_clip(changed, halo, width, height, valid);
+  if (BLI_rcti_is_empty(&valid)) {
+    return false;
+  }
+  if (valid.xmin == 0 && valid.ymin == 0 && valid.xmax >= width && valid.ymax >= height) {
+    /* The halo of a whole-canvas kind grew the region past the canvas: the patch would re-render
+     * and re-kernel everything, which the full compute does without the clone and the copy. */
+    return false;
+  }
+  /* The small buffer covers the valid region grown by the halo once more: the neighbourhood every
+   * texel of the interior reads stays inside it, so the kernel over the small buffer computes the
+   * interior exactly as the full compute would. */
+  rcti region_small;
+  BKE_paint_layers_effect_region_clip(valid, halo, width, height, region_small);
+  const int region_width = BLI_rcti_size_x(&region_small);
+  const int region_height = BLI_rcti_size_y(&region_small);
+  std::shared_ptr<ImBuf> small = anchor_slice_buffer_new(region_width, region_height);
+  if (small == nullptr) {
+    return false;
+  }
+  {
+    bke::paint_perf::ScopedTimer perf_input("effect.cpu.region.input");
+    /* A row with no map has no content to render, the way the full compute renders none: the
+     * slot's own size gave the canvas, and the kernel lays its result over the empty buffer. */
+    if (!from_slot) {
+      /* The input's own describe, rendered the way the full compute renders it: the region only
+       * narrows which texels the evaluation walks, the description stays the whole canvas's, so a
+       * gradient or a projection lands where the full render would put it. */
+      PaintMaterialCompositeImageLayer entry;
+      if (!BKE_paint_layers_effect_input_describe(
+              ma,
+              row,
+              effect,
+              channel,
+              /*dimensions_only=*/false,
+              /*describe_only=*/false,
+              entry,
+              PaintLayerTileContext{.painted_object = painted_object, .tile_number = tile_number}))
+      {
+        return false;
+      }
+      Vector<float> coverage(int64_t(region_width) * region_height);
+      if (!BKE_paint_material_composite_eval_row_content(entry,
+                                                         small->float_data_for_write(),
+                                                         coverage.data(),
+                                                         &region_small,
+                                                         channel,
+                                                         width,
+                                                         height))
+      {
+        return false;
+      }
+    }
+    perf_input.note("kind=%d size=%dx%d region=%d,%d-%d,%d",
+                    int(effect.kind_subtype),
+                    region_width,
+                    region_height,
+                    region_small.xmin,
+                    region_small.ymin,
+                    region_small.xmax,
+                    region_small.ymax);
+  }
+  /* The whole kernel over the whole small buffer: the kind's own reading of the buffer's texel
+   * grid is the local one the gate above vouched for, and the interior it writes is the interior
+   * the copy below takes. */
+  paint_layer_effect_kernel_apply(*small, effect, /*for_mask=*/false, tile_number);
+
+  std::shared_ptr<ImBuf> patched = paint_layer_anchor_slice_buffer_clone(*cached);
+  if (patched == nullptr) {
+    return false;
+  }
+  const float *src = small->float_buffer.data;
+  float *dst = patched->float_data_for_write();
+  for (const int y : IndexRange(valid.ymin, BLI_rcti_size_y(&valid))) {
+    const float *src_row = src +
+                           (int64_t(y - region_small.ymin) * region_width +
+                            int64_t(valid.xmin - region_small.xmin)) *
+                               4;
+    float *dst_row = dst + (int64_t(y) * width + valid.xmin) * 4;
+    memcpy(dst_row, src_row, size_t(BLI_rcti_size_x(&valid)) * sizeof(float[4]));
+  }
+  /* The versions are taken after the render: an edit that landed while it ran is read next time.
+   * The same maps the entry was described from, the slot included. */
+  r_synced = map_sources_snapshot(images);
+  r_patched = std::move(patched);
+  r_valid = valid;
+  perf_total.note("kind=%d size=%dx%d region=%d,%d-%d,%d",
+                  int(effect.kind_subtype),
+                  width,
+                  height,
+                  valid.xmin,
+                  valid.ymin,
+                  valid.xmax,
+                  valid.ymax);
+  return true;
+}
+
 /** Drop every cached effect buffer, releasing the canvases (a static would outlive the leak check). */
 static void paint_layer_effect_cache_clear()
 {
@@ -3179,12 +3361,26 @@ int paint_layer_effect_cache_entry_count()
 /**
  * The result of the CPU-computed \a effect on \a row's content in \a channel, as a float RGBA
  * buffer at the input's size, scene linear, the input's content alpha in the fourth component.
- * Cached; the kernel and the input's maps decide when it is computed again.
+ * Cached; the kernel and the input's maps decide when it is computed again, and an edit of the
+ * maps that moved by one rectangle costs a region patch instead of the whole recompute (see
+ * #paint_layer_effect_region_compute).
  *
  * \param describe_only: learn nothing but the maps the input reads (into \a r_images) -- the
  *        combined preview asks for this, since it falls back to the CPU for these kinds anyway.
  * \param r_images: the maps the input was rendered from; the composite cache subscribes to them,
  *        so a stroke on any of them reaches it even though the effect reads no Image of its own.
+ * \param changed_region: the rectangle a caller (a bake that knows the stroke's region) offers for
+ *        the regional update; null keeps the old terms, where any map change recomputes the whole
+ *        buffer. The rectangle actually patched is the one the entry's own staleness names, which
+ *        the cache reads from the maps themselves; the offered band decides what the caller learns
+ *        about the answer, not what is patched.
+ * \param r_valid_region: the rectangle of the answer that a map-writing caller can lay from it.
+ *        The answer is current as a whole whichever way the cycle answered, so an offered band
+ *        comes back grown by the halo and clamped to the canvas -- the band the caller's map is
+ *        missing, plus what the kernel reads past it -- a standing result with an offered band
+ *        included. The whole canvas when no band was offered, when the band cannot be narrowed
+ *        (the maps reach the canvas through a remapping), or after a full compute. Empty when the
+ *        offered band was empty (nothing moved that a write could narrow) or the compute failed.
  * \return null when the input could not be rendered or \a describe_only was asked.
  */
 static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
@@ -3195,7 +3391,9 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
                                                             const bool describe_only,
                                                             Vector<Image *> *r_images,
                                                             Image **r_bake_image,
-                                                            PaintLayerSurfaceRef painted_object)
+                                                            PaintLayerSurfaceRef painted_object,
+                                                            const rcti *changed_region,
+                                                            rcti *r_valid_region)
 {
   /* The maps the input reads and its size, described without rendering anything: the maps go to
    * the composite cache's subscriptions, the size decides hits. */
@@ -3254,9 +3452,17 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
    * so the key carries it; the very helper the GPU key uses, transform steps included. With an
    * object the description carries the projection, whose hash holds the surface identity (mesh,
    * slots), so two objects sharing the material keep separate entries.
-   * A memory-only key: nothing here reaches the file. */
-  key.gpu_extras.input_scalar_hash = BKE_paint_layers_effect_input_scalar_hash(dims_entry);
-  return paint_layer_effect_cache_get_or_compute(
+   * The chain fingerprint joins them the same way the GPU key builds it: the described input's
+   * corrections are exactly the effects below this one, and #BKE_paint_layers_effect_chain_hash
+   * stops at the effect's own marker, which the description does not carry -- so the fold names
+   * the same data source the preview's GPU jobs name. A memory-only key: nothing here reaches the
+   * file. */
+  key.key_extras.input_scalar_hash = BKE_paint_layers_effect_input_scalar_hash(dims_entry);
+  key.key_extras.chain_hash = BKE_paint_layers_effect_chain_hash(
+      Span<const PaintMaterialCompositeCorrection>(dims_entry.content_corrections.data(),
+                                                   int64_t(dims_entry.content_corrections.size())),
+      effect.marker);
+  std::shared_ptr<ImBuf> color = paint_layer_effect_cache_get_or_compute_region(
       g_paint_effect_cache,
       g_paint_effect_cache_mutex,
       key,
@@ -3267,7 +3473,53 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
       [&](std::shared_ptr<ImBuf> &r_color, Vector<PaintLayerEffectSource> &r_synced) {
         return paint_layer_effect_compute(
             ma, row, effect, channel, tile_number, r_color, r_synced, painted_object);
+      },
+      changed_region,
+      r_valid_region,
+      [&](const std::shared_ptr<ImBuf> &cached,
+          const rcti &maps_region,
+          std::shared_ptr<ImBuf> &r_patched,
+          Vector<PaintLayerEffectSource> &r_patched_synced,
+          rcti &r_region_valid) {
+        return paint_layer_effect_region_compute(ma,
+                                                 row,
+                                                 effect,
+                                                 channel,
+                                                 tile_number,
+                                                 painted_object,
+                                                 dims_entry,
+                                                 images,
+                                                 dims_from_slot,
+                                                 cached,
+                                                 maps_region,
+                                                 r_patched,
+                                                 r_patched_synced,
+                                                 r_region_valid);
       });
+  if (color != nullptr && r_valid_region != nullptr && changed_region != nullptr &&
+      !BLI_rcti_is_empty(changed_region))
+  {
+    /* The caller offered the band its own subscription saw move -- the staleness its map carries,
+     * in the maps' texel grid. The answer is current as a whole whichever way the cycle answered
+     * (a standing result, a patch, a whole compute), so the band it is missing can be written from
+     * it: the offered band, united with the rectangle the cycle named, grown by the halo -- the
+     * kernel reads past the band it invalidated -- and clamped to the canvas. A band the maps
+     * reach through a remapping is not the input's own texel grid, and no band can be narrowed
+     * there: the whole canvas answers instead. */
+    if (BKE_paint_layers_effect_region_is_exact(dims_entry, images, width, height)) {
+      rcti united = *r_valid_region;
+      BLI_rcti_union(&united, changed_region);
+      float params[PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM] = {};
+      composite_filter_params(effect, params);
+      const int halo = BKE_paint_layers_effect_halo(
+          eMaterialPaintLayerFilter(effect.kind_subtype), params, width, height);
+      BKE_paint_layers_effect_region_clip(united, halo, width, height, *r_valid_region);
+    }
+    else {
+      BLI_rcti_init(r_valid_region, 0, width, 0, height);
+    }
+  }
+  return color;
 }
 
 void paint_layer_owned_effect_cache_drop(const Material &ma,
@@ -3289,13 +3541,26 @@ std::shared_ptr<ImBuf> paint_layer_owned_effect_result_compute(const Material &m
                                                                const MaterialPaintLayer &row,
                                                                const MaterialPaintLayer &effect,
                                                                const int channel,
-                                                               const int tile_number)
+                                                               const int tile_number,
+                                                               const rcti *changed_region,
+                                                               rcti *r_valid_region)
 {
-  /* The cache's key does not see the row's mapping or the effects below, which the bake's hash does:
-   * an entry kept from before such an edit would be written into a bake as the current result. */
-  paint_layer_owned_effect_cache_drop(ma, effect, channel, tile_number);
-  return paint_layer_effect_buffer_get(
-      ma, row, effect, channel, tile_number, /*describe_only=*/false, nullptr, nullptr);
+  /* No forced drop here any more: the reason it stood -- the cache's key not seeing the row's
+   * mapping or the effects below, which the bake's hash does -- is covered by the key itself now,
+   * whose input scalar hash and chain hash fold the same description the bake's hash reads, and
+   * by the region-exact rule the regional update checks. An entry kept from before such an edit
+   * answers a different key, misses, and is computed whole from the description as it is now. */
+  return paint_layer_effect_buffer_get(ma,
+                                       row,
+                                       effect,
+                                       channel,
+                                       tile_number,
+                                       /*describe_only=*/false,
+                                       nullptr,
+                                       nullptr,
+                                       nullptr,
+                                       changed_region,
+                                       r_valid_region);
 }
 
 void paint_layer_owned_effect_input_images(const Material &ma,

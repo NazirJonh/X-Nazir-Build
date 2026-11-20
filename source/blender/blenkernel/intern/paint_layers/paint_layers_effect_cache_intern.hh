@@ -6,11 +6,13 @@
  * \ingroup bke
  *
  * What the CPU effect cache (`paint_layers_composite.cc`) and the GPU effect cache
- * (`paint_layers_effect_gpu_cache.cc`) share: the key of one cached effect, the staleness snapshot
- * of the maps an input renders from, and the LRU container both caches keep their entries in. The
- * container is a template on the entry, and every operation that has to let go of an entry takes
- * the release callable the entry kind needs -- the CPU one releases nothing (the buffer dies with
- * the entry), the GPU one hands the texture back to the hooks that made it.
+ * (`paint_layers_effect_gpu_cache.cc`) share: the key of one cached effect, the entry the row
+ * cache keeps it in, the staleness snapshot of the maps an input renders from, the LRU container
+ * both caches keep their entries in, and the get-or-compute cycle both run -- with the regional
+ * update the row cache offers when its maps moved by one rectangle. The container is a template on
+ * the entry, and every operation that has to let go of an entry takes the release callable the
+ * entry kind needs -- the CPU one releases nothing (the buffer dies with the entry), the GPU one
+ * hands the texture back to the hooks that made it.
  */
 
 #pragma once
@@ -19,6 +21,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <utility>
 
 #include "BLI_rect.h"
 #include "BLI_span.hh"
@@ -123,15 +126,17 @@ struct EffectCacheKey {
   /** The effect kind and its parameters; the input's pixels are the sources' versions below. */
   uint64_t hash = 0;
   /**
-   * The key halves beyond the effect's own parameters. The GPU cache folds in the chain hash (the
-   * effects that precede this one in the row, whose results feed this effect's input) and the input
-   * scalar hash (the input's non-map scalar content -- a projection frame, a mapping, a flat
-   * colour, an adjustment, transform steps -- that no map version carries). The CPU row effect
-   * cache leaves both at zero.
+   * The key halves beyond the effect's own parameters, shared by every cache (CPU row, CPU mask,
+   * GPU): the chain hash (the effects that precede this one in the row, whose results feed this
+   * effect's input) and the input scalar hash (the input's non-map scalar content -- a projection
+   * frame, a mapping, a flat colour, an adjustment, transform steps -- that no map version
+   * carries). The CPU row cache folds both from the described input it computes from, the GPU
+   * cache from its jobs' description, so an entry kept from before an edit of the row's mapping or
+   * of the effects below misses instead of answering.
    * The mask effect cache (CPU) uses the chain half for what its input is made of: the mask built
    * up to the item, which no map version carries either.
    */
-  PaintLayerEffectGpuKeyExtras gpu_extras;
+  PaintLayerEffectKeyExtras key_extras;
 };
 
 /**
@@ -150,7 +155,7 @@ inline bool paint_layer_effect_key_same_effect(const EffectCacheKey &a, const Ef
 inline bool paint_layer_effect_key_equal(const EffectCacheKey &a, const EffectCacheKey &b)
 {
   return paint_layer_effect_key_same_effect(a, b) && a.tile_number == b.tile_number &&
-         a.hash == b.hash && a.gpu_extras == b.gpu_extras;
+         a.hash == b.hash && a.key_extras == b.key_extras;
 }
 
 /**
@@ -160,6 +165,29 @@ inline bool paint_layer_effect_key_equal(const EffectCacheKey &a, const EffectCa
  * schema readers it folds.
  */
 uint64_t paint_layer_effect_hash(const MaterialPaintLayer &effect, int channel);
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Effect cache entry
+ * \{ */
+
+/**
+ * One entry of the CPU row effect cache (`paint_layers_composite.cc`): the result buffer, the maps
+ * the input was rendered from, the size and the byte cost, keyed by #EffectCacheKey. The mask
+ * effect cache keeps its own entry type beside its own store; the shared cycle below reads only
+ * the fields named here of both. The input's fingerprints live in the key alone -- a hit already
+ * implies their equality -- so no entry carries a second copy.
+ */
+struct EffectCacheEntry {
+  EffectCacheKey key;
+  int width = 0;
+  int height = 0;
+  std::shared_ptr<ImBuf> color;
+  /** The maps the input was rendered from, with the versions they had. */
+  Vector<PaintLayerEffectSource> synced;
+  size_t bytes = 0;
+};
 
 /** \} */
 
@@ -264,6 +292,22 @@ template<typename Entry> struct PaintLayerEffectCacheStore {
 /** \name Effect cache get or compute
  * \{ */
 
+/* Declared first: the no-region wrapper below forwards to it, and the unqualified call must find
+ * the name at the wrapper's definition, not only at instantiation. */
+template<typename Entry, typename Compute, typename RegionUpdate>
+std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute_region(
+    PaintLayerEffectCacheStore<Entry> &store,
+    std::mutex &mutex,
+    const EffectCacheKey &key,
+    const int width,
+    const int height,
+    const Span<Image *> images,
+    const size_t budget,
+    Compute &&compute,
+    const rcti *changed_region,
+    rcti *r_valid_region,
+    RegionUpdate &&region_update);
+
 /**
  * The one cycle both effect caches run -- the row's (`paint_layer_effect_buffer_get`) and the mask
  * item's (`paint_layer_mask_effect_buffer_get`): find a live entry of \a key at \a width x
@@ -285,6 +329,64 @@ std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute(
     const size_t budget,
     Compute &&compute)
 {
+  /* No region is offered, so the cycle below never takes its regional branch: a hit still requires
+   * the maps to have moved by nothing, exactly as it did before the branch existed. */
+  return paint_layer_effect_cache_get_or_compute_region(
+      store,
+      mutex,
+      key,
+      width,
+      height,
+      images,
+      budget,
+      std::forward<Compute>(compute),
+      static_cast<const rcti *>(nullptr),
+      static_cast<rcti *>(nullptr),
+      [](const std::shared_ptr<ImBuf> &,
+         const rcti &,
+         std::shared_ptr<ImBuf> &,
+         Vector<PaintLayerEffectSource> &,
+         rcti &) { return false; });
+}
+
+/**
+ * The same cycle with the regional update: when a live entry's maps moved by one rectangle
+ * (#ePixelChange::Region) and the caller offers \a changed_region, \a region_update may patch the
+ * entry instead of the whole-canvas recompute. The update receives the entry's own result buffer
+ * (a private copy of the shared pointer, taken under the mutex) and the rectangle the maps moved
+ * by -- the one \a map_sources_changes reported, which is the exact truth the staleness came from,
+ * not the caller's earlier estimate -- and fills \a r_color with the patched result and \a
+ * r_synced with the maps' fresh snapshot, naming the rectangle the patch made correct in \a
+ * r_valid. False, or an update refused by the caller's own gates (a kind whose kernel is not a
+ * local function of the neighbourhood), leaves the entry to \a compute as before.
+ *
+ * The update runs outside the mutex, like \a compute: the copy taken under it is what it patches,
+ * and the patched result is put back with the same drop-and-insert the full compute ends with, so
+ * an entry another thread replaced or evicted meanwhile costs the patch nothing but its work. Two
+ * threads that patch together may both run -- the same benign duplicate the compute allows, the
+ * second result replacing the first. \a r_valid_region, when asked, is filled on every answer with
+ * the rectangle of the answer a map-writing caller can lay from it: the whole canvas after a full
+ * compute, the caller's own staleness band on a standing result (current as a whole, so whatever
+ * band the caller names can be written from it), the patch's band after an update. Empty only when
+ * the offered band was empty (nothing moved that a write could narrow) or the compute failed.
+ */
+template<typename Entry, typename Compute, typename RegionUpdate>
+std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute_region(
+    PaintLayerEffectCacheStore<Entry> &store,
+    std::mutex &mutex,
+    const EffectCacheKey &key,
+    const int width,
+    const int height,
+    const Span<Image *> images,
+    const size_t budget,
+    Compute &&compute,
+    const rcti *changed_region,
+    rcti *r_valid_region,
+    RegionUpdate &&region_update)
+{
+  std::shared_ptr<ImBuf> cached;
+  rcti maps_region;
+  bool region_offered = false;
   {
     std::lock_guard<std::mutex> lock(mutex);
     for (int i = 0; i < int(store.entries.size()); i++) {
@@ -295,20 +397,82 @@ std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute(
       if (entry.width != width || entry.height != height) {
         break;
       }
-      rcti region;
-      if (map_sources_changes(entry.synced, images, region) != ePixelChange::None) {
+      const ePixelChange change = map_sources_changes(entry.synced, images, maps_region);
+      if (change == ePixelChange::None) {
+        /* The result stands: the maps it was rendered from have not moved since. The valid region
+         * is the caller's own staleness band when it offered one -- the answer is current as a
+         * whole, so the band a caller that lays a map from it is missing can be written straight
+         * from it -- and the whole canvas otherwise, the caller knowing no narrower band to name.
+         * #paint_layer_effect_buffer_get grows an offered band by the halo and clamps it. */
+        std::shared_ptr<ImBuf> color = entry.color;
+        if (r_valid_region != nullptr) {
+          if (changed_region != nullptr) {
+            *r_valid_region = *changed_region;
+          }
+          else {
+            BLI_rcti_init(r_valid_region, 0, width, 0, height);
+          }
+        }
+        /* Move to the back: the vector is the LRU order. */
+        store.touch(i);
+        return color;
+      }
+      if (change == ePixelChange::Region && changed_region != nullptr) {
+        /* The entry was found by the full key equality above -- parameters, tile and both input
+         * fingerprints -- so it names this call's own base: the only thing left to judge is how
+         * its maps moved, which #map_sources_changes just reported. */
+        /* A private copy of the shared pointer: the update runs outside the mutex, and the store
+         * may touch, replace or evict the entry while it runs. The patched result is put back
+         * below under a fresh lock, whatever became of the entry meanwhile. */
+        cached = entry.color;
+        region_offered = true;
         break;
       }
-      /* Move to the back: the vector is the LRU order. */
-      std::shared_ptr<ImBuf> color = entry.color;
-      store.touch(i);
-      return color;
+      /* A full change, a region the caller offers no patch for, or a size that no longer fits:
+       * the entry is stale, the whole compute answers. */
+      break;
     }
+  }
+
+  if (region_offered) {
+    std::shared_ptr<ImBuf> patched;
+    Vector<PaintLayerEffectSource> patched_synced;
+    rcti patched_valid;
+    if (region_update(cached, maps_region, patched, patched_synced, patched_valid)) {
+      const size_t bytes = size_t(patched->x) * size_t(patched->y) * sizeof(float[4]);
+      std::lock_guard<std::mutex> lock(mutex);
+      /* The same put-back the full compute ends with: an entry of the effect and tile is replaced
+       * by the patch, the other tiles' entries stay, and a buffer still shared with a live
+       * description keeps its pixels through its own reference. */
+      const auto no_release = [](Entry &) {};
+      store.drop_stale(key, no_release);
+      if (bytes <= budget) {
+        store.enforce_budget(bytes, budget, no_release);
+        Entry entry;
+        entry.key = key;
+        entry.width = patched->x;
+        entry.height = patched->y;
+        entry.color = patched;
+        entry.synced = std::move(patched_synced);
+        entry.bytes = bytes;
+        store.total_bytes += bytes;
+        store.entries.append(std::move(entry));
+      }
+      if (r_valid_region != nullptr) {
+        *r_valid_region = patched_valid;
+      }
+      return patched;
+    }
+    /* The patch was refused (the kind, the region or the input): the full compute answers, the
+     * cached buffer stays until it returns. */
   }
 
   std::shared_ptr<ImBuf> color;
   Vector<PaintLayerEffectSource> synced;
   if (!compute(color, synced)) {
+    if (r_valid_region != nullptr) {
+      BLI_rcti_init(r_valid_region, 0, 0, 0, 0);
+    }
     return {};
   }
   const size_t bytes = size_t(color->x) * size_t(color->y) * sizeof(float[4]);
@@ -331,6 +495,10 @@ std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute(
     entry.bytes = bytes;
     store.total_bytes += bytes;
     store.entries.append(std::move(entry));
+  }
+  if (r_valid_region != nullptr) {
+    /* The whole result is new: every texel of it is worth writing where a caller keeps one. */
+    BLI_rcti_init(r_valid_region, 0, width, 0, height);
   }
   return color;
 }

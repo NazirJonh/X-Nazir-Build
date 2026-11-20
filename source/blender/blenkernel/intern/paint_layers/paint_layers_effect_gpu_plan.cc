@@ -7,9 +7,10 @@
  *
  * The pure half of the GPU effect pass (see the "GPU Effect Pass Plan" section of
  * #BKE_paint_layers_composite.hh): the pass plan a filter's kind and parameters decide, the
- * neighbourhood halo the plan implies, the dispatch rectangle each pass of it computes, and the two
- * GPU-only key fingerprints. No GPU and no dispatch lives here, so the GTests read the same numbers
- * the gather runs, and the gather cannot drift from what the tests hold.
+ * neighbourhood halo the plan implies, the dispatch rectangle each pass of it computes, and the
+ * two input-key fingerprints the effect caches share. No GPU and no dispatch lives here, so the
+ * GTests read the same numbers the gather runs, and the gather cannot drift from what the tests
+ * hold.
  *
  * The kernels the plan describes are ports of `paint_layer_effect_kernels.cc`, kept in that file's
  * order of operations so `BLENDER_PBR_GPU_VERIFY` compares one number. The file is registered in

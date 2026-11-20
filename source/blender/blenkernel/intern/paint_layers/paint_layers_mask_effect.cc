@@ -168,12 +168,12 @@ static EffectCacheKey mask_effect_key_get(const Material &ma,
      * zero. */
     const int input_channel = paint_layer_effect_input_channel(effect,
                                                                PAINT_MATERIAL_CHANNEL_BASE_COLOR);
-    key.gpu_extras.chain_hash = paint_layer_anchor_point_slice_hash(ma, effect, input_channel);
+    key.key_extras.chain_hash = paint_layer_anchor_point_slice_hash(ma, effect, input_channel);
     /* A projected source reads the surface of the object the grey is computed for: the slice hash
      * holds the frame but not the surface, so one source projected over two objects would share an
      * entry. Zero for a source that does not project. */
     const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, effect);
-    key.gpu_extras.input_scalar_hash = (ref.source_row != nullptr) ?
+    key.key_extras.input_scalar_hash = (ref.source_row != nullptr) ?
                                            paint_layer_row_projection_hash(ma,
                                                                            *ref.source_row,
                                                                            input_channel,
@@ -182,11 +182,11 @@ static EffectCacheKey mask_effect_key_get(const Material &ma,
                                            0;
   }
   else {
-    key.gpu_extras.chain_hash = paint_layer_mask_prefix_hash(ma, row, effect);
+    key.key_extras.chain_hash = paint_layer_mask_prefix_hash(ma, row, effect);
     /* The prefix hash above sees an item's mapping but not its projection frame or the surface the
      * frame is read over, which the grey depends on. Zero for a mask with no projected item, so the
      * key of every other mask is the one it always had. */
-    key.gpu_extras.input_scalar_hash = paint_layer_mask_prefix_projection_hash(
+    key.key_extras.input_scalar_hash = paint_layer_mask_prefix_projection_hash(
         ma, row, effect, tile_number, painted_object);
   }
   return key;

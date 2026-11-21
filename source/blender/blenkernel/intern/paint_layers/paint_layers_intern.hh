@@ -288,6 +288,9 @@ size_t paint_layer_effect_cache_bytes();
 /** Number of entries the effect cache holds; for tests of the keying and the eviction. */
 int paint_layer_effect_cache_entry_count();
 
+/** Cropped partial effect computes so far; for tests proving a bake took the partial path. */
+size_t paint_layer_effect_partial_compute_count();
+
 /** Override the effect cache's byte budget; tests use a small one. */
 void paint_layer_effect_cache_set_budget(size_t bytes);
 

@@ -824,6 +824,30 @@ static bool composite_ibuf_is_rgba(const ImBuf *ibuf, const int width, const int
   return ibuf->byte_buffer.data != nullptr || ibuf->float_buffer.data != nullptr;
 }
 
+/**
+ * Whether \a ibuf is a readable RGBA buffer that a CPU-computed effect can be sampled from: the
+ * stack's own dimensions for a whole-canvas result, or a cropped one whose origin places it inside
+ * the stack. A cropped buffer is only ever sampled inside its covered rectangle.
+ */
+static bool composite_effect_ibuf_is_valid(const ImBuf *ibuf,
+                                           const bool cropped,
+                                           const int origin[2],
+                                           const int width,
+                                           const int height)
+{
+  if (ibuf == nullptr || !ELEM(ibuf->channels, 0, 4)) {
+    return false;
+  }
+  if (ibuf->byte_buffer.data == nullptr && ibuf->float_buffer.data == nullptr) {
+    return false;
+  }
+  if (!cropped) {
+    return ibuf->x == width && ibuf->y == height;
+  }
+  return origin[0] >= 0 && origin[1] >= 0 && origin[0] + ibuf->x <= width &&
+         origin[1] + ibuf->y <= height;
+}
+
 /** The colorspace name of \a ibuf's own buffer, or null when its buffer names none. */
 static const char *composite_buffer_colorspace_name(const ImBuf *ibuf)
 {
@@ -899,6 +923,59 @@ static void composite_decode_tile(const ImBuf *ibuf,
   }
   if (BKE_paint_material_composite_colorspace_is_converted(colorspace)) {
     IMB_colormanagement_colorspace_to_scene_linear(dst, tw, th, 4, colorspace, false);
+  }
+}
+
+/**
+ * Decode one tile of a CPU-computed effect's result into \a dst, accounting for a cropped buffer.
+ *
+ * \a origin is where the buffer's (0, 0) sits on the canvas, so the canvas \a tile is read at
+ * `tile - origin`. Texels outside the buffer are written transparent: a cropped result is only
+ * meant to be sampled inside its covered rectangle, and the guard keeps a caller that asks past it
+ * from reading out of bounds. A whole-canvas result (not \a cropped) takes the plain decode, so the
+ * every-texel path costs no branch.
+ */
+static void composite_decode_effect_tile(const ImBuf *ibuf,
+                                         const char *colorspace_name,
+                                         const rcti &tile,
+                                         const bool cropped,
+                                         const int origin[2],
+                                         float *dst)
+{
+  if (!cropped) {
+    composite_decode_tile(ibuf, colorspace_name, tile, dst);
+    return;
+  }
+  const int64_t count = int64_t(BLI_rcti_size_x(&tile)) * BLI_rcti_size_y(&tile);
+  rcti local;
+  BLI_rcti_init(&local,
+                tile.xmin - origin[0],
+                tile.xmax - origin[0],
+                tile.ymin - origin[1],
+                tile.ymax - origin[1]);
+  memset(dst, 0, size_t(count) * sizeof(float[4]));
+  rcti bounds;
+  BLI_rcti_init(&bounds, 0, ibuf->x, 0, ibuf->y);
+  rcti isect;
+  if (!BLI_rcti_isect(&local, &bounds, &isect)) {
+    return;
+  }
+  if (isect.xmin == local.xmin && isect.ymin == local.ymin && isect.xmax == local.xmax &&
+      isect.ymax == local.ymax)
+  {
+    /* The whole tile lies inside the buffer: decode it in place. */
+    composite_decode_tile(ibuf, colorspace_name, local, dst);
+    return;
+  }
+  Vector<float> decoded(int64_t(BLI_rcti_size_x(&isect)) * BLI_rcti_size_y(&isect) * 4);
+  composite_decode_tile(ibuf, colorspace_name, isect, decoded.data());
+  const int tile_width = BLI_rcti_size_x(&tile);
+  const int isect_width = BLI_rcti_size_x(&isect);
+  for (int y = isect.ymin; y < isect.ymax; y++) {
+    float *row = dst + (int64_t(y - local.ymin) * tile_width + (isect.xmin - local.xmin)) * 4;
+    memcpy(row,
+           decoded.data() + int64_t(y - isect.ymin) * isect_width * 4,
+           size_t(isect_width) * sizeof(float[4]));
   }
 }
 
@@ -1366,10 +1443,12 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
         continue;
       }
       correction_storage.resize(count * 4);
-      composite_decode_tile(correction.effect_color,
-                            correction.effect_colorspace_name,
-                            tile,
-                            correction_storage.data());
+      composite_decode_effect_tile(correction.effect_color,
+                                   correction.effect_colorspace_name,
+                                   tile,
+                                   correction.effect_cropped,
+                                   correction.effect_origin,
+                                   correction_storage.data());
       for (int64_t i = 0; i < count; i++) {
         float *s = r_color + i * 4;
         const float *filtered = correction_storage.data() + i * 4;
@@ -1771,7 +1850,11 @@ static bool composite_layer_validate_linear(const PaintMaterialCompositeLayer &l
       return false;
     }
     if (correction.effect_color != nullptr &&
-        !composite_ibuf_is_rgba(correction.effect_color, width, height))
+        !composite_effect_ibuf_is_valid(correction.effect_color,
+                                        correction.effect_cropped,
+                                        correction.effect_origin,
+                                        width,
+                                        height))
     {
       return false;
     }
@@ -2962,10 +3045,20 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
       buffer.filter = correction.filter;
       buffer.filter_ramp = correction.filter_ramp;
       buffer.filter_curves = correction.filter_curves;
-      /* A CPU-computed effect's result is owned by the description; the evaluation borrows it. It is
-       * always at the stack's resolution, so a reduced grid reads an owned resample of it. */
-      buffer.effect_color = composite_buffer_to_eval_grid(
-          correction.effect_color.get(), ref_width, ref_height, r_locks);
+      /* A CPU-computed effect's result is owned by the description; the evaluation borrows it. A
+       * whole-canvas result is always at the stack's resolution, so a reduced grid reads an owned
+       * resample of it. A cropped one is borrowed as it is -- a resample would stretch it -- and
+       * its origin places it on the grid the evaluator reads. */
+      if (correction.effect_cropped) {
+        buffer.effect_color = correction.effect_color.get();
+        buffer.effect_origin[0] = correction.effect_origin[0];
+        buffer.effect_origin[1] = correction.effect_origin[1];
+        buffer.effect_cropped = true;
+      }
+      else {
+        buffer.effect_color = composite_buffer_to_eval_grid(
+            correction.effect_color.get(), ref_width, ref_height, r_locks);
+      }
       buffer.effect_result_has_alpha = correction.effect_result_has_alpha;
       if (correction.effect_image != nullptr) {
         /* An effect that owns its result keeps it in a map of its own: read at the composite's grid

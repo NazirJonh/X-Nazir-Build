@@ -790,6 +790,18 @@ struct PaintMaterialCompositeCorrection : PaintMaterialCompositeConstant {
    */
   std::shared_ptr<ImBuf> effect_color = nullptr;
   /**
+   * Where (0, 0) of #effect_color sits on the canvas. Zero for a buffer at the stack's own
+   * dimensions; a bake render that knows its rectangle may hand over a cropped buffer instead, and
+   * the evaluator then samples it through this origin. Only meaningful with #effect_cropped.
+   */
+  int effect_origin[2] = {0, 0};
+  /**
+   * Whether #effect_color is a cropped buffer rather than one of the stack's dimensions. A cropped
+   * buffer is never resampled onto a reduced evaluation grid: it is borrowed as it is, and the
+   * origin places it.
+   */
+  bool effect_cropped = false;
+  /**
    * The maps the effect's input was rendered from. The effect reads no Image of its own, so the
    * composite cache subscribes to these to see a stroke on the row's map.
    */
@@ -867,6 +879,9 @@ struct PaintMaterialCompositeCorrectionBuffer : PaintMaterialCompositeConstant {
   const CurveMapping *filter_curves = nullptr;
   /** Borrowed from #PaintMaterialCompositeCorrection::effect_color, which keeps it alive. */
   ImBuf *effect_color = nullptr;
+  /** See #PaintMaterialCompositeCorrection::effect_origin and #effect_cropped. */
+  int effect_origin[2] = {0, 0};
+  bool effect_cropped = false;
   /** Colorspace name of #effect_color's own buffer when it is an effect's map, or null. */
   const char *effect_colorspace_name = nullptr;
   /** See #PaintMaterialCompositeCorrection::effect_result_has_alpha. */

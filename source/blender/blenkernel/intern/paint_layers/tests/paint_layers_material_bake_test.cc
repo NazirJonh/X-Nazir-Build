@@ -30,6 +30,7 @@
 #include "BKE_wm_runtime.hh"
 
 #include "BLI_index_range.hh"
+#include "BLI_listbase.h"
 #include "BLI_rect.h"
 #include "BLI_uuid.h"
 
@@ -2037,6 +2038,25 @@ class PaintLayersOwnedEffectTest : public PaintLayersMaterialBakeTest {
   }
 
   /**
+   * Render \a row through the render the planner and the worker call, over \a dst (null for the
+   * whole row), and return the base colour's output pixels.
+   */
+  Vector<float> render_row_node(const MaterialPaintLayer &row, const int size, const int *dst)
+  {
+    Vector<float> color(int64_t(size) * size * 4);
+    Vector<float> coverage(int64_t(size) * size);
+    EXPECT_TRUE(BKE_paint_layers_bake_render_node(*ma,
+                                                  row,
+                                                  PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                                  size,
+                                                  color.data(),
+                                                  coverage.data(),
+                                                  dst,
+                                                  nullptr));
+    return color;
+  }
+
+  /**
    * A Fill row in the Always mode carrying a fresh \a map_size square map through a CLIP mapping
    * of \a scale, with a box Blur of radius 2 narrowed to Base Color, at an explicit square bake
    * \a size, whose maps the planner renders. This is the row kind the planner's band and footprint
@@ -2045,15 +2065,18 @@ class PaintLayersOwnedEffectTest : public PaintLayersMaterialBakeTest {
    * the blur's halo. The blur's extra channel records are removed so the subtree stays under the
    * node budget the planner weighs a row by: a light due row is rendered by the plan itself, which
    * is the path the narrowing serves (a heavy one leaves for the worker job, which resolves the
-   * same footprint at creation). \a r_row and \a r_map hand the row and its source map back for
-   * edits and read-back.
+   * same footprint at creation). \a effect_kind picks the CPU effect on top of the row: a box Blur
+   * by default, another kind for the refusals the partial effect path makes. \a r_row and \a r_map
+   * hand the row and its source map back for edits and read-back.
    */
   MaterialPaintLayer *add_bounded_fill(MaterialPaintLayer **r_row,
                                        Image **r_map,
                                        const float scale,
                                        const int size,
                                        const char *name,
-                                       const int map_size = 8)
+                                       const int map_size = 8,
+                                       const eMaterialPaintLayerFilter effect_kind =
+                                           MA_PAINT_LAYER_FILTER_BLUR)
   {
     const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     Image *map = BKE_image_add_generated(
@@ -2077,11 +2100,13 @@ class PaintLayersOwnedEffectTest : public PaintLayersMaterialBakeTest {
     const float scale2[2] = {scale, scale};
     EXPECT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, row, scale2));
     EXPECT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, row, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
-    MaterialPaintLayer *blur = BKE_paint_layers_filter_add(*ma, row, MA_PAINT_LAYER_FILTER_BLUR);
+    MaterialPaintLayer *blur = BKE_paint_layers_filter_add(*ma, row, effect_kind);
     EXPECT_NE(blur, nullptr);
-    EXPECT_TRUE(
-        paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
-    EXPECT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 2));
+    if (effect_kind == MA_PAINT_LAYER_FILTER_BLUR) {
+      EXPECT_TRUE(
+          paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+      EXPECT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 2));
+    }
     for (int i = blur->channels_num - 1; i >= 0; i--) {
       const int channel = int(blur->channels[i].channel);
       if (channel != int(PAINT_MATERIAL_CHANNEL_BASE_COLOR)) {
@@ -3149,9 +3174,12 @@ TEST_F(PaintLayersOwnedEffectTest, an_unbounded_fill_row_keeps_re_rendering_whol
 
   edit_map_rect(*map, rcti{0, 8, 0, 8}, 200);
   BKE_paint_layers_bake_notice_changes(*ma);
+  const size_t partial_before = paint_layer_effect_partial_compute_count();
   ASSERT_TRUE(run_plan());
   const Vector<uchar> after = read_map(*row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
 
+  EXPECT_EQ(paint_layer_effect_partial_compute_count(), partial_before)
+      << "an unbounded row offers no rectangle, so the effect keeps the whole-canvas compute";
   EXPECT_NE(map_byte_at(after, 512, 460, 460), 255)
       << "an unbounded row is rendered whole; the sentinel outside any footprint is rewritten";
   EXPECT_NE(map_byte_at(after, 512, 460, 460), map_byte_at(before, 512, 460, 460));
@@ -3387,11 +3415,18 @@ TEST_F(PaintLayersOwnedEffectTest, a_bounded_fill_row_heavy_edit_is_written_in_i
   edit_map_rect(*reference_map, rcti{0, 8, 0, 8}, 200);
   BKE_paint_layers_bake_notice_changes(*ma);
 
+  /* A whole-canvas effect cannot be cropped; a neighbourhood one can, and this narrowed bake is
+   * the one that must offer its rectangle to the folded Blur. */
+  const size_t partial_before = paint_layer_effect_partial_compute_count();
+
   ASSERT_TRUE(run_bake_job());
   Image *after_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
   ASSERT_EQ(after_map, base_map) << "the narrowed write reuses the map, it does not replace it";
   const Vector<uchar> after = read_map(*after_map);
   const Vector<uchar> full = read_map(*reference->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
+
+  EXPECT_GT(paint_layer_effect_partial_compute_count(), partial_before)
+      << "the narrowed bake computed the folded Blur over its rectangle alone";
 
   EXPECT_EQ(map_byte_at(after, 2048, 1000, 1000), 255)
       << "the job wrote the footprint's rectangle alone; the sentinel outside it stands";
@@ -3427,8 +3462,11 @@ TEST_F(PaintLayersOwnedEffectTest, a_full_update_re_renders_a_heavy_fill_row_in_
   ASSERT_FALSE(BKE_paint_layers_bake_changed_region(*ma, *row, band))
       << "the test's premise is a due row with no subscription band";
 
+  const size_t partial_before = paint_layer_effect_partial_compute_count();
   ASSERT_TRUE(run_bake_job());
   const Vector<uchar> after = read_map(*row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
+  EXPECT_GT(paint_layer_effect_partial_compute_count(), partial_before)
+      << "a full update still offers the footprint to the folded effect";
   EXPECT_EQ(map_byte_at(after, 2048, 1000, 1000), 255)
       << "the job's full render took the footprint's rectangle; the sentinel outside it stands";
   EXPECT_EQ(map_byte_at(read_map(*row->bake->coverage), 2048, 1000, 1000), 255)
@@ -3462,6 +3500,185 @@ TEST_F(PaintLayersOwnedEffectTest, a_structural_change_re_renders_a_heavy_fill_r
   const Vector<uchar> after = read_map(*row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
   EXPECT_NE(map_byte_at(after, 2048, 1000, 1000), 255)
       << "a hash mismatch renders whole; the old content outside the footprint is not kept";
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Cropped folded-effect compute
+ *
+ * A bake render that knows its rectangle offers it to the folded CPU effect: a neighbourhood kind
+ * (the Blur) computes only that rectangle grown by its halo and hands the cropped buffer over with
+ * its origin, the CPU composite samples it, and nothing of it enters the effect cache. A whole-map
+ * kind, a whole-map correction below the effect, a non-region kind and a full render keep the
+ * whole-canvas path. The tests render the node directly, which is what the planner and the worker
+ * call, and compare the rectangle with the full render of the same row.
+ * \{ */
+
+TEST_F(PaintLayersOwnedEffectTest, a_partial_folded_effect_matches_the_full_render_in_its_rect)
+{
+  MaterialPaintLayer *row = nullptr;
+  Image *map = nullptr;
+  add_bounded_fill(&row, &map, 4.0f, 512, "PartialRect");
+  ASSERT_NE(row, nullptr);
+  /* The reference: the whole row as every full render lays it. */
+  const Vector<float> full = render_row_node(*row, 512, nullptr);
+  const size_t partial_before = paint_layer_effect_partial_compute_count();
+
+  const int dst[4] = {0, 0, 256, 256};
+  const Vector<float> partial = render_row_node(*row, 512, dst);
+
+  EXPECT_EQ(paint_layer_effect_partial_compute_count(), partial_before + 1)
+      << "the folded Blur computed the offered rectangle, not the whole canvas";
+  ASSERT_EQ(partial.size(), full.size());
+  for (const int y : IndexRange(0, 256)) {
+    for (const int x : IndexRange(0, 256)) {
+      for (const int k : IndexRange(4)) {
+        const int64_t i = (int64_t(y) * 512 + x) * 4 + k;
+        EXPECT_NEAR(partial[i], full[i], 1e-4f)
+            << "the cropped effect's pixel " << x << "," << y << " component " << k
+            << " is the full render's";
+      }
+    }
+  }
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_partial_folded_effect_matches_the_full_render_at_the_halo_edge)
+{
+  MaterialPaintLayer *row = nullptr;
+  Image *map = nullptr;
+  /* Scale 4 over 512: the content ends at 128, and the box Blur radius 2 reaches two texels past
+   * it -- the band the crop has to carry but the composite never samples outside the footprint. */
+  add_bounded_fill(&row, &map, 4.0f, 512, "PartialHalo");
+  ASSERT_NE(row, nullptr);
+  const Vector<float> full = render_row_node(*row, 512, nullptr);
+
+  const int dst[4] = {0, 0, 256, 256};
+  const Vector<float> partial = render_row_node(*row, 512, dst);
+  ASSERT_EQ(partial.size(), full.size());
+
+  /* Just past the content's edge, inside the halo: the cropped kernel's band has to agree with the
+   * full one, or a stroke at the edge would leave a seam. */
+  for (const int x : {128, 129, 130, 131, 135}) {
+    for (const int k : IndexRange(4)) {
+      const int64_t i = (int64_t(60) * 512 + x) * 4 + k;
+      EXPECT_NEAR(partial[i], full[i], 1e-4f)
+          << "the halo texel " << x << ",60 component " << k << " matches the full render";
+    }
+  }
+  for (const int y : {128, 129, 130}) {
+    for (const int k : IndexRange(4)) {
+      const int64_t i = (int64_t(y) * 512 + 60) * 4 + k;
+      EXPECT_NEAR(partial[i], full[i], 1e-4f)
+          << "the halo texel 60," << y << " component " << k << " matches the full render";
+    }
+  }
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_whole_map_effect_below_the_blur_refuses_the_partial_compute)
+{
+  MaterialPaintLayer *row = nullptr;
+  Image *map = nullptr;
+  add_bounded_fill(&row, &map, 4.0f, 512, "WholeMapBelow");
+  ASSERT_NE(row, nullptr);
+  MaterialPaintLayer *match = BKE_paint_layers_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_COLOR_MATCH);
+  ASSERT_NE(match, nullptr);
+  /* Below the Blur: the Blur reads what the match lays, which is a whole-canvas statistic. The
+   * effects list is bottom to top; `BKE_paint_layers_reorder` moves stack rows, not effects. */
+  BLI_remlink(&row->effects, match);
+  BLI_addhead(&row->effects, match);
+
+  const Vector<float> full = render_row_node(*row, 512, nullptr);
+  const size_t partial_before = paint_layer_effect_partial_compute_count();
+  const int dst[4] = {0, 0, 256, 256};
+  const Vector<float> partial = render_row_node(*row, 512, dst);
+
+  EXPECT_EQ(paint_layer_effect_partial_compute_count(), partial_before)
+      << "a whole-map correction below the effect makes the input whole-canvas; no crop is made";
+  ASSERT_EQ(partial.size(), full.size());
+  for (const int y : IndexRange(0, 256)) {
+    for (const int x : IndexRange(0, 256)) {
+      for (const int k : IndexRange(4)) {
+        const int64_t i = (int64_t(y) * 512 + x) * 4 + k;
+        EXPECT_NEAR(partial[i], full[i], 1e-4f)
+            << "the whole-canvas fallback's pixel " << x << "," << y << " matches the full render";
+      }
+    }
+  }
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_non_region_effect_kind_refuses_the_partial_compute)
+{
+  MaterialPaintLayer *row = nullptr;
+  Image *map = nullptr;
+  /* A Noise grains by the texel's absolute coordinates, so the region gate refuses it: the full
+   * compute alone puts the grain where the full render puts it. */
+  add_bounded_fill(&row, &map, 4.0f, 512, "NoisePartial", 8, MA_PAINT_LAYER_FILTER_NOISE);
+  ASSERT_NE(row, nullptr);
+  const Vector<float> full = render_row_node(*row, 512, nullptr);
+  const size_t partial_before = paint_layer_effect_partial_compute_count();
+  const int dst[4] = {0, 0, 256, 256};
+  const Vector<float> partial = render_row_node(*row, 512, dst);
+
+  EXPECT_EQ(paint_layer_effect_partial_compute_count(), partial_before)
+      << "a kind whose kernel is not a local function of the neighbourhood keeps the full compute";
+  ASSERT_EQ(partial.size(), full.size());
+  for (const int y : IndexRange(0, 256)) {
+    for (const int x : IndexRange(0, 256)) {
+      for (const int k : IndexRange(4)) {
+        const int64_t i = (int64_t(y) * 512 + x) * 4 + k;
+        EXPECT_NEAR(partial[i], full[i], 1e-4f)
+            << "the full-compute fallback's pixel " << x << "," << y << " matches the full render";
+      }
+    }
+  }
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_full_render_does_not_compute_a_partial_effect)
+{
+  MaterialPaintLayer *row = nullptr;
+  Image *map = nullptr;
+  add_bounded_fill(&row, &map, 4.0f, 512, "FullNoPartial");
+  ASSERT_NE(row, nullptr);
+  /* An identical row, laid after the same generated map: its full render is the reference. */
+  MaterialPaintLayer *reference = nullptr;
+  Image *reference_map = nullptr;
+  add_bounded_fill(&reference, &reference_map, 4.0f, 512, "FullNoPartialRef");
+  ASSERT_NE(reference, nullptr);
+
+  const size_t partial_before = paint_layer_effect_partial_compute_count();
+  const Vector<float> full = render_row_node(*row, 512, nullptr);
+  EXPECT_EQ(paint_layer_effect_partial_compute_count(), partial_before)
+      << "a render with no rectangle keeps the whole-canvas compute";
+  const Vector<float> reference_pixels = render_row_node(*reference, 512, nullptr);
+
+  ASSERT_EQ(full.size(), reference_pixels.size());
+  for (const int64_t i : IndexRange(int64_t(full.size()))) {
+    EXPECT_NEAR(full[i], reference_pixels[i], 1e-4f) << "whole-render texel " << i;
+  }
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_partial_bake_keeps_the_effect_cache_unchanged)
+{
+  MaterialPaintLayer *row = nullptr;
+  Image *map = nullptr;
+  add_bounded_fill(&row, &map, 4.0f, 512, "PartialCache");
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(run_plan());
+  ASSERT_NE(row->bake, nullptr);
+  ASSERT_NE(row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], nullptr);
+
+  edit_map_rect(*map, rcti{0, 8, 0, 8}, 200);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  const int entries_before = paint_layer_effect_cache_entry_count();
+  const size_t partial_before = paint_layer_effect_partial_compute_count();
+
+  ASSERT_TRUE(run_plan());
+  EXPECT_GT(paint_layer_effect_partial_compute_count(), partial_before)
+      << "the narrowed bake computed the folded Blur over its rectangle";
+  EXPECT_EQ(paint_layer_effect_cache_entry_count(), entries_before)
+      << "a cropped effect result is never inserted into the effect cache";
 }
 
 /** \} */

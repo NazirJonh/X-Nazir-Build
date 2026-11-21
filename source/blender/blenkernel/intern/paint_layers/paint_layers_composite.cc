@@ -15,6 +15,7 @@
 #include "BKE_paint_layers_composite.hh"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -1302,7 +1303,10 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
                                                             PaintLayerSurfaceRef painted_object =
                                                                 nullptr,
                                                             const rcti *changed_region = nullptr,
-                                                            rcti *r_valid_region = nullptr);
+                                                            rcti *r_valid_region = nullptr,
+                                                            const rcti *compute_region = nullptr,
+                                                            int *r_effect_origin = nullptr,
+                                                            bool *r_effect_cropped = nullptr);
 
 /**
  * Append the CPU-computed effect \a effect to \a out as a correction carrying the map the effect
@@ -1314,6 +1318,8 @@ static void composite_effect_append_cpu_computed(const Material &ma,
                                                  const MaterialPaintLayer &effect,
                                                  const int channel,
                                                  const float pass_through_scale,
+                                                 const int *slice_rect,
+                                                 const bool dimensions_only,
                                                  const int tile_number,
                                                  const bool describe_only,
                                                  PaintMaterialCompositeImageLayer &out,
@@ -1336,6 +1342,22 @@ static void composite_effect_append_cpu_computed(const Material &ma,
    * across rows: name the marker the correction was made from. */
   effect_correction.effect_marker = effect.marker;
   effect_correction.effect_result_has_alpha = paint_layer_kind_result_has_alpha(effect);
+  /* A bake render that knows the canvas rectangle it needs offers it: the folded effect may then
+   * compute that rectangle grown by its halo and hand the cropped buffer over instead of a
+   * whole-canvas one. Null for a full render, the preview and every nested input description. */
+  rcti effect_region;
+  const rcti *compute_region = nullptr;
+  if (slice_rect != nullptr) {
+    /* `slice_rect` is {xmin, ymin, xmax, ymax}; `BLI_rcti_init` takes the axes paired. */
+    BLI_rcti_init(&effect_region, slice_rect[0], slice_rect[2], slice_rect[1], slice_rect[3]);
+    compute_region = &effect_region;
+  }
+  int effect_origin[2] = {0, 0};
+  bool effect_cropped = false;
+  /* A dimensions-only pass learns sizes and keys, never pixels: the effect's buffer would be the
+   * whole canvas, and a bake render only narrows it later. Describing the correction without its
+   * buffer keeps its kind, parameters and hashes in the entry the key folds. */
+  const bool compute_buffer = !describe_only && !dimensions_only;
   /* An effect that owns its result reads the map of its bake while that stands: switching it off and
    * on moves no pixel, and a stroke elsewhere costs it no recompute. */
   {
@@ -1348,21 +1370,33 @@ static void composite_effect_append_cpu_computed(const Material &ma,
         effect,
         channel,
         tile_number,
-        describe_only,
+        !compute_buffer,
         &effect_correction.effect_images,
         paint_layer_effect_owns_result(ma, *owner_row, effect) ? &effect_correction.effect_image :
                                                                  nullptr,
-        painted_object);
+        painted_object,
+        nullptr,
+        nullptr,
+        compute_region,
+        effect_origin,
+        &effect_cropped);
     perf_effect.note(
         "kind=%d channel=%d describe=%d", int(effect.kind_subtype), channel, describe_only ? 1 : 0);
   }
-  if (!describe_only && effect_correction.effect_color == nullptr &&
+  if (compute_buffer && effect_correction.effect_color == nullptr &&
       effect_correction.effect_image == nullptr)
   {
     /* The input could not be rendered: the correction is left out, as the generator leaves it
      * out of the live graph. */
     return;
   }
+  /* A cropped result names where its (0, 0) sits; a whole-canvas one keeps the default zero. The
+   * flag rides beside it, since a crop that happens to start at the canvas origin has a zero
+   * origin too. */
+  effect_correction.effect_origin[0] = effect_origin[0];
+  effect_correction.effect_origin[1] = effect_origin[1];
+  effect_correction.effect_cropped =
+      compute_buffer && effect_correction.effect_color != nullptr && effect_cropped;
   effect_correction.opacity = BKE_paint_layers_channel_opacity_effective(effect, channel) *
                               pass_through_scale;
   out.content_corrections.append(effect_correction);
@@ -1544,6 +1578,8 @@ static void composite_effect_append(
                                          effect,
                                          channel,
                                          pass_through_scale,
+                                         slice_rect,
+                                         dimensions_only,
                                          tile_number,
                                          describe_only,
                                          out,
@@ -2921,6 +2957,9 @@ static PaintLayerEffectCacheStore<EffectCacheEntry> g_paint_effect_cache;
  */
 static std::mutex g_paint_effect_cache_mutex;
 
+/** Cropped partial computes since the process started; see #paint_layer_effect_partial_compute. */
+static std::atomic<size_t> g_paint_layer_effect_partial_compute_count{0};
+
 /**
  * A description hash of the effect: the kind and the parameters in its schema order. The input's
  * pixels are not part of it -- the sources' versions stand in for those -- so an edit of a value
@@ -3351,6 +3390,150 @@ static bool paint_layer_effect_region_compute(
   return true;
 }
 
+/**
+ * Whether every correction folded into \a entry is a local function of the input's neighbourhood, so
+ * rendering the entry over a rectangle is the full render restricted to it. A whole-map correction
+ * below the effect -- a Color Match's reduce, a Fill Area's flood -- reads the whole canvas, and an
+ * input rendered over a rectangle would not be the input the full compute sees. Recursive: a folder
+ * carries its children's corrections.
+ */
+static bool paint_layer_effect_input_reach_is_local(const PaintMaterialCompositeImageLayer &entry)
+{
+  for (const PaintMaterialCompositeCorrection &correction : entry.content_corrections) {
+    if (correction.filter == 0) {
+      continue;
+    }
+    const float *params = correction.filter_params;
+    if (BKE_paint_layers_effect_reach(
+            eMaterialPaintLayerFilter(correction.filter), params) == EffectReach::WholeMap)
+    {
+      return false;
+    }
+  }
+  for (const PaintMaterialCompositeImageLayer &child : entry.children) {
+    if (!paint_layer_effect_input_reach_is_local(child)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * The CPU-computed \a effect on a bake render that only needs \a compute_region of the canvas: the
+ * input rendered over that rectangle grown by the kernel's halo, the whole kernel run over the small
+ * buffer, and the buffer handed back with its origin. No cache entry is made -- the crop belongs to
+ * this bake alone.
+ *
+ * False refuses the crop and the caller takes the whole-canvas path: a kind whose kernel is not a
+ * local function of the neighbourhood, a slot-fed input (its canvas is the slot's own size), a
+ * whole-map correction below the effect, an empty or whole-canvas rectangle, or an allocation that
+ * fails. The interior a caller samples is \a compute_region; the halo border the kernel needed is
+ * part of the buffer but is not the region's own answer.
+ *
+ * The input is described whole, as the full compute describes it: the rectangle only narrows which
+ * texels the evaluation walks, so a mapping or a projection lands where the full render would put
+ * it. A mapping is per-texel and does not refuse the crop.
+ */
+static bool paint_layer_effect_partial_compute(
+    const Material &ma,
+    const MaterialPaintLayer &row,
+    const MaterialPaintLayer &effect,
+    const int channel,
+    const int tile_number,
+    const PaintLayerSurfaceRef painted_object,
+    const PaintMaterialCompositeImageLayer &dims_entry,
+    const bool from_slot,
+    const int width,
+    const int height,
+    const rcti &compute_region,
+    std::shared_ptr<ImBuf> &r_color,
+    int r_effect_origin[2])
+{
+  if (!paint_layer_effect_region_update_supported(effect) || from_slot ||
+      !paint_layer_effect_input_reach_is_local(dims_entry))
+  {
+    return false;
+  }
+  float params[PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM] = {};
+  composite_filter_params(effect, params);
+  const int halo = BKE_paint_layers_effect_halo(
+      eMaterialPaintLayerFilter(effect.kind_subtype), params, width, height);
+  rcti valid;
+  BKE_paint_layers_effect_region_clip(compute_region, 0, width, height, valid);
+  if (BLI_rcti_is_empty(&valid)) {
+    return false;
+  }
+  /* The small buffer covers the requested rectangle grown by the halo once: every texel the kernel
+   * reads for the requested rectangle stays inside it. */
+  rcti region_small;
+  BKE_paint_layers_effect_region_clip(valid, halo, width, height, region_small);
+  if (region_small.xmin == 0 && region_small.ymin == 0 && region_small.xmax >= width &&
+      region_small.ymax >= height)
+  {
+    /* No smaller than the canvas: the full compute is the same work without the extra copy. */
+    return false;
+  }
+  const int region_width = BLI_rcti_size_x(&region_small);
+  const int region_height = BLI_rcti_size_y(&region_small);
+  if (region_width <= 0 || region_height <= 0) {
+    return false;
+  }
+  std::shared_ptr<ImBuf> small = anchor_slice_buffer_new(region_width, region_height);
+  if (small == nullptr) {
+    return false;
+  }
+  {
+    bke::paint_perf::ScopedTimer perf_partial("effect.cpu.partial");
+    PaintMaterialCompositeImageLayer entry;
+    if (!BKE_paint_layers_effect_input_describe(
+            ma,
+            row,
+            effect,
+            channel,
+            /*dimensions_only=*/false,
+            /*describe_only=*/false,
+            entry,
+            PaintLayerTileContext{.painted_object = painted_object, .tile_number = tile_number}))
+    {
+      return false;
+    }
+    Vector<float> coverage(int64_t(region_width) * region_height);
+    if (!BKE_paint_material_composite_eval_row_content(entry,
+                                                       small->float_data_for_write(),
+                                                       coverage.data(),
+                                                       &region_small,
+                                                       channel,
+                                                       width,
+                                                       height))
+    {
+      return false;
+    }
+    paint_layer_effect_kernel_apply(*small, effect, /*for_mask=*/false, tile_number);
+    r_effect_origin[0] = region_small.xmin;
+    r_effect_origin[1] = region_small.ymin;
+    r_color = std::move(small);
+    g_paint_layer_effect_partial_compute_count.fetch_add(1, std::memory_order_relaxed);
+    perf_partial.note("kind=%d size=%dx%d region=%d,%d-%d,%d",
+                      int(effect.kind_subtype),
+                      region_width,
+                      region_height,
+                      region_small.xmin,
+                      region_small.ymin,
+                      region_small.xmax,
+                      region_small.ymax);
+  }
+  return true;
+}
+
+/**
+ * How many cropped partial computes the effect path has run; for a test that has to prove a bake
+ * took the partial path rather than the whole-canvas one.
+ */
+size_t paint_layer_effect_partial_compute_count()
+{
+  return g_paint_layer_effect_partial_compute_count.load(std::memory_order_relaxed);
+}
+
 /** Drop every cached effect buffer, releasing the canvases (a static would outlive the leak check). */
 static void paint_layer_effect_cache_clear()
 {
@@ -3418,6 +3601,14 @@ int paint_layer_effect_cache_entry_count()
  *        included. The whole canvas when no band was offered, when the band cannot be narrowed
  *        (the maps reach the canvas through a remapping), or after a full compute. Empty when the
  *        offered band was empty (nothing moved that a write could narrow) or the compute failed.
+ * \param compute_region: the canvas rectangle a bake render needs, or null for a whole-canvas
+ *        answer. When the effect's kernel is a local function of the input's neighbourhood and the
+ *        input holds no whole-map correction, the result is computed over that rectangle grown by
+ *        the halo and returned cropped, with \a r_effect_origin naming where its (0, 0) sits. A
+ *        cropped answer never enters the effect cache. Any refusal falls back to the whole canvas.
+ * \param r_effect_origin: the crop's canvas origin, zero when the answer is the whole canvas.
+ * \param r_effect_cropped: whether the answer is cropped; the origin alone cannot tell, since a
+ *        crop that starts at the canvas origin has a zero origin.
  * \return null when the input could not be rendered or \a describe_only was asked.
  */
 static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
@@ -3430,7 +3621,10 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
                                                             Image **r_bake_image,
                                                             PaintLayerSurfaceRef painted_object,
                                                             const rcti *changed_region,
-                                                            rcti *r_valid_region)
+                                                            rcti *r_valid_region,
+                                                            const rcti *compute_region,
+                                                            int *r_effect_origin,
+                                                            bool *r_effect_cropped)
 {
   /* The maps the input reads and its size, described without rendering anything: the maps go to
    * the composite cache's subscriptions, the size decides hits. */
@@ -3477,6 +3671,41 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
     if (Image *bake_map = paint_layer_owned_effect_bake_map(ma, effect, channel)) {
       *r_bake_image = bake_map;
       return {};
+    }
+  }
+
+  /* A bake render that knows its canvas rectangle offers it here: the folded effect then computes
+   * that rectangle grown by its halo and returns the cropped buffer with its origin, outside the
+   * cache. Every refusal falls through to the whole-canvas path below, which is the answer that is
+   * always right. */
+  if (compute_region != nullptr) {
+    std::shared_ptr<ImBuf> partial;
+    int origin[2] = {0, 0};
+    if (paint_layer_effect_partial_compute(ma,
+                                           row,
+                                           effect,
+                                           channel,
+                                           tile_number,
+                                           painted_object,
+                                           dims_entry,
+                                           dims_from_slot,
+                                           width,
+                                           height,
+                                           *compute_region,
+                                           partial,
+                                           origin))
+    {
+      if (r_effect_origin != nullptr) {
+        r_effect_origin[0] = origin[0];
+        r_effect_origin[1] = origin[1];
+      }
+      if (r_effect_cropped != nullptr) {
+        *r_effect_cropped = true;
+      }
+      if (r_valid_region != nullptr) {
+        BKE_paint_layers_effect_region_clip(*compute_region, 0, width, height, *r_valid_region);
+      }
+      return partial;
     }
   }
 

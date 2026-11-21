@@ -953,17 +953,33 @@ using GpuCaptureJob = PaintLayersGpuCaptureJob;
  */
 static constexpr size_t gpu_slot_budget_bytes = size_t(512) * 1024 * 1024;
 
-bool combined_preview_gpu_enabled(const Material *ma)
+/**
+ * `BLENDER_PBR_GPU_COMBINED=0` forces the CPU path for every material, a developer comparison. One
+ * process-wide read, shared by the material gate and the mask provider's material-less one.
+ */
+static bool combined_preview_gpu_env_allows()
 {
-  if (ma == nullptr || ma->paint_layers_composite_device != MA_PAINT_COMPOSITE_GPU) {
-    return false;
-  }
-  /* `BLENDER_PBR_GPU_COMBINED=0` forces the CPU path for every material, a developer comparison. */
   static const bool env_allows = []() {
     const char *env = std::getenv("BLENDER_PBR_GPU_COMBINED");
     return env == nullptr || std::atoi(env) != 0;
   }();
   return env_allows;
+}
+
+bool combined_preview_gpu_enabled(const Material *ma)
+{
+  if (ma == nullptr || ma->paint_layers_composite_device != MA_PAINT_COMPOSITE_GPU) {
+    return false;
+  }
+  return combined_preview_gpu_env_allows();
+}
+
+bool combined_preview_gpu_enabled()
+{
+  /* The switch alone: the mask-effect provider reads no material, so the composite-device half of
+   * the gate cannot be asked there. Its material is the one the mask item belongs to, and that
+   * material's composite-device setting is not available through the hook. */
+  return combined_preview_gpu_env_allows();
 }
 
 /**
@@ -1055,6 +1071,87 @@ static bool gpu_shaders_ensure()
          gpu_shaders.correction != nullptr && gpu_shaders.effect != nullptr &&
          gpu_shaders.folder != nullptr && gpu_shaders.display != nullptr &&
          gpu_shaders.shade != nullptr;
+}
+
+bool paint_material_combined_gpu_shaders_ensure(CombinedGpuShaders *r_shaders)
+{
+  const bool ok = gpu_shaders_ensure();
+  if (r_shaders != nullptr) {
+    r_shaders->layer = gpu_shaders.layer;
+    r_shaders->mask = gpu_shaders.mask;
+    r_shaders->correction = gpu_shaders.correction;
+    r_shaders->folder = gpu_shaders.folder;
+    r_shaders->effect = gpu_shaders.effect;
+  }
+  return ok;
+}
+
+CombinedGpuFrame::CombinedGpuFrame(gpu::TexturePool &pool_) : pool(pool_)
+{
+  /* The bake's providers ask outside a draw, where no GPU context is current; the row render's own
+   * enable-and-restore, so a draw that somehow calls in keeps its own context. */
+  context_was_enabled_ = DRW_gpu_context_is_enabled();
+  if (!context_was_enabled_) {
+    if (!DRW_gpu_context_try_enable()) {
+      fail_stage = "context";
+      return;
+    }
+    context_enabled_by_us_ = true;
+  }
+  if (!paint_material_combined_gpu_shaders_ensure(&shaders)) {
+    fail_stage = "shaders";
+    return;
+  }
+  /* The placeholders the dispatches bind when they read no map and no slot image, the preview
+   * frame's own terms (see the frame below, which acquires the same pair). */
+  dummy = pool.acquire_texture_2d(
+      int2(1), 1, gpu::TextureFormat::SFLOAT_16_16_16_16,
+      eGPUTextureUsage(GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE),
+      "combined_dummy");
+  slot_dummy = pool.acquire_texture_2d(
+      int2(1), 1, gpu::TextureFormat::SFLOAT_16_16_16_16,
+      eGPUTextureUsage(GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE),
+      "combined_slot_dummy");
+  ok = dummy != nullptr && slot_dummy != nullptr;
+  if (!ok) {
+    fail_stage = "scratch";
+  }
+}
+
+CombinedGpuFrame::~CombinedGpuFrame()
+{
+  /* Null on the paths the constructor refused before an acquire; the provider's own scratch is
+   * released by its own scope, these two by the frame that acquired them. */
+  if (dummy != nullptr) {
+    pool.release_texture(dummy);
+  }
+  if (slot_dummy != nullptr) {
+    pool.release_texture(slot_dummy);
+  }
+  if (context_enabled_by_us_) {
+    DRW_gpu_context_disable();
+  }
+}
+
+std::shared_ptr<ImBuf> CombinedGpuFrame::read_back(gpu::Texture *texture) const
+{
+  GPU_finish();
+  float *pixels = static_cast<float *>(GPU_texture_read(texture, GPU_DATA_FLOAT, 0));
+  if (pixels == nullptr) {
+    return nullptr;
+  }
+  const int2 size(GPU_texture_width(texture), GPU_texture_height(texture));
+  ImBuf *ibuf = IMB_allocImBuf(uint(size.x), uint(size.y), ImBufFlags::FloatData);
+  if (ibuf == nullptr || ibuf->float_buffer.data == nullptr) {
+    if (ibuf != nullptr) {
+      IMB_freeImBuf(ibuf);
+    }
+    MEM_delete(pixels);
+    return nullptr;
+  }
+  memcpy(ibuf->float_data_for_write(), pixels, sizeof(float[4]) * size_t(size.x) * size.y);
+  MEM_delete(pixels);
+  return std::shared_ptr<ImBuf>(ibuf, [](ImBuf *buffer) { IMB_freeImBuf(buffer); });
 }
 
 void combined_preview_gpu_free()

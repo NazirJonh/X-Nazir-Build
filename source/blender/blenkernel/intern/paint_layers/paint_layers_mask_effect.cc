@@ -21,6 +21,7 @@
 #include "BLI_assert.h"
 #include "BLI_index_range.hh"
 #include "BLI_task.hh"
+#include "BLI_threads.h"
 #include "BLI_vector.hh"
 
 #include "DNA_material_types.h"
@@ -238,6 +239,30 @@ size_t paint_layer_mask_effect_cache_budget()
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name GPU provider
+ * \{ */
+
+/* The editors' GPU answer for a mask-stack effect, registered while their GPU pipeline can serve
+ * one and null whenever it cannot. Reads happen during a composite; the plain pointer keeps no
+ * guard for that, the same terms the owned-effect provider keeps (#paint_layers_composite.cc). */
+static PaintLayerMaskEffectGpuProvider g_mask_effect_gpu_provider = nullptr;
+
+void BKE_paint_layers_mask_effect_gpu_provider_set(PaintLayerMaskEffectGpuProvider provider)
+{
+  /* The contract the header pins, the owned-effect hook's own terms: registered on the main
+   * thread before the first bake's worker starts reading the hook. */
+  BLI_assert(BLI_thread_is_main());
+  g_mask_effect_gpu_provider = provider;
+}
+
+PaintLayerMaskEffectGpuProvider BKE_paint_layers_mask_effect_gpu_provider_get()
+{
+  return g_mask_effect_gpu_provider;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Compute
  * \{ */
 
@@ -405,27 +430,61 @@ static bool paint_layer_mask_effect_compute(const Material &ma,
       PaintLayersMaskSampler sampler(ma, row, &effect.marker, false, painted_object);
       sampler.tile_acquire(tile_number, width, height);
       float *pixels = color->float_data_for_write();
-      for (const int y : IndexRange(height)) {
-        for (const int x : IndexRange(width)) {
-          const float grey = sampler.sample(tile_number, x, y);
-          const int64_t index = int64_t(y) * width + x;
-          pixels[index * 4 + 0] = grey;
-          pixels[index * 4 + 1] = grey;
-          pixels[index * 4 + 2] = grey;
-          pixels[index * 4 + 3] = 1.0f;
+      /* #tile_acquire decodes those maps into the sampler and is not thread safe, so the one tile
+       * runs here, on the calling thread, before the rows below sample it in parallel -- the order
+       * the mask merge keeps (#paint_layers_target.cc), and the one the class documents.
+       * #sample mutates nothing (see #PaintLayersMaskSampler::sample): it reads the acquired tile's
+       * pointers and the described stack's buffers, and every evaluator it reaches is a per-texel
+       * function of those, so any number of threads may call it at once and the fill runs by rows. */
+      threading::parallel_for(IndexRange(height), 64, [&](const IndexRange range) {
+        for (const int y : range) {
+          for (const int x : IndexRange(width)) {
+            const float grey = sampler.sample(tile_number, x, y);
+            const int64_t index = int64_t(y) * width + x;
+            pixels[index * 4 + 0] = grey;
+            pixels[index * 4 + 1] = grey;
+            pixels[index * 4 + 2] = grey;
+            pixels[index * 4 + 3] = 1.0f;
+          }
         }
-      }
+      });
     }
     perf_input.note("kind=%d size=%dx%d", int(effect.kind_subtype), width, height);
   }
+  /* The path the grey took past the fill, for the total's note: a transform effect and a CPU
+   * kernel are both the CPU, a served provider is the GPU. */
+  const char *compute_path = "cpu";
   PaintMaterialCompositeMapping transform_step;
   if (paint_layer_mask_transform_step_get(effect, transform_step)) {
     /* A transform effect moves the grey instead of correcting it. */
     mask_effect_transform_apply(*color, transform_step);
   }
   else {
-    /* The kernel reads the buffer the block above filled and leaves the alpha alone. */
-    paint_layer_effect_kernel_apply(*color, effect, /*for_mask=*/true, tile_number);
+    /* The kernel reads the buffer the block above filled and leaves the alpha alone. The GPU
+     * provider is asked first, the way a bake asks the owned-effect one: a grey the screen's
+     * pipeline already computes saves the CPU kernel. The gates are the provider's own terms -- it
+     * needs the main thread's GPU context, which a worker thread has not -- and a refusal (no
+     * context, the item's pass failed, a kind it does not serve) falls through to the CPU kernel,
+     * which answers the same grey as before. The normalize runs on either path: the provider lays
+     * the raw kernel result, and the kinds the kind table flags fold back to one grey here. */
+    const PaintLayerMaskEffectGpuProvider provider = BKE_paint_layers_mask_effect_gpu_provider_get();
+    bool gpu_done = false;
+    if (provider != nullptr && BKE_paint_layers_effect_is_gpu_computed(effect) &&
+        BLI_thread_is_main())
+    {
+      bke::paint_perf::ScopedTimer perf_gpu("mask_effect.gpu");
+      /* The input and the result are the one buffer: the provider reads the grey whole into a
+       * texture before its dispatches write (see #PaintLayerMaskEffectGpuProvider), so the aliased
+       * run is safe. */
+      gpu_done = provider(effect, *color, *color);
+      perf_gpu.note("kind=%d done=%s", int(effect.kind_subtype), gpu_done ? "yes" : "fallback");
+    }
+    if (!gpu_done) {
+      paint_layer_effect_kernel_apply(*color, effect, /*for_mask=*/true, tile_number);
+    }
+    else {
+      compute_path = "gpu";
+    }
     mask_effect_grey_normalize(*color, effect);
   }
   /* The versions are taken after the render: an edit that landed while it ran is read next time. */
@@ -433,7 +492,8 @@ static bool paint_layer_mask_effect_compute(const Material &ma,
   BKE_paint_layers_mask_effect_input_images(ma, row, effect, images);
   r_synced = map_sources_snapshot(images);
   r_color = std::move(color);
-  perf_total.note("kind=%d size=%dx%d", int(effect.kind_subtype), width, height);
+  perf_total.note(
+      "kind=%d size=%dx%d path=%s", int(effect.kind_subtype), width, height, compute_path);
   return true;
 }
 

@@ -1844,6 +1844,8 @@ class PaintLayersOwnedEffectTest : public PaintLayersMaterialBakeTest {
 
   void TearDown() override
   {
+    /* No test-provider may outlive its test: the hook is a plain pointer BKE reads during a bake. */
+    BKE_paint_layers_owned_effect_gpu_provider_set(nullptr);
     BKE_paint_layers_effect_cache_free_all();
     BKE_paint_layers_bake_stroke_active_set(false);
     BKE_paint_layers_bake_drag_clear_all();
@@ -2142,6 +2144,173 @@ TEST_F(PaintLayersOwnedEffectTest, a_new_render_of_the_source_stales_the_result)
   EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *blur));
   EXPECT_TRUE(run_bake_job());
   EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+}
+
+/**
+ * The worker job lays only the band the effect's subscription named at the creation, the way the
+ * inline writer does: the texel outside it keeps what the previous bake put there. The job's
+ * compute itself may answer the whole canvas (the cache entry behind a regional patch is dropped
+ * when the map lands), which is why the write band starts from the creation's region rather than
+ * from the compute's own rectangle.
+ */
+TEST_F(PaintLayersOwnedEffectTest, a_regional_job_write_leaves_the_rest_of_the_effect_map)
+{
+  MaterialPaintLayer *blur = nullptr;
+  /* A 512-square canvas keeps the edit's 256-pixel partial-update chunk away from the canary. */
+  MaterialPaintLayer *row = add_row_with_blur(&blur, 512, 512);
+  ASSERT_NE(blur, nullptr);
+  ASSERT_TRUE(run_bake_job());
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+
+  Image *base_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(base_map, nullptr);
+  Image *effect_map = blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(effect_map, nullptr);
+  int width = 0;
+  int height = 0;
+  BKE_image_get_size(effect_map, nullptr, &width, &height);
+  ASSERT_EQ(width, 512);
+  ASSERT_EQ(height, 512);
+  const uint32_t effect_map_uid = effect_map->id.session_uid;
+
+  /* A flat grey the blur keeps flat, so the map outside the edit is known: 120 everywhere. */
+  const rcti whole{0, width, 0, height};
+  write_map_rect(*base_map, whole, 120);
+  mark_map_rect(*base_map, whole);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  ASSERT_TRUE(run_bake_job());
+  {
+    const Vector<uchar> flat = read_map(*effect_map);
+    ASSERT_EQ(flat.size(), int64_t(width) * height * 4);
+    EXPECT_NEAR(map_byte_at(flat, width, width / 2, height / 2), 120, 3);
+  }
+
+  /* A canary far from the edit: a regional write leaves it, a whole one overwrites it. */
+  const int canary_x = width - 1;
+  const int canary_y = height - 1;
+  write_map_rect(*effect_map, rcti{canary_x, canary_x + 1, canary_y, canary_y + 1}, 17);
+
+  const rcti dirty{5, 7, 3, 5};
+  edit_map_rect(*base_map, dirty, 200);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  int reported[4] = {};
+  ASSERT_TRUE(BKE_paint_layers_bake_changed_region(*ma, *blur, reported))
+      << "the edit reached the effect's subscription as a rectangle";
+  uint32_t current_hash[2];
+  BKE_paint_layers_bake_hash(*ma, *blur, current_hash);
+  ASSERT_EQ(current_hash[0], blur->bake->hash[0]);
+  ASSERT_EQ(current_hash[1], blur->bake->hash[1]);
+
+  ASSERT_TRUE(run_bake_job());
+  Image *after_map = blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(after_map, nullptr);
+  EXPECT_EQ(after_map, effect_map) << "the regional write reuses the map";
+  EXPECT_EQ(after_map->id.session_uid, effect_map_uid);
+  const Vector<uchar> regional = read_map(*after_map);
+  ASSERT_EQ(regional.size(), int64_t(width) * height * 4);
+  EXPECT_EQ(map_byte_at(regional, width, canary_x, canary_y), 17)
+      << "the job wrote the region only, as the canary expects";
+  EXPECT_GT(
+      map_byte_at(regional,
+                  width,
+                  (dirty.xmin + dirty.xmax) / 2,
+                  (dirty.ymin + dirty.ymax) / 2),
+      150)
+      << "the edit's band was laid";
+}
+
+/** A registered provider that always refuses, the CPU fallback's own trigger. */
+static std::shared_ptr<ImBuf> owned_effect_gpu_provider_refuses(
+    const Material & /*ma*/,
+    const MaterialPaintLayer & /*row*/,
+    const MaterialPaintLayer & /*effect*/,
+    const int /*channel*/,
+    const int /*tile_number*/,
+    const rcti * /*changed_region*/)
+{
+  return nullptr;
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_refusing_gpu_provider_leaves_the_cpu_result)
+{
+  BKE_paint_layers_owned_effect_gpu_provider_set(&owned_effect_gpu_provider_refuses);
+  MaterialPaintLayer *blur = nullptr;
+  MaterialPaintLayer *row = add_row_with_blur(&blur, 512, 512);
+  ASSERT_NE(blur, nullptr);
+  ASSERT_TRUE(run_bake_job());
+  Image *base_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  Image *effect_map = blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(base_map, nullptr);
+  ASSERT_NE(effect_map, nullptr);
+
+  /* A flat grey the blur keeps flat: the same 120 the regional test expects. */
+  const rcti whole{0, 512, 0, 512};
+  write_map_rect(*base_map, whole, 120);
+  mark_map_rect(*base_map, whole);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  ASSERT_TRUE(run_bake_job());
+  const Vector<uchar> flat = read_map(*effect_map);
+  ASSERT_EQ(flat.size(), int64_t(512) * 512 * 4);
+  EXPECT_NEAR(map_byte_at(flat, 512, 256, 256), 120, 3)
+      << "a provider that refuses leaves the CPU compute exactly as it was";
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_valid_region_is_the_offered_band_grown_and_clipped)
+{
+  MaterialPaintLayer *blur = nullptr;
+  add_row_with_blur(&blur, 512, 512);
+  ASSERT_NE(blur, nullptr);
+  const MaterialPaintLayer *row = BKE_paint_layers_correction_owner(*ma, *blur);
+  ASSERT_NE(row, nullptr);
+
+  const rcti offered{100, 140, 200, 240};
+  rcti valid;
+  BKE_paint_layers_effect_valid_region(*ma,
+                                       *row,
+                                       *blur,
+                                       PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                       PAINT_TILE_NUMBER_BASE,
+                                       &offered,
+                                       512,
+                                       512,
+                                       valid);
+  EXPECT_LE(valid.xmin, offered.xmin);
+  EXPECT_LE(valid.ymin, offered.ymin);
+  EXPECT_GE(valid.xmax, offered.xmax);
+  EXPECT_GE(valid.ymax, offered.ymax);
+  EXPECT_GE(valid.xmin, 0);
+  EXPECT_GE(valid.ymin, 0);
+  EXPECT_LE(valid.xmax, 512);
+  EXPECT_LE(valid.ymax, 512);
+
+  /* No band, or an empty one: the whole canvas, the CPU path's own rule. */
+  rcti whole;
+  BKE_paint_layers_effect_valid_region(*ma,
+                                       *row,
+                                       *blur,
+                                       PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                       PAINT_TILE_NUMBER_BASE,
+                                       nullptr,
+                                       512,
+                                       512,
+                                       whole);
+  EXPECT_EQ(whole.xmin, 0);
+  EXPECT_EQ(whole.ymin, 0);
+  EXPECT_EQ(whole.xmax, 512);
+  EXPECT_EQ(whole.ymax, 512);
+
+  const rcti empty{10, 10, 10, 10};
+  BKE_paint_layers_effect_valid_region(*ma,
+                                       *row,
+                                       *blur,
+                                       PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                       PAINT_TILE_NUMBER_BASE,
+                                       &empty,
+                                       512,
+                                       512,
+                                       whole);
+  EXPECT_EQ(whole.xmax, 512);
+  EXPECT_EQ(whole.ymax, 512);
 }
 
 /**

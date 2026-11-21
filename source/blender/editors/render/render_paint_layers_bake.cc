@@ -17,6 +17,8 @@
 #include "ED_paint_layers_bake.hh"
 #include "ED_undo.hh"
 
+#include "paint_material_combined_owned_gpu.hh"
+
 #include "BLI_function_ref.hh"
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
@@ -232,6 +234,25 @@ void paint_layers_bake_free(void *customdata)
 }
 
 /**
+ * Register the GPU owned-effect provider of the Combined preview with BKE, once, before the first
+ * job that needs it. The heavy bake's worker has no GPU context, so the job's creation asks this
+ * provider for the GPU-computed effects' results here on the main thread instead
+ * (#BKE_paint_layers_owned_effect_gpu_provider_get); without the registration every one of them
+ * falls back to the CPU composite. Registering itself only sets a pointer, so the flag spares the
+ * repeat calls rather than any real work; the provider still refuses per channel when it cannot
+ * answer, which leaves the channel on the CPU path as before.
+ */
+static void paint_layers_owned_gpu_provider_ensure()
+{
+  static bool registered = false;
+  if (registered) {
+    return;
+  }
+  registered = true;
+  ed::material_combined::paint_material_combined_owned_gpu_register();
+}
+
+/**
  * Start the heavy bake of \a ma when a row of it needs one and none runs already.
  * \return true when a job was started.
  */
@@ -261,6 +282,9 @@ bool paint_layers_bake_job_start(wmWindowManager &wm,
   if (paint != nullptr && paint->runtime != nullptr && paint->runtime->stroke_active) {
     return false;
   }
+  /* The provider is what lets the creation below precompute the GPU-computed effects' results on
+   * this (main) thread; registered once, before the first job that could use it. */
+  paint_layers_owned_gpu_provider_ensure();
   /* Creating the job resolves the view once: this is where an Object or Generated row notices an
    * edited surface, or releases a cache whose object can no longer supply one, on the depsgraph
    * update that produced the new geometry. A material with nothing queued returns null and costs

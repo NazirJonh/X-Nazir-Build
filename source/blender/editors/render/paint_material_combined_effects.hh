@@ -15,10 +15,13 @@
  * #paint_material_combined_effects.cc.
  */
 
+#include <algorithm>
 #include <array>
+#include <memory>
 
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
+#include "BLI_rect.h"
 #include "BLI_span.hh"
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
@@ -583,6 +586,327 @@ struct CombinedPasses {
   float map_lod(CombinedTarget &t, gpu::Texture *map, const int flags, const float2 &mapping_scale);
 };
 
+/** The pass shaders of the GPU path, as #CombinedPasses reads them: the five a caller that builds
+ * its own dispatcher -- the gather's frame, the row render, the owned-effect bake provider -- needs.
+ * The display and shade shaders stay inside #paint_material_combined_gather.cc. */
+struct CombinedGpuShaders {
+  gpu::Shader *layer = nullptr;
+  gpu::Shader *mask = nullptr;
+  gpu::Shader *correction = nullptr;
+  gpu::Shader *folder = nullptr;
+  gpu::Shader *effect = nullptr;
+};
+
+/**
+ * Create the compute shaders of the GPU path once (a no-op after the first call, successful or
+ * not), and hand the pass ones out when \a r_shaders is given. Needs the GPU context current, as
+ * the draw path and the row render ensure before they call it; false when any of them is missing.
+ */
+bool paint_material_combined_gpu_shaders_ensure(CombinedGpuShaders *r_shaders = nullptr);
+
+/**
+ * The GPU frame a provider runs its dispatches in: the context enable-and-restore a bake outside a
+ * draw needs, the pass shaders, and the two placeholder textures every dispatch binds when it reads
+ * no map or no slot image. The two providers of #paint_material_combined_owned_gpu.cc each held this
+ * sequence open-coded, and a change to one kept drifting past the other, so the frame is now the one
+ * place it lives. The destructor releases the placeholders back to the pool and restores the context
+ * (disabled again when the constructor enabled it), so every path out of a provider scope -- a
+ * refusal return included -- cleans up the same way. A frame the constructor could not build leaves
+ * #ok false, and the provider refuses with its own stage.
+ */
+struct CombinedGpuFrame {
+  /** The pool the placeholders came from and the provider's own scratch goes through. */
+  gpu::TexturePool &pool;
+  /** The pass shaders #paint_material_combined_gpu_shaders_ensure filled, or none on a failure. */
+  CombinedGpuShaders shaders;
+  /** The 1x1 image a dispatch binds when its pass reads no map, or null on a failure. */
+  gpu::Texture *dummy = nullptr;
+  /** The 1x1 image a slot pass binds when the plan names no slot image, or null on a failure. */
+  gpu::Texture *slot_dummy = nullptr;
+  /** Whether the frame is usable: a context, the shaders and both placeholders. */
+  bool ok = false;
+  /** Which of the three failed when #ok is false: a literal the provider hands its refusal log. */
+  const char *fail_stage = nullptr;
+
+  /** Enables the context (unless one is current) and acquires the placeholders. */
+  explicit CombinedGpuFrame(gpu::TexturePool &pool_);
+  /** Releases the placeholders and restores the context the constructor found. */
+  ~CombinedGpuFrame();
+
+  /**
+   * Move \a texture's texels into a float RGBA #ImBuf of the texture's own size: GPU_finish, the
+   * data read, the allocation, the copy, the free. Null when the read or the allocation failed --
+   * the caller refuses with its own stage, the texture's HOST_READ flag is the cache hook's own
+   * contract (#effect_gpu_acquire in #paint_material_combined_effects.cc). The buffer's deleter is
+   * the #ImBuf free, so the caller holds it as long as it reads.
+   */
+  std::shared_ptr<ImBuf> read_back(gpu::Texture *texture) const;
+
+ private:
+  /** Whether a GPU context was current before the constructor, so the destructor restores that. */
+  bool context_was_enabled_ = false;
+  /** Whether this frame enabled the context itself, so only that enable is undone. */
+  bool context_enabled_by_us_ = false;
+};
+
+/**
+ * The textures one pass plan ping-pongs through and the rectangle each of its passes dispatches
+ * over: the routing both dispatchers of the GPU effect path walk -- the preview's effect stage
+ * (#combined_preview_gpu_effects_run) and the mask-effect provider
+ * (#paint_material_combined_owned_gpu.cc) each held it open-coded once, and a change to one kept
+ * drifting past the other. The plan names its buffers by role, so a dispatcher is a straight walk
+ * of the plan and adding a pass kind touches the plan builder and the shader only -- the
+ * whole-canvas kinds being the exception, whose pairs and dispatch levels this class routes by
+ * kind.
+ *
+ * The two dispatchers differ in the dispatch rectangle alone, which the caller's `region_exact`
+ * pins: the preview clips a pass to the cache's dirty band when the job's description is region
+ * exact (#rect_for answers the caller's tracking), and the mask provider passes `region_exact` as
+ * false, so every ordinary pass runs over the whole grey canvas, its input having no region of its
+ * own. The mask's slot map is null as
+ * well, its plan having refused a slot fetch before the first texture was acquired, so the Slot aux
+ * answers null there the way the preview's answers the image's own texture.
+ */
+class EffectPassBuffers {
+ public:
+  EffectPassBuffers(const int2 canvas,
+                    gpu::Texture *input,
+                    gpu::Texture *luminance,
+                    gpu::Texture *ring_a,
+                    gpu::Texture *ring_b,
+                    gpu::Texture *result,
+                    gpu::Texture *slot,
+                    gpu::Texture *reduce_a,
+                    gpu::Texture *reduce_b,
+                    gpu::Texture *field_a,
+                    gpu::Texture *field_b,
+                    gpu::Texture *&field_texture);
+
+  gpu::Texture *source(const ePaintLayerEffectPassSource role) const;
+  gpu::Texture *aux(const ePaintLayerEffectPassAux role) const;
+
+  /* The buffer \a pass writes: the result texture on the last pass, the luminance buffer for the
+   * pre-pass, a free ring slot for every pass in between, and the free half of the float32 pair for
+   * a reduction or flooding pass -- those two ping-pong on their own, leaving the 16F ring clean
+   * for the passes that follow them. */
+  gpu::Texture *destination(const PaintLayerEffectPass &pass) const;
+
+  void commit(const PaintLayerEffectPass &pass, gpu::Texture *dst);
+
+  /** The level the reduction last wrote: the one-texel sum a Color Match's grade is graded by, its
+   * aux whatever role the plan names the pass. */
+  gpu::Texture *reduce_final() const;
+
+  /**
+   * The rectangle \a pass dispatches over. The reduction dispatches over its own output level, not
+   * the canvas: the level `radius` names is the canvas halved that many times, at least one texel,
+   * and the pyramid is a function of the whole input, so no region narrows it. The flooding sweeps
+   * run one thread per line -- the rows mode a single texel-wide dispatch down the canvas, the
+   * columns mode a single texel-tall one across it -- and the label field is a function of the whole
+   * canvas, the background flooding in from the edges, so the init runs full whatever moved. An
+   * ordinary pass takes the caller's own rule: \a region_exact with a non-empty \a region answers
+   * the caller's \a pass_rects entry (the dirty band grown by the reaches and the halo), and
+   * anything else -- an inexact description, a first render, or a caller passing
+   * `region_exact=false` (the mask provider) -- the full canvas.
+   */
+  rcti rect_for(const PaintLayerEffectPass &pass,
+                const bool region_exact,
+                const rcti &region,
+                const Span<rcti> pass_rects) const;
+
+ private:
+  int2 canvas_;
+  gpu::Texture *input_;
+  gpu::Texture *luminance_;
+  gpu::Texture *ring_[2];
+  gpu::Texture *result_;
+  /** The slot map the plan's slot fetch reads, borrowed from the image's cache for the job. */
+  gpu::Texture *slot_;
+  /** The float32 halves the reduction and the flooding ping-pong through; both canvas-sized, so
+   * every pyramid level and every field fits. */
+  gpu::Texture *reduce_[2];
+  /** The float32 halves the flooding's init and steps write into, the same ping-pong terms. */
+  gpu::Texture *field_[2];
+  /** The caller's own field slot (the preview job's, the mask provider's local): the flooding
+   * stores its final field through it and the Field aux role reads it back from there. */
+  gpu::Texture *&field_current_;
+  gpu::Texture *previous_ = nullptr;
+  int ring_i_ = 0;
+  /* The pair halves flip per pass of their own; both start on the second index, so the first write
+   * of either pair lands in its first half. */
+  int reduce_i_ = 1;
+  int field_i_ = 1;
+  /** The level the reduction last wrote (the grade's aux); nothing else reads it. */
+  gpu::Texture *reduce_last_ = nullptr;
+};
+
+inline EffectPassBuffers::EffectPassBuffers(const int2 canvas,
+                                            gpu::Texture *input,
+                                            gpu::Texture *luminance,
+                                            gpu::Texture *ring_a,
+                                            gpu::Texture *ring_b,
+                                            gpu::Texture *result,
+                                            gpu::Texture *slot,
+                                            gpu::Texture *reduce_a,
+                                            gpu::Texture *reduce_b,
+                                            gpu::Texture *field_a,
+                                            gpu::Texture *field_b,
+                                            gpu::Texture *&field_texture)
+    : canvas_(canvas),
+      input_(input),
+      luminance_(luminance),
+      ring_{ring_a, ring_b},
+      result_(result),
+      slot_(slot),
+      reduce_{reduce_a, reduce_b},
+      field_{field_a, field_b},
+      field_current_(field_texture)
+{
+}
+
+inline gpu::Texture *EffectPassBuffers::source(const ePaintLayerEffectPassSource role) const
+{
+  switch (role) {
+    case ePaintLayerEffectPassSource::Input:
+      return input_;
+    case ePaintLayerEffectPassSource::Previous:
+      return previous_;
+    case ePaintLayerEffectPassSource::Luminance:
+      return luminance_;
+  }
+  return input_;
+}
+
+inline gpu::Texture *EffectPassBuffers::aux(const ePaintLayerEffectPassAux role) const
+{
+  switch (role) {
+    case ePaintLayerEffectPassAux::None:
+      return nullptr;
+    case ePaintLayerEffectPassAux::Previous:
+      return previous_;
+    case ePaintLayerEffectPassAux::Original:
+      return input_;
+    case ePaintLayerEffectPassAux::Slot:
+      return slot_;
+    case ePaintLayerEffectPassAux::Field:
+      /* The label field the flooding refined, read through the caller's own slot: the commit
+       * below stores each flooding destination there, so a diffusion step or a tail sees the
+       * field the flooding ended on, never a stale one. */
+      return field_current_;
+  }
+  return nullptr;
+}
+
+inline gpu::Texture *EffectPassBuffers::destination(const PaintLayerEffectPass &pass) const
+{
+  if (pass.pass_index == pass.pass_count - 1) {
+    return result_;
+  }
+  if (pass.kind == ePaintLayerEffectPass::Luminance) {
+    return luminance_;
+  }
+  if (pass.kind == ePaintLayerEffectPass::ReduceStart ||
+      pass.kind == ePaintLayerEffectPass::ReduceStep)
+  {
+    return reduce_[reduce_i_ ^ 1];
+  }
+  if (pass.kind == ePaintLayerEffectPass::FloodInit ||
+      pass.kind == ePaintLayerEffectPass::FloodStep)
+  {
+    return field_[field_i_ ^ 1];
+  }
+  return ring_[ring_i_ ^ 1];
+}
+
+inline void EffectPassBuffers::commit(const PaintLayerEffectPass &pass, gpu::Texture *dst)
+{
+  if (pass.kind == ePaintLayerEffectPass::ReduceStart ||
+      pass.kind == ePaintLayerEffectPass::ReduceStep)
+  {
+    if (dst != result_) {
+      reduce_i_ ^= 1;
+      reduce_last_ = dst;
+    }
+  }
+  else if (pass.kind == ePaintLayerEffectPass::FloodInit ||
+           pass.kind == ePaintLayerEffectPass::FloodStep)
+  {
+    if (dst != result_) {
+      field_i_ ^= 1;
+      /* Stored through the caller's slot, so the Field aux reads the same texture. */
+      field_current_ = dst;
+    }
+  }
+  else if (dst != result_ && pass.kind != ePaintLayerEffectPass::Luminance) {
+    ring_i_ ^= 1;
+  }
+  previous_ = dst;
+}
+
+inline gpu::Texture *EffectPassBuffers::reduce_final() const
+{
+  return reduce_last_;
+}
+
+inline rcti EffectPassBuffers::rect_for(const PaintLayerEffectPass &pass,
+                                        const bool region_exact,
+                                        const rcti &region,
+                                        const Span<rcti> pass_rects) const
+{
+  if (pass.kind == ePaintLayerEffectPass::ReduceStart ||
+      pass.kind == ePaintLayerEffectPass::ReduceStep)
+  {
+    rcti level_rect;
+    BLI_rcti_init(&level_rect,
+                  0,
+                  std::max(canvas_.x >> pass.radius, 1),
+                  0,
+                  std::max(canvas_.y >> pass.radius, 1));
+    return level_rect;
+  }
+  rcti full_rect;
+  BLI_rcti_init(&full_rect, 0, canvas_.x, 0, canvas_.y);
+  if (pass.kind == ePaintLayerEffectPass::FloodStep) {
+    rcti sweep_rect;
+    if (pass.params.x == 1.0f) {
+      BLI_rcti_init(&sweep_rect, 0, 1, 0, canvas_.y);
+    }
+    else {
+      BLI_rcti_init(&sweep_rect, 0, canvas_.x, 0, 1);
+    }
+    return sweep_rect;
+  }
+  if (pass.kind == ePaintLayerEffectPass::FloodInit) {
+    return full_rect;
+  }
+  /* An empty dirty region on a render means the cache could not name what moved; a caller passing
+   * `region_exact=false` (the mask provider) runs whole by its own rule above. */
+  return (region_exact && !BLI_rcti_is_empty(&region)) ? pass_rects[pass.pass_index] : full_rect;
+}
+
+/**
+ * The GPU texture of \a image read through \a image_user (null selects the default), and whether
+ * it stores premultiplied colour, by the rule the texture upload used. Defined in
+ * #paint_material_combined_effects.cc; the effect pass TU of
+ * #combined_effect_jobs_render reads a Channel Split's slot map through it, the same acquisition
+ * every row's map goes through.
+ */
+gpu::Texture *gpu_map_texture(Image *image, const ImageUser *image_user, bool &r_premultiplied);
+
+/**
+ * The render half of #combined_preview_gpu_effects_run: each collected job's input laid into a
+ * canvas of its own resolution, the job's pass plan dispatched over it through the shared
+ * #EffectPassBuffers, and the result published into the GPU effect cache. Defined in
+ * #paint_material_combined_effect_pass.cc, the file the buffer routing of both dispatchers lives
+ * beside. False when the render has to give up, with the reason already reported through
+ * #gpu_refuse.
+ */
+bool combined_effect_jobs_render(const Material &ma,
+                                 CombinedPasses &passes,
+                                 Vector<GpuEffectJob> &r_jobs,
+                                 const rcti *effects_region,
+                                 int tile_number);
+
 /**
  * The GPU effect stage of the combined preview: collect the effects of the described stacks, key
  * their results in the GPU result cache, render the input of each one that needs it and dispatch its
@@ -596,6 +920,23 @@ struct CombinedPasses {
  *        job's result reference when the frame ends; the results themselves are found through
  *        #CombinedPasses::effect_result_find.
  * \param painted_object: the object a projected row of an effect's input reads its surface from.
+ * \param effects_region: the area of the effect inputs' sources the caller already knows moved --
+ *        the owned-effect bake provider forwards the bake's changed rectangle here, in the inputs'
+ *        own texels (the grid the cache's dirty region is kept in). Null when nothing beyond the
+ *        cache's own tracking is known, which is the preview's case. It never narrows a job's
+ *        dispatch below what the cache named as moved -- the texture is shared with the screen and
+ *        the publish stamps it valid as a whole, so the dispatched band has to cover the cache's
+ *        own dirty region -- and it never turns a Hit into a dispatch or a whole-canvas dirty into a
+ *        band. What it adds is the caller's rectangle on top of the cache's: the journal behind the
+ *        cache's dirty region can answer a full canvas where the bake's subscription still holds a
+ *        rectangle, and the union of the two is then what the stage renders into the texture, of
+ *        which the bake's own map write takes the caller's band.
+ * \param effect_limit: the marker of the one effect a bake asks for, or null for the preview's
+ *               whole-row walk. The effects of the row after the marker are skipped: their results
+ *               are nothing the bake reads, and warming them into the cache would cost a
+ *               main-thread dispatch the bake does not need. A marker the row does not hold leaves
+ *               the walk whole, and the effects before the marker always run -- they feed the
+ *               asked-for effect's input.
  * \return false when the GPU path has to give up, with the reason already reported.
  */
 bool combined_preview_gpu_effects_run(
@@ -607,7 +948,18 @@ bool combined_preview_gpu_effects_run(
     CombinedPasses &passes,
     Vector<GpuEffectJob> &r_jobs,
     const Object *painted_object = nullptr,
-    int tile_number = PAINT_TILE_NUMBER_BASE);
+    int tile_number = PAINT_TILE_NUMBER_BASE,
+    const rcti *effects_region = nullptr,
+    const bUUID *effect_limit = nullptr);
+
+/**
+ * The `BLENDER_PBR_GPU_COMBINED` half of the preview's GPU gate, without the material: the
+ * developer comparison switch alone. The mask-effect GPU provider reads no material (the caller
+ * hands it the effect row and the grey canvas only), so the composite-device half of the gate
+ * cannot be asked there; this answers the switch the way #combined_preview_gpu_enabled does.
+ * Defined in #paint_material_combined_gather.cc beside the full gate.
+ */
+bool combined_preview_gpu_enabled();
 
 /**
  * Report why the GPU path refused, once per change of reason rather than once per frame, and

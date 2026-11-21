@@ -35,6 +35,7 @@
 #include "BLI_math_vector.h"
 #include "BLI_rect.h"
 #include "BLI_task.hh"
+#include "BLI_threads.h"
 #include "BLI_time.h"
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
@@ -460,6 +461,35 @@ void paint_layer_effect_filter_params(
     float (&r_params)[PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM])
 {
   composite_filter_params(effect, r_params);
+}
+
+void BKE_paint_layers_effect_mask_filter_params(
+    const MaterialPaintLayer &effect,
+    float (&r_params)[PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM])
+{
+  composite_filter_params(effect, r_params);
+  /* The `for_mask` branch of the CPU kernel reads the border from the luminance for these four
+   * kinds (see #paint_layer_effect_kernel_apply): a mask's grey has no alpha to read, so the alpha
+   * source would see a canvas of ones. The override has to land before the plan is built, so the
+   * seed / silhouette / border passes read the same channel the CPU branch does, and the Drop
+   * Shadow's tail folds its under-mode off. */
+  switch (eMaterialPaintLayerFilter(effect.kind_subtype)) {
+    case MA_PAINT_LAYER_FILTER_DROP_SHADOW:
+      r_params[PAINT_LAYER_DROP_SHADOW_SOURCE] = float(PAINT_LAYER_DROP_SHADOW_SOURCE_LUMINANCE);
+      break;
+    case MA_PAINT_LAYER_FILTER_MASK_OUTLINE:
+      /* The Outline's source reads as a #PaintLayerDropShadowSource, the same two values. */
+      r_params[PAINT_LAYER_MASK_OUTLINE_SOURCE] = float(PAINT_LAYER_DROP_SHADOW_SOURCE_LUMINANCE);
+      break;
+    case MA_PAINT_LAYER_FILTER_FILL_AREA:
+      r_params[PAINT_LAYER_FILL_AREA_SOURCE] = float(PAINT_LAYER_FILL_AREA_SOURCE_LUMINANCE);
+      break;
+    case MA_PAINT_LAYER_FILTER_BEVEL:
+      r_params[PAINT_LAYER_BEVEL_SOURCE] = float(PAINT_LAYER_BEVEL_SOURCE_LUMINANCE);
+      break;
+    default:
+      break;
+  }
 }
 
 /**
@@ -1308,17 +1338,24 @@ static void composite_effect_append_cpu_computed(const Material &ma,
   effect_correction.effect_result_has_alpha = paint_layer_kind_result_has_alpha(effect);
   /* An effect that owns its result reads the map of its bake while that stands: switching it off and
    * on moves no pixel, and a stroke elsewhere costs it no recompute. */
-  effect_correction.effect_color = paint_layer_effect_buffer_get(
-      ma,
-      *owner_row,
-      effect,
-      channel,
-      tile_number,
-      describe_only,
-      &effect_correction.effect_images,
-      paint_layer_effect_owns_result(ma, *owner_row, effect) ? &effect_correction.effect_image :
-                                                               nullptr,
-      painted_object);
+  {
+    /* Which description path pays for a CPU effect: a row's content bake or the live composite.
+     * Only under `BLENDER_PBR_PERF`, so the dedicated label costs nothing in production. */
+    bke::paint_perf::ScopedTimer perf_effect("effect.cpu.row_content");
+    effect_correction.effect_color = paint_layer_effect_buffer_get(
+        ma,
+        *owner_row,
+        effect,
+        channel,
+        tile_number,
+        describe_only,
+        &effect_correction.effect_images,
+        paint_layer_effect_owns_result(ma, *owner_row, effect) ? &effect_correction.effect_image :
+                                                                 nullptr,
+        painted_object);
+    perf_effect.note(
+        "kind=%d channel=%d describe=%d", int(effect.kind_subtype), channel, describe_only ? 1 : 0);
+  }
   if (!describe_only && effect_correction.effect_color == nullptr &&
       effect_correction.effect_image == nullptr)
   {
@@ -3537,6 +3574,95 @@ void paint_layer_owned_effect_cache_drop(const Material &ma,
   g_paint_effect_cache.drop_instance(key, no_release);
 }
 
+/* The editors' GPU answer for an owned effect, registered while their GPU pipeline can serve one
+ * and null whenever it cannot. Reads happen during a bake; the plain pointer keeps no guard for
+ * that, the same terms the regenerate pre-hook keeps. */
+static PaintLayerOwnedEffectGpuProvider g_owned_effect_gpu_provider = nullptr;
+
+void BKE_paint_layers_owned_effect_gpu_provider_set(PaintLayerOwnedEffectGpuProvider provider)
+{
+  /* The contract the header pins: registered on the main thread before the first bake's worker
+   * starts reading the hook, so no bake can observe the registration land. */
+  BLI_assert(BLI_thread_is_main());
+  g_owned_effect_gpu_provider = provider;
+}
+
+PaintLayerOwnedEffectGpuProvider BKE_paint_layers_owned_effect_gpu_provider_get()
+{
+  return g_owned_effect_gpu_provider;
+}
+
+/**
+ * Whether the band a caller offers for \a effect's input is in the input's own texel grid, the rule
+ * #BKE_paint_layers_effect_region_is_exact answers for the CPU path (#paint_layer_effect_buffer_get
+ * describes the same input before it reaches that check). The GPU provider's texture is valid as a
+ * whole once it returns, but the map it is written into is already correct past the offered band
+ * only when the band is in the map's grid; through a remapping no band can be narrowed, and the
+ * whole canvas has to answer instead.
+ */
+static bool paint_layer_effect_input_region_is_exact(const Material &ma,
+                                                     const MaterialPaintLayer &row,
+                                                     const MaterialPaintLayer &effect,
+                                                     const int channel,
+                                                     const int tile_number)
+{
+  PaintMaterialCompositeImageLayer dims_entry;
+  Vector<Image *> images;
+  int width = 0;
+  int height = 0;
+  bool dims_from_slot = false;
+  if (!BKE_paint_layers_effect_input_describe(
+          ma,
+          row,
+          effect,
+          channel,
+          true,
+          false,
+          dims_entry,
+          PaintLayerTileContext{.painted_object = nullptr, .tile_number = tile_number}) ||
+      !paint_layer_effect_dimensions_resolve(
+          Span<PaintMaterialCompositeImageLayer>(&dims_entry, 1),
+          effect,
+          tile_number,
+          width,
+          height,
+          dims_from_slot))
+  {
+    return false;
+  }
+  paint_layer_effect_input_images_append(
+      effect, images, [&](Vector<Image *> &r_input_images) {
+        BKE_paint_layers_effect_input_images(dims_entry, r_input_images);
+      });
+  return BKE_paint_layers_effect_region_is_exact(dims_entry, images, width, height);
+}
+
+void BKE_paint_layers_effect_valid_region(const Material &ma,
+                                          const MaterialPaintLayer &row,
+                                          const MaterialPaintLayer &effect,
+                                          const int channel,
+                                          const int tile_number,
+                                          const rcti *changed_region,
+                                          const int width,
+                                          const int height,
+                                          rcti &r_valid_region)
+{
+  if (changed_region != nullptr && !BLI_rcti_is_empty(changed_region) &&
+      paint_layer_effect_input_region_is_exact(ma, row, effect, channel, tile_number))
+  {
+    float params[PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM] = {};
+    composite_filter_params(effect, params);
+    const int halo = BKE_paint_layers_effect_halo(
+        eMaterialPaintLayerFilter(effect.kind_subtype), params, width, height);
+    BKE_paint_layers_effect_region_clip(*changed_region, halo, width, height, r_valid_region);
+  }
+  else {
+    /* No offered band, an empty one, or a band a remapping takes out of the input's own texel
+     * grid: the whole canvas is the answer, exactly the CPU path's rule. */
+    BLI_rcti_init(&r_valid_region, 0, width, 0, height);
+  }
+}
+
 std::shared_ptr<ImBuf> paint_layer_owned_effect_result_compute(const Material &ma,
                                                                const MaterialPaintLayer &row,
                                                                const MaterialPaintLayer &effect,
@@ -3545,22 +3671,59 @@ std::shared_ptr<ImBuf> paint_layer_owned_effect_result_compute(const Material &m
                                                                const rcti *changed_region,
                                                                rcti *r_valid_region)
 {
+  /* The GPU provider first: an effect the combined preview computes in a pass of its own is asked
+   * of it, so a bake reads the result the screen keeps instead of recomputing it on the CPU. The
+   * gates are the provider's own terms -- it shares the preview's GPU effect cache, which holds
+   * base-tile entries only, and it needs the main thread's GPU context, which the bake job's
+   * worker does not have and so falls back below. A null answer falls through to the CPU too. The
+   * changed region rides along for a regional dispatch; the provider's texture is valid as a
+   * whole once it returns, but the map it is written into is already correct past the changed
+   * band, so the valid rectangle is the band grown by the halo -- the whole canvas when no region
+   * was offered, the same arithmetic the CPU path answers with. */
+  if (g_owned_effect_gpu_provider != nullptr && tile_number == PAINT_TILE_NUMBER_BASE &&
+      BKE_paint_layers_effect_is_gpu_computed(effect) && BLI_thread_is_main())
+  {
+    bke::paint_perf::ScopedTimer perf_gpu("effect.own_bake.gpu");
+    std::shared_ptr<ImBuf> gpu_result = g_owned_effect_gpu_provider(
+        ma, row, effect, channel, tile_number, changed_region);
+    perf_gpu.note("kind=%d hit=%s",
+                  int(effect.kind_subtype),
+                  gpu_result != nullptr ? "yes" : "fallback");
+    if (gpu_result != nullptr) {
+      if (r_valid_region != nullptr) {
+        BKE_paint_layers_effect_valid_region(ma,
+                                             row,
+                                             effect,
+                                             channel,
+                                             tile_number,
+                                             changed_region,
+                                             gpu_result->x,
+                                             gpu_result->y,
+                                             *r_valid_region);
+      }
+      return gpu_result;
+    }
+  }
+
   /* No forced drop here any more: the reason it stood -- the cache's key not seeing the row's
    * mapping or the effects below, which the bake's hash does -- is covered by the key itself now,
    * whose input scalar hash and chain hash fold the same description the bake's hash reads, and
    * by the region-exact rule the regional update checks. An entry kept from before such an edit
    * answers a different key, misses, and is computed whole from the description as it is now. */
-  return paint_layer_effect_buffer_get(ma,
-                                       row,
-                                       effect,
-                                       channel,
-                                       tile_number,
-                                       /*describe_only=*/false,
-                                       nullptr,
-                                       nullptr,
-                                       nullptr,
-                                       changed_region,
-                                       r_valid_region);
+  bke::paint_perf::ScopedTimer perf_cpu("effect.cpu.owned_fallback");
+  std::shared_ptr<ImBuf> result = paint_layer_effect_buffer_get(ma,
+                                                                row,
+                                                                effect,
+                                                                channel,
+                                                                tile_number,
+                                                                /*describe_only=*/false,
+                                                                nullptr,
+                                                                nullptr,
+                                                                nullptr,
+                                                                changed_region,
+                                                                r_valid_region);
+  perf_cpu.note("kind=%d channel=%d", int(effect.kind_subtype), channel);
+  return result;
 }
 
 void paint_layer_owned_effect_input_images(const Material &ma,

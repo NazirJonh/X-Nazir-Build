@@ -54,9 +54,15 @@ class PaintLayersAnchorPointCompositeTest : public PaintLayersTestBase {
  protected:
   void TearDown() override
   {
-    /* The composite cache is a static keyed by session UID: its buffers outlive the freed `Main`
-     * and are reported as leaked blocks at exit. */
+    /* The caches are statics keyed by session UID: their buffers outlive the freed `Main` and are
+     * reported as leaked blocks at exit unless they are dropped here. The composite one is the
+     * shared material cache; the slice, effect and mask ones answer the Anchor Point and the mask
+     * effect this suite renders. */
     BKE_paint_material_composite_cache_free_all();
+    BKE_paint_layers_slice_cache_free_all();
+    BKE_paint_layers_effect_cache_free_all();
+    BKE_paint_layers_effect_gpu_cache_free_all();
+    BKE_paint_layers_mask_effect_cache_free_all();
     PaintLayersTestBase::TearDown();
   }
 

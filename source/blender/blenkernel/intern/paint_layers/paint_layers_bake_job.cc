@@ -14,6 +14,7 @@
 #include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_layers_target.hh"
+#include "BKE_paint_perf_debug.hh"
 
 #include <algorithm>
 #include <array>
@@ -64,6 +65,7 @@
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
+#include "BLI_rect.h"
 #include "BLI_set.hh"
 #include "BLI_string.h"
 #include "BLI_string_ref.hh"
@@ -152,6 +154,16 @@ struct PaintLayersBakeJob {
      * until the commit.
      */
     bool stored_float = false;
+    /**
+     * The band of the map this result was computed for, in map pixels, and the map it may land in.
+     * Set only when the creation named a changed region, the channel's map already stood before the
+     * compute (#bake_effect_channel_compute), and #map_uid still names the map at the commit: then
+     * the commit writes #rect and leaves the pixels outside it as the previous result left them.
+     * Otherwise #rect is unused and the whole stored buffer is written, as before.
+     */
+    bool regional = false;
+    int rect[4] = {};
+    uint32_t map_uid = 0;
     Vector<float> color;
     Vector<uchar> color_bytes;
   };
@@ -228,11 +240,43 @@ struct PaintLayersBakeJob {
     /** The bake hash of the effect when the job was created; the commit drops a result whose live
      * hash moved (see #RowResult::hash). */
     uint32_t hash[2] = {};
+    /** One channel the effect filters, with the map that stood when the job was created. */
+    struct QueuedChannel {
+      int channel = 0;
+      /**
+       * Whether the channel's map stood before the compute; only then may the commit patch its
+       * band instead of writing the whole canvas. #map_uid is that map's identity, re-checked at
+       * the commit because #bake_service_image may replace a map of another size or format.
+       */
+      bool had_map = false;
+      uint32_t map_uid = 0;
+    };
     /** The channels the effect filters; the worker fills #channels from them. */
-    Vector<int> wanted_channels;
+    Vector<QueuedChannel> wanted_channels;
+    /**
+     * The rectangle of the effect's canvas whose inputs changed since its maps were last written,
+     * resolved on the main thread at creation (#bake_effect_region_resolve). The effect's bake
+     * subscription is per row, so one region serves every channel it filters; the per-channel
+     * clip and halo are what #bake_effect_channel_compute derives from it. False means the whole
+     * canvas, as before.
+     */
+    bool has_changed_region = false;
+    rcti changed_region = {};
     Vector<ChannelResult> channels;
   };
   Vector<EffectResult> effects;
+  /**
+   * The GPU results of the queued owned effects, computed by the provider on the main thread at
+   * creation -- the worker has no GPU context, so without this a GPU-computed effect's channel
+   * would fall back to the CPU composite there. One entry per channel the provider answered; the
+   * worker moves its entry out at the start of the effect stage (#bake_job_precomputed_take) and
+   * releases the buffer once the map's own format holds the pixels, so each is held from here to
+   * its take -- through the whole rows stage above. The ImBuf is the input's own size, a float RGBA
+   * of the same order as the 256 MiB a 4K channel map costs (see #ChannelResult), and the converted
+   * result that replaces it stays until the commit like every #ChannelResult. A channel with no
+   * entry (no provider, not GPU-computed, refused) is computed on the CPU as before.
+   */
+  Vector<PrecomputedChannelResult> precomputed_effects;
   /** The worker stopped early; nothing it produced is written. */
   bool cancelled = false;
 };
@@ -258,6 +302,79 @@ static void bake_common_from_channel(Span<float> color,
       common[i] = std::max(common[i], clamp_f(coverage[i] / content, 0.0f, 1.0f));
     }
   }
+}
+
+/**
+ * Compute the GPU results of the queued owned effects here, on the main thread: the worker has no
+ * GPU context, and its own compute would leave every channel #BKE_paint_layers_effect_is_gpu_computed
+ * answers true for to the CPU composite. The provider is asked on the original material -- this
+ * runs before the description is localized, on the main thread, and the live description is exactly
+ * what the queued hashes above were stamped from. The planner leaves a heavy owned effect to this
+ * job in a windowed session; a background session's inline path computes the same channel on this
+ * same (main) thread instead, never across the worker, so nothing races this for the results.
+ * A channel the provider refuses is left out of the store and stays on the worker's CPU path as
+ * before.
+ *
+ * The region the job's creation resolved for the effect (#bake_effect_region_resolve) rides along
+ * to the provider, which may narrow its pass dispatches to it. The result is still a full-canvas
+ * read-back: the provider's texture is valid as a whole and this codebase has no sub-region
+ * texture read (CombinedGpuFrame::read_back runs GPU_texture_read whole), so the dispatch narrows
+ * but the read-back does not. The commit lays only the band #bake_effect_channel_compute derives
+ * from that region (#BKE_paint_layers_effect_valid_region), which is what lets the narrower
+ * dispatch pay.
+ */
+static void bake_job_owned_effects_gpu_precompute(Material &ma, PaintLayersBakeJob &job)
+{
+  if (job.effects.is_empty()) {
+    return;
+  }
+  const auto provider = BKE_paint_layers_owned_effect_gpu_provider_get();
+  if (provider == nullptr) {
+    return;
+  }
+  /* The whole precompute runs on the main thread before the worker starts, so it is a UI freeze no
+   * other timer names: the per-channel `effect.own_bake.gpu` scopes below it carry the Hit/Render
+   * split, this scope the total the bake's queue costs the wait for. */
+  bke::paint_perf::ScopedTimer perf_precompute("effect.own_bake.precompute");
+  int effect_num = 0;
+  int channel_num = 0;
+  int64_t readback_bytes = 0;
+  for (const PaintLayersBakeJob::EffectResult &queued : job.effects) {
+    const MaterialPaintLayer *effect = BKE_paint_layers_find(ma, queued.marker);
+    if (effect == nullptr || !BKE_paint_layers_effect_is_gpu_computed(*effect)) {
+      continue;
+    }
+    const MaterialPaintLayer *row = BKE_paint_layers_correction_owner(ma, *effect);
+    if (row == nullptr) {
+      continue;
+    }
+    effect_num++;
+    for (const PaintLayersBakeJob::EffectResult::QueuedChannel &wanted : queued.wanted_channels) {
+      const int channel = wanted.channel;
+      channel_num++;
+      /* The region the effect's subscription named at creation, or null for the whole canvas: see
+       * the note above -- the read-back stays whole, the map write below is what the region pays
+       * for. */
+      const rcti *changed_region = queued.has_changed_region ? &queued.changed_region : nullptr;
+      std::shared_ptr<ImBuf> result = provider(
+          ma, *row, *effect, channel, PAINT_TILE_NUMBER_BASE, changed_region);
+      if (result == nullptr) {
+        /* No GPU answer for this channel: the worker computes it on the CPU as before. */
+        continue;
+      }
+      /* A full canvas of floats per channel is the readback the freeze above waits on. */
+      readback_bytes += int64_t(result->x) * result->y * 4 * int64_t(sizeof(float));
+      PrecomputedChannelResult entry;
+      entry.effect_marker = queued.marker;
+      entry.channel = channel;
+      entry.result = std::move(result);
+      job.precomputed_effects.append(std::move(entry));
+    }
+  }
+  perf_precompute.note("effects=%d channels=%d readback_bytes=%lld",
+                       effect_num,
+                       channel_num,
+                       readback_bytes);
 }
 
 PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain,
@@ -465,7 +582,9 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain,
       queued.size = size;
       for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
         if (paint_layer_effect_filters(ma, effect, int(info.channel))) {
-          queued.wanted_channels.append(int(info.channel));
+          PaintLayersBakeJob::EffectResult::QueuedChannel wanted;
+          wanted.channel = int(info.channel);
+          queued.wanted_channels.append(wanted);
         }
       }
       if (queued.wanted_channels.is_empty()) {
@@ -473,8 +592,30 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain,
       }
       /* Every gate has passed: only here is the bake structure allocated, so an effect nothing
        * computes never carries a permanently invalid one. */
-      BKE_paint_layers_bake_struct_ensure(effect)->size = size;
+      MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(effect);
+      bake->size = size;
+      /* The map each channel stood with before this bake, read here on the main thread: the
+       * worker may only patch a map that already held the previous result. A slot can keep a pointer
+       * an undo or a reset freed (#bake_service_image_is_live compares the address without touching
+       * it), and reading its id would be a use after free; a dead slot counts as no map, and the
+       * commit makes a new one whose id cannot match. */
+      for (PaintLayersBakeJob::EffectResult::QueuedChannel &wanted : queued.wanted_channels) {
+        const Image *slot = bake->images[wanted.channel];
+        const Image *map = (slot != nullptr && bake_service_image_is_live(bmain, slot)) ? slot :
+                                                                                          nullptr;
+        wanted.had_map = map != nullptr;
+        wanted.map_uid = map != nullptr ? map->id.session_uid : 0;
+      }
       BKE_paint_layers_bake_hash(ma, effect, queued.hash);
+      /* The subscription's rectangle is the same one the inline writer would lay: one region per
+       * effect row serves every channel it filters. Resolved here, on the main thread, before the
+       * worker copies the material; the hash comparison inside the resolve is what makes a pixel
+       * edit narrow the job while a parameter change does not. */
+      rcti changed_region;
+      if (const rcti *region = bake_effect_region_resolve(ma, effect, changed_region)) {
+        queued.has_changed_region = true;
+        queued.changed_region = *region;
+      }
       job->effects.append(std::move(queued));
     }
     return true;
@@ -489,6 +630,10 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain,
     MEM_delete(job);
     return nullptr;
   }
+  /* The worker has no GPU context, so the GPU-computed effects' channels are produced here, on the
+   * main thread, while the description is still the original's; the localized copy below never
+   * touches them. */
+  bake_job_owned_effects_gpu_precompute(ma, *job);
   job->scene = scene;
   job->view_layer = view_layer;
   job->material_copy = id_cast<Material *>(BKE_id_copy_ex(
@@ -501,27 +646,82 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain,
 }
 
 /**
+ * Move the precomputed GPU result of \a effect_marker's \a channel out of the job's store, or null
+ * when its creation got none and the CPU compute is to run. The entry is left empty rather than
+ * removed: each channel is taken once, and the walk over the store is cheaper than a rebuild per
+ * take. The take is what releases the buffer on the worker -- it goes the moment the map's own
+ * format below holds the pixels.
+ */
+static std::shared_ptr<ImBuf> bake_job_precomputed_take(PaintLayersBakeJob &job,
+                                                        const bUUID &effect_marker,
+                                                        const int channel)
+{
+  for (PrecomputedChannelResult &entry : job.precomputed_effects) {
+    if (entry.channel == channel && BLI_uuid_equal(entry.effect_marker, effect_marker)) {
+      /* A taken entry stays as an emptied slot rather than being removed: the take is once per
+       * (marker, channel), and the channel at -1 keeps a repeated take from matching the slot
+       * again -- the contract answers null, not a hit on an already-moved result. */
+      entry.channel = -1;
+      return std::move(entry.result);
+    }
+  }
+  return nullptr;
+}
+
+/**
  * Compute \a effect's result in \a channel from the localized material \a ma and store it in the
  * map's own format at the \a size-square the map will have (the format and the resampling are what
- * #bake_effect_row_write gives the main-thread path). False when the channel has no result.
+ * #bake_effect_row_write gives the main-thread path). \a precomputed is the result the job's
+ * creation computed on the main thread (the worker has no GPU context); moved in, and null when
+ * there was none. False when the channel has no result.
+ *
+ * \a changed_region is the rectangle the creation resolved for the effect, or null for the whole
+ * canvas. It narrows the band #r_result will name for the commit
+ * (#BKE_paint_layers_effect_valid_region, the same clip and halo the main-thread writer uses), and
+ * the CPU compute where that compute hits its cache -- the worker's localized copy usually misses
+ * (its own session uid), so on this thread the region mostly pays for the map write rather than for
+ * less compute. It applies only when the channel's map already stood before the compute
+ * (\a had_map, with \a map_uid the identity the commit re-checks): a fresh or replaced map holds no
+ * previous result outside the band, so it is written whole. The precomputed buffer is always the
+ * effect's full canvas -- the provider narrows its dispatches but the GPU read-back is whole (see
+ * #bake_job_owned_effects_gpu_precompute).
  */
 static bool bake_effect_channel_compute(const Material &ma,
                                         const MaterialPaintLayer &effect,
                                         const int size,
                                         const MaterialPaintChannelInfo &info,
+                                        const rcti *changed_region,
+                                        const bool had_map,
+                                        const uint32_t map_uid,
+                                        std::shared_ptr<ImBuf> precomputed,
                                         PaintLayersBakeJob::ChannelResult &r_result)
 {
-  const MaterialPaintLayer *row = BKE_paint_layers_correction_owner(ma, effect);
-  if (row == nullptr) {
-    return false;
-  }
   const int channel = int(info.channel);
-  /* The job computes whole in this version: its localized material copy holds no previous effect
-   * cache entry for a region to patch, so an offered rectangle would miss and compute the whole
-   * canvas anyway. Giving the job the planner's region and a regional map write is a follow-up
-   * (patch 04 / a separate task); until then its commit writes every channel whole. */
-  std::shared_ptr<ImBuf> result = paint_layer_owned_effect_result_compute(
-      ma, *row, effect, channel, PAINT_TILE_NUMBER_BASE);
+  const MaterialPaintLayer *row = BKE_paint_layers_correction_owner(ma, effect);
+  /* A region into a map that does not stand would be lost: the compute would answer for the band
+   * only while the fresh map needs the whole canvas. The same rule the inline writer applies. */
+  const rcti *compute_region = (changed_region != nullptr && had_map) ? changed_region : nullptr;
+  /* The creation precomputed this channel's GPU result on the main thread, which is where the GPU
+   * context is: consume it instead of computing here, before the CPU compute below runs. Moved out
+   * of the job's store, so the buffer is released when this returns; a null leaves the CPU path as
+   * it was -- this thread is not the main one, so the compute's own gate turns it to the CPU
+   * composite for a channel the provider never answered. */
+  std::shared_ptr<ImBuf> result = std::move(precomputed);
+  const bool cpu_compute = result == nullptr;
+  rcti compute_valid;
+  BLI_rcti_init(&compute_valid, 0, 0, 0, 0);
+  if (cpu_compute) {
+    if (row == nullptr) {
+      return false;
+    }
+    result = paint_layer_owned_effect_result_compute(ma,
+                                                     *row,
+                                                     effect,
+                                                     channel,
+                                                     PAINT_TILE_NUMBER_BASE,
+                                                     compute_region,
+                                                     &compute_valid);
+  }
   if (result == nullptr || result->float_buffer.data == nullptr || result->x <= 0 ||
       result->y <= 0)
   {
@@ -529,6 +729,28 @@ static bool bake_effect_channel_compute(const Material &ma,
   }
   const int width = result->x;
   const int height = result->y;
+  /* The band of the result the compute answered for; the whole canvas when no region was offered
+   * or it cannot be narrowed. The CPU path's own rectangle may reach past it -- the cache names
+   * the changed maps it patched, which can cover a band the subscription's chunks do not -- so the
+   * two are united, while a whole-canvas answer leaves the narrower band to write. */
+  rcti valid_region;
+  BLI_rcti_init(&valid_region, 0, width, 0, height);
+  if (compute_region != nullptr && row != nullptr) {
+    BKE_paint_layers_effect_valid_region(ma,
+                                         *row,
+                                         effect,
+                                         channel,
+                                         PAINT_TILE_NUMBER_BASE,
+                                         compute_region,
+                                         width,
+                                         height,
+                                         valid_region);
+    const bool compute_whole = compute_valid.xmin == 0 && compute_valid.ymin == 0 &&
+                               compute_valid.xmax >= width && compute_valid.ymax >= height;
+    if (cpu_compute && !BLI_rcti_is_empty(&compute_valid) && !compute_whole) {
+      BLI_rcti_union(&valid_region, &compute_valid);
+    }
+  }
   const float *src = result->float_buffer.data;
   const int64_t pixel_num = int64_t(size) * size;
   r_result.channel = channel;
@@ -567,6 +789,22 @@ static bool bake_effect_channel_compute(const Material &ma,
         bake_pixel_store_byte(straight, info.is_color, byte_colorspace, &r_result.color_bytes[i * 4]);
       }
     }
+  }
+  /* The map rectangle the valid band lands in. A map texel x samples result texel
+   * min(x * width / size, width - 1), the loop above, so the result columns [xmin, xmax) are read
+   * by the map columns [xmin * size / width, xmax * size / width) rounded up -- the same numbers
+   * the inline writer derives (#bake_effect_row_write). */
+  if (compute_region != nullptr && !BLI_rcti_is_empty(&valid_region)) {
+    r_result.regional = true;
+    r_result.map_uid = map_uid;
+    r_result.rect[0] = clamp_i(
+        int((int64_t(valid_region.xmin) * size + width - 1) / width), 0, size);
+    r_result.rect[1] = clamp_i(
+        int((int64_t(valid_region.ymin) * size + height - 1) / height), 0, size);
+    r_result.rect[2] = clamp_i(
+        int((int64_t(valid_region.xmax) * size + width - 1) / width), 0, size);
+    r_result.rect[3] = clamp_i(
+        int((int64_t(valid_region.ymax) * size + height - 1) / height), 0, size);
   }
   return true;
 }
@@ -611,11 +849,13 @@ void BKE_paint_layers_bake_job_compute(PaintLayersBakeJob &job,
          * cancel button responsive to within one channel's render. */
         if (is_cancelled && is_cancelled()) {
           /* A cancelled job writes nothing, and what it holds is hundreds of MiB at 4K: the results
-           * and the surfaces they were rendered from go now, not at the free. The commit reads no
+           * and the surfaces they were rendered from go now, not at the free. The precomputed GPU
+           * results none of the effect stage below would consume go with them. The commit reads no
            * rows once this mark is set. */
           job.cancelled = true;
           job.rows = Vector<PaintLayersBakeJob::RowResult>();
           job.effects = Vector<PaintLayersBakeJob::EffectResult>();
+          job.precomputed_effects.clear();
           return;
         }
         const int channel = int(info.channel);
@@ -711,20 +951,30 @@ void BKE_paint_layers_bake_job_compute(PaintLayersBakeJob &job,
       report();
       continue;
     }
-    for (const int channel : effect_result.wanted_channels) {
+    for (const PaintLayersBakeJob::EffectResult::QueuedChannel &wanted :
+         effect_result.wanted_channels)
+    {
+      const int channel = wanted.channel;
       if (is_cancelled && is_cancelled()) {
         job.cancelled = true;
         job.rows = Vector<PaintLayersBakeJob::RowResult>();
         job.effects = Vector<PaintLayersBakeJob::EffectResult>();
+        /* Whatever precomputed results the channels before this one left unconsumed go too. */
+        job.precomputed_effects.clear();
         BKE_paint_layers_effect_cache_free_material(ma);
         return;
       }
       PaintLayersBakeJob::ChannelResult result;
-      if (bake_effect_channel_compute(ma,
-                                      *effect,
-                                      effect_result.size,
-                                      BKE_paint_material_channel_info(eMaterialPaintChannel(channel)),
-                                      result))
+      if (bake_effect_channel_compute(
+              ma,
+              *effect,
+              effect_result.size,
+              BKE_paint_material_channel_info(eMaterialPaintChannel(channel)),
+              effect_result.has_changed_region ? &effect_result.changed_region : nullptr,
+              wanted.had_map,
+              wanted.map_uid,
+              bake_job_precomputed_take(job, effect_result.marker, channel),
+              result))
       {
         effect_result.channels.append(std::move(result));
       }
@@ -1012,12 +1262,19 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
       if (color_image == nullptr) {
         continue;
       }
+      /* The band the worker's compute answered for, when the creation had a region for the effect
+       * and the map that stood then is still the one #bake_service_image just returned. A map it
+       * replaced is fresh and blank outside the band, so the whole stored buffer is laid into it;
+       * the stored buffer is always the full canvas -- the GPU read-back is not narrowed (see
+       * #bake_job_owned_effects_gpu_precompute). */
+      int rect[4] = {channel.rect[0], channel.rect[1], channel.rect[2], channel.rect[3]};
+      const bool regional = channel.regional && color_image->id.session_uid == channel.map_uid;
       bake_write_stored_image(
           *color_image,
           channel.stored_float,
           channel.stored_float ? static_cast<const void *>(channel.color.data()) :
                                  static_cast<const void *>(channel.color_bytes.data()),
-          nullptr,
+          regional ? rect : nullptr,
           0);
       channel.color = Vector<float>();
       channel.color_bytes = Vector<uchar>();
@@ -1089,6 +1346,13 @@ int64_t BKE_paint_layers_bake_job_retained_bytes(const PaintLayersBakeJob &job)
     for (const PaintLayersBakeJob::ChannelResult &channel : effect.channels) {
       bytes += channel.color.size() * int64_t(sizeof(float)) +
                channel.color_bytes.size() * int64_t(sizeof(uchar));
+    }
+  }
+  /* The precomputed GPU results the creation left, still waiting for the effect stage to take
+   * them; the float RGBA of each is at the effect input's own size. */
+  for (const PrecomputedChannelResult &precomputed : job.precomputed_effects) {
+    if (precomputed.result != nullptr && precomputed.result->float_buffer.data != nullptr) {
+      bytes += int64_t(precomputed.result->x) * precomputed.result->y * 4 * int64_t(sizeof(float));
     }
   }
   return bytes;

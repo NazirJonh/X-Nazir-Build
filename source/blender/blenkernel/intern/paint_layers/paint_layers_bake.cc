@@ -2450,10 +2450,15 @@ bool BKE_paint_layers_bake_is_heavy(const Material &ma, const MaterialPaintLayer
     /* The worker job renders a row's subtree from a localized copy; a mask effect's grey is the
      * mask effect cache's compute, which only the main thread reaches. Calling it heavy would leave
      * it to a job that never picks it up, so after its first bake an edit would not bake it again.
-     * A grey that reads the surface (#paint_layers_bake_node_reads_surface) stays the planner's
-     * too: it reads the evaluated object through the projection, which only the main thread may,
-     * and the job has no result type for a mask's grey. #BKE_paint_layers_bake_job_create asks the
-     * planner for it, as for a Decal effect. */
+     * The GPU work lightens the synchronous path instead of moving it: the grey's kernel is asked of
+     * the mask effect GPU provider first, on the main thread (#paint_layer_mask_effect_compute), the
+     * CPU kernel staying the fallback a refusal answers with. Moving the grey itself into a job
+     * stays deferred, for three blockers: the job renders from a localized copy, so a grey keyed on
+     * the localized copy's session_uid would be an entry the main-thread reads never hit; a grey
+     * that reads the surface (#paint_layers_bake_node_reads_surface) reads the evaluated object
+     * through the projection, which only the main thread may; and the job has no result type for a
+     * mask's grey. #BKE_paint_layers_bake_job_create asks the planner for it, as for a Decal
+     * effect. */
     return false;
   }
   if (paint_layer_is_owned_effect(ma, layer)) {
@@ -3468,9 +3473,9 @@ static bool bake_object_tile_write(
  * #BKE_paint_layers_bake_is_valid also checks cannot apply to it: the hash, drag and slot tests
  * above are all this predicate needs.
  */
-static const rcti *bake_effect_region_resolve(const Material &ma,
-                                              const MaterialPaintLayer &effect,
-                                              rcti &r_region)
+const rcti *bake_effect_region_resolve(const Material &ma,
+                                       const MaterialPaintLayer &effect,
+                                       rcti &r_region)
 {
   if (effect.bake == nullptr || !bake_row_has_maps(effect)) {
     return nullptr;
@@ -3611,8 +3616,8 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
       if (paint_layer_is_owned_effect(ma, layer)) {
         /* The effect's result is one map per channel it filters, written from the effect cache's
          * compute. This is the inline path only: every owned effect is heavy and leaves the main
-         * thread, and the worker job computes and writes the maps whole until a follow-up gives
-         * the job the region (its localized copy carries no previous cache entry to patch). Here,
+         * thread, where the worker job resolves the same region at its creation
+         * (#bake_effect_region_resolve) and lays only the band it answers for at the commit. Here,
          * when the maps stand and the subscription reports pixel edits the description still
          * agrees with, only the rectangle the compute answers for is written
          * (#bake_effect_region_resolve holds the trust rules). A stroke defers the compute

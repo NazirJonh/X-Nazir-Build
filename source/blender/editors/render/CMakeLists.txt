@@ -14,8 +14,11 @@ set(INC_SYS
 
 set(SRC
   brush_layer_source_bake.cc
+  paint_material_combined_effect_pass.cc
   paint_material_combined_effects.cc
   paint_material_combined_gather.cc
+  paint_material_combined_mask_gpu.cc
+  paint_material_combined_owned_gpu.cc
   render_internal.cc
   render_layered_channels.cc
   render_layered_convert.cc
@@ -31,6 +34,7 @@ set(SRC
   render_view.cc
 
   paint_material_combined_effects.hh
+  paint_material_combined_owned_gpu.hh
   render_intern.hh
   render_material_bake_intern.hh
 )

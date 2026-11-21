@@ -62,7 +62,7 @@ static bool bake_image_is_float(Image &image)
  * file reset can free a map while the slot keeps the pointer, and the next write must make a new
  * one instead of reading the freed image. The address is compared without dereferencing it.
  */
-static bool bake_service_image_is_live(const Main &bmain, const Image *image)
+bool bake_service_image_is_live(const Main &bmain, const Image *image)
 {
   for (const Image &live : bmain.images) {
     if (&live == image) {

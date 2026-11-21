@@ -140,9 +140,9 @@ template<typename Entry> struct GpuLruStore {
  * a tile. #combined_preview_gpu_update refuses a tile other than the base for a tiled stack, so
  * this never serves another tile's plan.
  */
-static gpu::Texture *gpu_map_texture(Image *image,
-                                     const ImageUser *image_user,
-                                     bool &r_premultiplied)
+gpu::Texture *gpu_map_texture(Image *image,
+                              const ImageUser *image_user,
+                              bool &r_premultiplied)
 {
   ImageUser iuser;
   if (image_user != nullptr) {
@@ -1964,8 +1964,10 @@ void CombinedPasses::effect_pass_dispatch(const EffectDispatchArgs &args,
  * \{ */
 
 /** The GPU effect cache's acquire hook: a canvas of the shape the frame's own accumulators have --
- * half float, read by the correction pass and written by the effect pass. The cache keeps one
- * reference to what this returns; a frame holding it across a dispatch takes one of its own. */
+ * half float, read by the correction pass and written by the effect pass. HOST_READ joins the two:
+ * the owned-effect bake provider reads an entry back into a CPU buffer, and the read-back usage
+ * flag has to be named when the texture is made. The cache keeps one reference to what this
+ * returns; a frame holding it across a dispatch takes one of its own. */
 static void *effect_gpu_acquire(void * /*data*/, const int width, const int height)
 {
   gpu::Texture *texture = GPU_texture_create_2d(
@@ -1974,7 +1976,8 @@ static void *effect_gpu_acquire(void * /*data*/, const int width, const int heig
       height,
       1,
       gpu::TextureFormat::SFLOAT_16_16_16_16,
-      eGPUTextureUsage(GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE),
+      eGPUTextureUsage(GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE |
+                       GPU_TEXTURE_USAGE_HOST_READ),
       nullptr);
   if (texture == nullptr) {
     return nullptr;
@@ -2010,7 +2013,9 @@ bool combined_preview_gpu_effects_run(
     CombinedPasses &passes,
     Vector<GpuEffectJob> &r_jobs,
     const Object *painted_object,
-    const int tile_number)
+    const int tile_number,
+    const rcti *effects_region,
+    const bUUID *effect_limit)
 {
   /* GPU effects: the content each effect reads, then the effect's own passes into the cache. This
    * runs after the Anchor Point captures -- a content render may read their slots -- and before the
@@ -2037,6 +2042,12 @@ bool combined_preview_gpu_effects_run(
               layer.content_corrections.data(), int64_t(layer.content_corrections.size())),
           correction.effect_marker);
       r_jobs.append(std::move(job));
+      /* A bake names the one effect it wants: the ones after it in this row are warmed for a frame
+       * the bake never reads, at a main-thread dispatch each, so the walk stops at the marker. The
+       * preview passes no marker and walks the row whole. */
+      if (effect_limit != nullptr && BLI_uuid_equal(correction.effect_marker, *effect_limit)) {
+        return;
+      }
     }
     for (const PaintMaterialCompositeImageLayer &child : layer.children) {
       self(self, child, channel);
@@ -2161,527 +2172,45 @@ bool combined_preview_gpu_effects_run(
     job.needs_render = state == PaintLayerEffectGpuState::Render;
     job.region_exact = BKE_paint_layers_effect_region_is_exact(
         job.input_entry, job.images, width, height);
+    /* The caller's rectangle of source texels it already knows moved (the bake's subscription, in
+     * the input's own texels) joins the cache's dirty region. It can only extend the band, never
+     * shrink it: the texture is shared with the screen and the publish below stamps it valid as a
+     * whole, so a render has to cover everything the cache itself named as moved. A Hit carries no
+     * dispatch, and a fresh or whole-canvas dirty stays whole whatever joins it, so the rectangle
+     * never costs more than the caller's own view of the change; where the description is not
+     * region exact the dispatch runs whole regardless (`rect_for` below). */
+    if (job.needs_render && effects_region != nullptr && !BLI_rcti_is_empty(effects_region)) {
+      /* Clamped to the canvas first: the caller's rectangle names texels of the sources, which the
+       * region-exact rule above holds to the input's own grid, and a band outside it narrows
+       * nothing. */
+      rcti clamped = *effects_region;
+      rcti canvas_rect;
+      BLI_rcti_init(&canvas_rect, 0, width, 0, height);
+      if (BLI_rcti_isect(&clamped, &canvas_rect, &clamped) && !BLI_rcti_is_empty(&clamped)) {
+        BLI_rcti_union(&job.region, &clamped);
+      }
+    }
     passes.effect_results.append(GpuEffectResult{
         .marker = job.correction->effect_marker, .channel = job.channel, .texture = job.result});
     if (!job.needs_render) {
       effect_hits++;
     }
   }
-  perf_cache.note("effects=%d hit=%d render=%d budget=%d MiB",
+  perf_cache.note("effects=%d hit=%d render=%d budget=%d MiB region=%s%dx%d",
                   int(r_jobs.size()),
                   effect_hits,
                   int(r_jobs.size()) - effect_hits,
-                  int(BKE_paint_layers_effect_gpu_cache_budget() / (1024 * 1024)));
+                  int(BKE_paint_layers_effect_gpu_cache_budget() / (1024 * 1024)),
+                  /* The caller's own rectangle, when the bake handed one in; 0x0 is its absence. */
+                  effects_region != nullptr ? "provider=" : "",
+                  effects_region != nullptr ? BLI_rcti_size_x(effects_region) : 0,
+                  effects_region != nullptr ? BLI_rcti_size_y(effects_region) : 0);
 
-  {
-    bke::paint_perf::ScopedTimer perf_pass("gpu_effect.pass");
-    /* The working space's luminance weights, which `IMB_colormanagement_get_luminance` reads: the
-     * shader's own Rec.709 triple would grain a different grey in another space. */
-    float luma[3];
-    IMB_colormanagement_get_luminance_coefficients(luma);
-    const float4 luma_coefficients(luma[0], luma[1], luma[2], 0.0f);
-
-    /* The textures one job's plan runs over: the rendered input, the luminance a grayscale High
-     * Pass keeps, the two ring slots the window passes ping-pong through, and the two float32
-     * pairs the reduction and the flooding ping-pong through on their own. The plan names its
-     * buffers by role, so the dispatch loop below is a straight walk of the plan and adding a
-     * pass kind touches the plan builder and the shader only -- the whole-canvas kinds being the
-     * exception, whose pairs and dispatch levels the host routes by kind. */
-    class EffectPassBuffers {
-     public:
-      EffectPassBuffers(gpu::Texture *input,
-                        gpu::Texture *luminance,
-                        gpu::Texture *ring_a,
-                        gpu::Texture *ring_b,
-                        gpu::Texture *result,
-                        gpu::Texture *slot,
-                        gpu::Texture *reduce_a,
-                        gpu::Texture *reduce_b,
-                        gpu::Texture *field_a,
-                        gpu::Texture *field_b,
-                        gpu::Texture *&field_texture)
-          : input_(input),
-            luminance_(luminance),
-            ring_{ring_a, ring_b},
-            result_(result),
-            slot_(slot),
-            reduce_{reduce_a, reduce_b},
-            field_pair_{field_a, field_b},
-            field_(field_texture)
-      {
-      }
-
-      gpu::Texture *source(const ePaintLayerEffectPassSource role) const
-      {
-        switch (role) {
-          case ePaintLayerEffectPassSource::Input:
-            return input_;
-          case ePaintLayerEffectPassSource::Previous:
-            return previous_;
-          case ePaintLayerEffectPassSource::Luminance:
-            return luminance_;
-        }
-        return input_;
-      }
-
-      gpu::Texture *aux(const ePaintLayerEffectPassAux role) const
-      {
-        switch (role) {
-          case ePaintLayerEffectPassAux::None:
-            return nullptr;
-          case ePaintLayerEffectPassAux::Previous:
-            return previous_;
-          case ePaintLayerEffectPassAux::Original:
-            return input_;
-          case ePaintLayerEffectPassAux::Slot:
-            return slot_;
-          case ePaintLayerEffectPassAux::Field:
-            /* The label field the flooding refined, read through the job's own slot: the commit
-             * below stores each flooding destination there, so a diffusion step or a tail sees
-             * the field the flooding ended on, never a stale one. */
-            return field_;
-        }
-        return nullptr;
-      }
-
-      /* The buffer \a pass writes: the cache texture on the last pass, the luminance buffer for
-       * the pre-pass, a free ring slot for every pass in between, and the free half of the float32
-       * pair for a reduction or flooding pass -- those two ping-pong on their own, leaving the 16F
-       * ring clean for the passes that follow them. */
-      gpu::Texture *destination(const PaintLayerEffectPass &pass) const
-      {
-        if (pass.pass_index == pass.pass_count - 1) {
-          return result_;
-        }
-        if (pass.kind == ePaintLayerEffectPass::Luminance) {
-          return luminance_;
-        }
-        if (pass.kind == ePaintLayerEffectPass::ReduceStart ||
-            pass.kind == ePaintLayerEffectPass::ReduceStep)
-        {
-          return reduce_[reduce_i_ ^ 1];
-        }
-        if (pass.kind == ePaintLayerEffectPass::FloodInit ||
-            pass.kind == ePaintLayerEffectPass::FloodStep)
-        {
-          return field_pair_[field_i_ ^ 1];
-        }
-        return ring_[ring_i_ ^ 1];
-      }
-
-      void commit(const PaintLayerEffectPass &pass, gpu::Texture *dst)
-      {
-        if (pass.kind == ePaintLayerEffectPass::ReduceStart ||
-            pass.kind == ePaintLayerEffectPass::ReduceStep)
-        {
-          if (dst != result_) {
-            reduce_i_ ^= 1;
-            reduce_last_ = dst;
-          }
-        }
-        else if (pass.kind == ePaintLayerEffectPass::FloodInit ||
-                 pass.kind == ePaintLayerEffectPass::FloodStep)
-        {
-          if (dst != result_) {
-            field_i_ ^= 1;
-            /* Stored through the job's slot, so the Field aux reads the same texture. */
-            field_ = dst;
-          }
-        }
-        else if (dst != result_ && pass.kind != ePaintLayerEffectPass::Luminance) {
-          ring_i_ ^= 1;
-        }
-        previous_ = dst;
-      }
-
-      /** The level the reduction last wrote: the one-texel sum a Color Match's grade is graded
-       * by, its aux whatever role the plan names the pass. */
-      gpu::Texture *reduce_final() const
-      {
-        return reduce_last_;
-      }
-
-     private:
-      gpu::Texture *input_;
-      gpu::Texture *luminance_;
-      gpu::Texture *ring_[2];
-      gpu::Texture *result_;
-      /** The slot map the plan's slot fetch reads, borrowed from the image's cache for the job. */
-      gpu::Texture *slot_;
-      /** The float32 halves the reduction and the flooding ping-pong through; both canvas-sized,
-       * so every pyramid level and every label field fits. */
-      gpu::Texture *reduce_[2];
-      gpu::Texture *field_pair_[2];
-      /** The job's #GpuEffectJob::field_texture slot itself: the flooding stores its final field
-       * through it and the Field aux role reads it back from there. */
-      gpu::Texture *&field_;
-      gpu::Texture *previous_ = nullptr;
-      int ring_i_ = 0;
-      /* The pair halves flip per pass of their own; both start on the second index, so the first
-       * write of either pair lands in its first half. */
-      int reduce_i_ = 1;
-      int field_i_ = 1;
-      /** The level the reduction last wrote (the grade's aux); nothing else reads it. */
-      gpu::Texture *reduce_last_ = nullptr;
-    };
-
-    int rendered = 0;
-    int last_kind = 0;
-    int last_radius = 0;
-    int last_passes = 0;
-    rcti last_region;
-    BLI_rcti_init(&last_region, 0, 0, 0, 0);
-    bool last_full = true;
-
-    /* Effects render in the order they were collected: an effect's input is laid from the results of
-     * the ones before it, which are published by the time its own input is rendered. */
-    for (GpuEffectJob &job : r_jobs) {
-      if (!job.needs_render) {
-        continue;
-      }
-      /* The scratch of this job alone, returned to the pool when the job ends -- the pass results
-       * the later effects read live in the GPU result cache, so nothing here has to outlive the
-       * publish below, and the next job of the same size reuses the textures instead of the frame
-       * growing by a set of canvases per effect. */
-      Vector<gpu::Texture *> job_scratch;
-      BLI_SCOPED_DEFER([&]() {
-        for (gpu::Texture *texture : job_scratch) {
-          passes.pool.release_texture(texture);
-        }
-      });
-      const auto job_acquire = [&](const int2 canvas_size) -> gpu::Texture * {
-        gpu::Texture *texture = passes.pool.acquire_texture_2d(canvas_size,
-                                                               1,
-                                                               gpu::TextureFormat::SFLOAT_16_16_16_16,
-                                                               passes.accum_usage,
-                                                               "combined_effect_scratch");
-        if (texture != nullptr) {
-          job_scratch.append(texture);
-        }
-        return texture;
-      };
-      const int2 canvas = job.input_size;
-      const int n = int(job.passes.size());
-
-      /* The slot map a Channel Split's slot fetch reads as its aux: the image's own GPU texture,
-       * the same acquisition every row's map goes through. A cache hit never dispatches, so its
-       * slot map is not uploaded again, and the texture is borrowed from the image's cache rather
-       * than released with the job's scratch -- the maps the input render below reads are borrowed
-       * the same way. */
-      for (const PaintLayerEffectPass &pass : job.passes) {
-        if (pass.aux != ePaintLayerEffectPassAux::Slot) {
-          continue;
-        }
-        bool premultiplied = false;
-        job.slot_texture = gpu_map_texture(job.input_entry.slot_image, nullptr, premultiplied);
-        if (job.slot_texture == nullptr) {
-          return gpu_refuse("a Channel Split slot map has no GPU texture");
-        }
-        break;
-      }
-
-      /* The content the effect reads, laid into a canvas of the input's own resolution and texel
-       * space. The input is rendered whole (no region): a capture has no region of its own, and its
-       * cost is measured against the effect passes below -- if it dominates, a regional input is the
-       * next step. */
-      {
-        bke::paint_perf::ScopedTimer perf_input("gpu_effect.input");
-        CombinedTarget effect_target;
-        /* The folder accumulators this target grows are its own: released when the job's scope ends, on
-         * every path out of it, because the pool keeps a texture that is never released until the
-         * context's pool is destroyed. */
-        BLI_SCOPED_DEFER([&]() {
-          for (gpu::Texture *texture : effect_target.folder_premul) {
-            if (texture != nullptr) {
-              passes.pool.release_texture(texture);
-            }
-          }
-          for (gpu::Texture *texture : effect_target.folder_cover) {
-            if (texture != nullptr) {
-              passes.pool.release_texture(texture);
-            }
-          }
-        });
-        effect_target.size = canvas;
-        effect_target.groups = math::divide_ceil(canvas, int2(16));
-        effect_target.texel_to_uv = math::from_scale<float3x3, 2>(1.0f / float2(canvas));
-        effect_target.texel_to_uv_4x4 = float4x4::identity();
-        effect_target.texel_to_uv_4x4[0] = float4(
-            effect_target.texel_to_uv[0].x, effect_target.texel_to_uv[0].y, 0.0f, 0.0f);
-        effect_target.texel_to_uv_4x4[1] = float4(
-            effect_target.texel_to_uv[1].x, effect_target.texel_to_uv[1].y, 0.0f, 0.0f);
-        effect_target.texel_to_uv_4x4[3] = float4(
-            effect_target.texel_to_uv[2].x, effect_target.texel_to_uv[2].y, 0.0f, 1.0f);
-        /* The four textures the input's row_emit reads, held only while it lays: the defer
-         * returns them the moment this block ends, so the passes below run against the input and
-         * the ping-pong alone. */
-        gpu::Texture *target_scratch[4] = {nullptr, nullptr, nullptr, nullptr};
-        BLI_SCOPED_DEFER([&]() {
-          for (gpu::Texture *texture : target_scratch) {
-            if (texture != nullptr) {
-              passes.pool.release_texture(texture);
-            }
-          }
-        });
-        const auto target_acquire = [&](const int2 canvas_size) -> gpu::Texture * {
-          gpu::Texture *texture = passes.pool.acquire_texture_2d(canvas_size,
-                                                                 1,
-                                                                 gpu::TextureFormat::SFLOAT_16_16_16_16,
-                                                                 passes.accum_usage,
-                                                                 "combined_effect_scratch");
-          for (gpu::Texture *&slot : target_scratch) {
-            if (slot == nullptr) {
-              slot = texture;
-              break;
-            }
-          }
-          return texture;
-        };
-        effect_target.row_color = target_acquire(canvas);
-        effect_target.row_factor = target_acquire(canvas);
-        effect_target.mask_accum = target_acquire(canvas);
-        /* The capture returns before anything blends onto the destination, but the layer pass binds it
-         * as an image all the same: a placeholder of its own keeps it from being the texture the same
-         * dispatch samples. */
-        effect_target.dest = target_acquire(int2(1));
-        job.input = job_acquire(canvas);
-        if (effect_target.row_color == nullptr || effect_target.row_factor == nullptr ||
-            effect_target.mask_accum == nullptr || effect_target.dest == nullptr ||
-            job.input == nullptr)
-        {
-          return gpu_refuse("an effect input texture could not be allocated");
-        }
-        /* An effect's input has no mask to build (the describe clears the row's): refuse rather than
-         * rely on that, since the capture's store step would write a canvas into the one-texel
-         * placeholder. */
-        if (!job.input_entry.mask_items.is_empty() || job.input_entry.mask_image != nullptr) {
-          return gpu_refuse("an effect input carries a mask");
-        }
-        if (!passes.row_emit(effect_target, job.input_entry, job.channel, -1, job.input, nullptr)) {
-          return false;
-        }
-        /* The alpha the CPU buffer holds when the kernel is done: the content alpha where the channel
-         * tracks one, one elsewhere (`eval_row_content`'s rule), because the correction pass divides the
-         * result by it as the CPU evaluator straightens a float buffer. */
-        /* A pass whose plan writes its own alpha (a Fill Area's coverage, a Drop Shadow's weight)
-         * has the passes after it carry that alpha through the standard store -- a blur pair after
-         * a tail keeps the coverage it softened, exactly the CPU buffer's own rule. */
-        const bool pass_writes_alpha = std::any_of(job.passes.begin(),
-                                                   job.passes.end(),
-                                                   [](const PaintLayerEffectPass &pass) {
-                                                     return pass.alpha_from_kernel;
-                                                   });
-        job.tracks_alpha = job.input_entry.tracks_content_alpha ||
-                           job.channel == PAINT_MATERIAL_CHANNEL_NORMAL || pass_writes_alpha;
-        GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS | GPU_BARRIER_TEXTURE_FETCH);
-        perf_input.note("kind=%d size=%dx%d full=1", int(job.correction->filter), canvas.x, canvas.y);
-      }
-
-      /* The luminance buffer a grayscale High Pass keeps, and the two ring slots the window
-       * passes ping-pong through. Each is acquired only when the plan uses it: a box blur needs no
-       * luminance buffer, a pointwise Noise needs neither, and the job's scratch defer above hands
-       * every one of them back to the pool when the job's scope ends. */
-      gpu::Texture *scratch[3] = {nullptr, nullptr, nullptr};
-      if (!job.passes.is_empty() && job.passes[0].kind == ePaintLayerEffectPass::Luminance) {
-        scratch[0] = job_acquire(canvas);
-        if (scratch[0] == nullptr) {
-          return gpu_refuse("an effect scratch texture could not be allocated");
-        }
-      }
-      if (n > 1) {
-        scratch[1] = job_acquire(canvas);
-        scratch[2] = job_acquire(canvas);
-        if (scratch[1] == nullptr || scratch[2] == nullptr) {
-          return gpu_refuse("an effect scratch texture could not be allocated");
-        }
-      }
-
-      /* The float32 pairs the two whole-canvas effects run through, acquired only when the plan
-       * names the passes that use them: the Color Match's reduction pyramid sums its levels up
-       * from the input -- sums a 4K canvas overflows a half float with -- and the Fill Area's
-       * label field stamps coordinates the width of the canvas, past what a half float numbers
-       * exactly. Both are canvas-sized, so every pyramid level and every field fits into one, and
-       * the job's scratch defer above hands them back to the pool with the rest. */
-      bool plan_reduces = false;
-      bool plan_floods = false;
-      for (const PaintLayerEffectPass &pass : job.passes) {
-        plan_reduces |= pass.kind == ePaintLayerEffectPass::ReduceStart ||
-                        pass.kind == ePaintLayerEffectPass::ReduceStep;
-        plan_floods |= pass.kind == ePaintLayerEffectPass::FloodInit ||
-                       pass.kind == ePaintLayerEffectPass::FloodStep;
-      }
-      const auto job_acquire_pair = [&](gpu::Texture *(&pair)[2], const char *name) -> bool {
-        for (gpu::Texture *&half : pair) {
-          half = passes.pool.acquire_texture_2d(canvas,
-                                                1,
-                                                gpu::TextureFormat::SFLOAT_32_32_32_32,
-                                                passes.accum_usage,
-                                                name);
-          if (half == nullptr) {
-            return false;
-          }
-          job_scratch.append(half);
-        }
-        return true;
-      };
-      BLI_SCOPED_DEFER([&]() {
-        /* The pairs went back to the pool with the scratch above; the job keeps no pointers past
-         * this scope. */
-        job.reduce_pair[0] = nullptr;
-        job.reduce_pair[1] = nullptr;
-        job.field_pair[0] = nullptr;
-        job.field_pair[1] = nullptr;
-        job.field_texture = nullptr;
-        job.field_placeholder = nullptr;
-      });
-      job.field_placeholder = passes.pool.acquire_texture_2d(int2(1),
-                                                             1,
-                                                             gpu::TextureFormat::SFLOAT_32_32_32_32,
-                                                             passes.accum_usage,
-                                                             "combined_effect_field_placeholder");
-      if (job.field_placeholder == nullptr) {
-        return gpu_refuse("an effect field placeholder could not be allocated");
-      }
-      job_scratch.append(job.field_placeholder);
-      if (plan_reduces && !job_acquire_pair(job.reduce_pair, "combined_effect_reduce")) {
-        return gpu_refuse("an effect reduction texture could not be allocated");
-      }
-      if (plan_floods && !job_acquire_pair(job.field_pair, "combined_effect_field")) {
-        return gpu_refuse("an effect field texture could not be allocated");
-      }
-
-      /* The dispatch rectangle of every pass: the dirty region grown by the reach the passes
-       * after it still read, per axis, and by the halo of the effects before this one in the
-       * row. The last pass writes the cache over the whole dirty + halo band. A render that is
-       * not region exact -- or a first render, whose dirty region is the whole canvas -- runs
-       * over the canvas instead. */
-      Vector<rcti> pass_rects(n);
-      {
-        bke::paint_perf::ScopedTimer perf_region("gpu_effect.region");
-        BKE_paint_layers_effect_pass_regions(
-            Span<const PaintLayerEffectPass>(job.passes.data(), job.passes.size()),
-            job.region,
-            job.predecessor_halo,
-            canvas.x,
-            canvas.y,
-            MutableSpan<rcti>(pass_rects.data(), pass_rects.size()));
-        perf_region.note("kind=%d region=%dx%d full=%d halo=%d",
-                         int(job.correction->filter),
-                         BLI_rcti_size_x(&pass_rects[n - 1]),
-                         BLI_rcti_size_y(&pass_rects[n - 1]),
-                         job.region_exact ? 0 : 1,
-                         job.halo);
-      }
-      rcti full_rect;
-      BLI_rcti_init(&full_rect, 0, canvas.x, 0, canvas.y);
-      const auto rect_for = [&](const PaintLayerEffectPass &pass) -> rcti {
-        /* The reduction dispatches over its own output level, not the canvas: the level `radius`
-         * names is the canvas halved that many times, at least one texel. The pyramid is a
-         * function of the whole input, so the cache's region narrows nothing here. */
-        if (pass.kind == ePaintLayerEffectPass::ReduceStart ||
-            pass.kind == ePaintLayerEffectPass::ReduceStep)
-        {
-          rcti level_rect;
-          BLI_rcti_init(&level_rect,
-                        0,
-                        0,
-                        std::max(canvas.x >> pass.radius, 1),
-                        std::max(canvas.y >> pass.radius, 1));
-          return level_rect;
-        }
-        /* The flooding sweeps run one thread per line: the rows mode a single texel-wide dispatch
-         * down the canvas, the columns mode a single texel-tall one across it, the kernel walking
-         * the whole line the thread owns. The label field is a function of the whole canvas -- the
-         * background floods in from the edges, and an edit anywhere reaches them -- so the field
-         * init runs the full canvas whatever the cache named as moved. */
-        if (pass.kind == ePaintLayerEffectPass::FloodStep) {
-          rcti sweep_rect;
-          if (pass.params.x == 1.0f) {
-            BLI_rcti_init(&sweep_rect, 0, 0, 1, canvas.y);
-          }
-          else {
-            BLI_rcti_init(&sweep_rect, 0, 0, canvas.x, 1);
-          }
-          return sweep_rect;
-        }
-        if (pass.kind == ePaintLayerEffectPass::FloodInit) {
-          return full_rect;
-        }
-        /* An empty dirty region on a render means the cache could not name what moved. */
-        return (job.region_exact && !BLI_rcti_is_empty(&job.region)) ?
-                   pass_rects[pass.pass_index] :
-                   full_rect;
-      };
-
-      EffectPassBuffers buffers(job.input,
-                                scratch[0],
-                                scratch[1],
-                                scratch[2],
-                                job.result,
-                                job.slot_texture,
-                                job.reduce_pair[0],
-                                job.reduce_pair[1],
-                                job.field_pair[0],
-                                job.field_pair[1],
-                                job.field_texture);
-      for (const PaintLayerEffectPass &pass : job.passes) {
-        gpu::Texture *dst = buffers.destination(pass);
-        /* The reduction and the flooding write their float32 texture through the field slot: the
-         * pass's own destination goes there, and the 16F result slot keeps a valid binding through
-         * the input canvas, which those kernels never write. */
-        gpu::Texture *field_dst = nullptr;
-        if (ELEM(pass.kind,
-                 ePaintLayerEffectPass::ReduceStart,
-                 ePaintLayerEffectPass::ReduceStep,
-                 ePaintLayerEffectPass::FloodInit,
-                 ePaintLayerEffectPass::FloodStep))
-        {
-          field_dst = dst;
-          dst = job.input;
-        }
-        /* The Color Match's grade is graded by the pyramid's one-texel sum: its aux is the level
-         * the reduction last wrote, whatever role the plan names the pass. */
-        gpu::Texture *aux = (pass.kind == ePaintLayerEffectPass::MatchGrade) ?
-                                buffers.reduce_final() :
-                                buffers.aux(pass.aux);
-        passes.effect_pass_dispatch(
-            {job, pass, buffers.source(pass.source), aux, dst, field_dst, rect_for(pass)},
-            luma_coefficients);
-        buffers.commit(pass, field_dst != nullptr ? field_dst : dst);
-      }
-
-      /* The versions are stamped after the render, so an edit that landed while it ran is newer than
-       * this entry and costs one more update rather than a result that never clears. The hashes are
-       * the ones the entry was keyed on above. */
-      BKE_paint_layers_effect_gpu_cache_publish(ma,
-                                                *job.effect,
-                                                job.channel,
-                                                job.input_size.x,
-                                                job.input_size.y,
-                                                job.images,
-                                                PaintLayerEffectKeyExtras{job.chain_hash,
-                                                                          job.input_scalar_hash},
-                                                tile_number);
-      rendered++;
-      last_kind = int(job.correction->filter);
-      last_radius = job.halo;
-      last_passes = n;
-      last_region = rect_for(job.passes[n - 1]);
-      last_full = !job.region_exact || (BLI_rcti_size_x(&job.region) >= canvas.x &&
-                                        BLI_rcti_size_y(&job.region) >= canvas.y);
-    }
-    if (rendered > 0) {
-      /* The correction pass samples the results next. */
-      GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
-    }
-    perf_pass.note("effects=%d kind=%d halo=%d passes=%d region=%dx%d full=%d",
-                   rendered,
-                   last_kind,
-                   last_radius,
-                   last_passes,
-                   BLI_rcti_size_x(&last_region),
-                   BLI_rcti_size_y(&last_region),
-                   last_full ? 1 : 0);
+  /* The render of the collected jobs -- each one's input laid, its pass plan dispatched over
+   * that input and the publish into the GPU result cache -- lives in
+   * paint_material_combined_effect_pass.cc, beside the buffer routing both dispatchers share. */
+  if (!combined_effect_jobs_render(ma, passes, r_jobs, effects_region, tile_number)) {
+    return false;
   }
 
   return true;

@@ -86,6 +86,13 @@ struct PaintLayersBakeTilePair {
  * the one pair it always had: \a object_index names the image tile, the UV tile is where the
  * object's UVs sit.
  */
+/**
+ * Whether \a image is still one of \a bmain's images. A bake slot can keep a pointer to an image an
+ * undo or a file reset freed; the address is compared without dereferencing it, so a caller must ask
+ * this before reading anything from the slot (see #bake_service_image).
+ */
+bool bake_service_image_is_live(const Main &bmain, const Image *image);
+
 Vector<PaintLayersBakeTilePair> bake_target_tile_pairs(const PaintLayersBakeTarget &target,
                                                        int object_index);
 
@@ -191,20 +198,32 @@ int bake_effect_size_for(const Material &ma, const MaterialPaintLayer &effect);
  * on, and only the cache's LRU budget retires it. True when any map was written.
  *
  * \param changed_region: the rectangle of the effect's canvas whose inputs changed since the maps
- *        were last written, or null to compute the whole canvas. Only the main-thread (inline)
- *        writer of the planner takes a region; the worker job does not accept one yet and writes
- *        every channel whole. Only the part of each map the compute answers for is written: a
- *        channel the compute returns an empty valid region for is skipped, its map already holding
- *        the result, and when no channel ends up writing, the finalize still runs -- the hash is
- *        stamped and the subscription re-created with a drain -- so the row stops being stale
- *        without its maps being touched. A channel whose map #bake_service_image replaced is
- *        written whole from the buffer the compute answered with; only a channel the compute could
- *        not answer leaves the bake unfinalized and stale for the next plan.
+ *        were last written, or null to compute the whole canvas. The worker job resolves the same
+ *        region at its creation and lays it from the stored buffer at its commit (see
+ *        #bake_effect_region_resolve). Only the part of each map the compute answers for is
+ *        written: a channel the compute returns an empty valid region for is skipped, its map
+ *        already holding the result, and when no channel ends up writing, the finalize still runs
+ *        -- the hash is stamped and the subscription re-created with a drain -- so the row stops
+ *        being stale without its maps being touched. A channel whose map #bake_service_image
+ *        replaced is written whole from the buffer the compute answered with; only a channel the
+ *        compute could not answer leaves the bake unfinalized and stale for the next plan.
  */
 bool bake_effect_row_write(Main &bmain,
                            Material &ma,
                            MaterialPaintLayer &effect,
                            const rcti *changed_region = nullptr);
+
+/**
+ * The rectangle of \a effect's result whose inputs changed since its maps were last written, or
+ * null when the whole canvas has to be computed. The trust rules are the ones the inline writer
+ * (#bake_effect_row_write) lays a region under: the maps still stand, the description hash still
+ * matches, no drag-reduced bake is owed, and no step of the row remaps an edit out of the
+ * rectangle. The job's creation asks the same question when it queues the effect, so the worker
+ * and the commit can narrow their dispatches and writes the way the inline path does.
+ */
+const rcti *bake_effect_region_resolve(const Material &ma,
+                                       const MaterialPaintLayer &effect,
+                                       rcti &r_region);
 
 /**
  * Whether the effect \a effect that owns its result has none current and nothing keeps it from
@@ -465,6 +484,30 @@ bool bake_drag_reduced_forget(const Material &ma, const MaterialPaintLayer &laye
 
 /** Drop every mark and reduced row that names \a material_uid. */
 void bake_drag_forget_material(uint32_t material_uid);
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Worker job GPU precompute
+ *
+ * The worker of a heavy bake has no GPU context, so the GPU-computed results of the owned effects
+ * it serves are produced ahead of it, on the main thread, while its job is created
+ * (#BKE_paint_layers_bake_job_create) and stored in the job for the worker to take.
+ * \{ */
+
+/**
+ * The GPU-computed result of one owned effect's channel, produced by the provider
+ * (see #BKE_paint_layers_owned_effect_gpu_provider_get) on the main thread at the job's creation.
+ * Held by the job until the worker's effect stage takes it and folds it into the map's own format;
+ * a channel with no entry in the job's store is computed on the CPU as before.
+ */
+struct PrecomputedChannelResult {
+  /** The effect the result belongs to, the marker the job's effect queue names it by. */
+  bUUID effect_marker = {};
+  int channel = 0;
+  /** Premultiplied float RGBA at the effect input's own size, as the provider produced it. */
+  std::shared_ptr<ImBuf> result = nullptr;
+};
 
 /** \} */
 

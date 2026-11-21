@@ -692,6 +692,19 @@ int BKE_paint_layers_effect_halo(eMaterialPaintLayerFilter filter,
                                  const int width,
                                  const int height);
 
+/**
+ * The parameters of a mask-stack \a effect in the schema order the pass plan reads them by, with the
+ * `for_mask` source override the CPU mask kernel applies: the shape-reading kinds (Drop Shadow, Mask
+ * Outline, Fill Area, Bevel) take their border from the luminance, because a mask's grey carries no
+ * alpha of its own. The packing is the one #paint_layer_effect_filter_params answers -- a colour lays
+ * its three channels across three consecutive slots at its place in the schema order -- so a caller
+ * outside BKE (the editors' mask GPU provider) reads the same numbers without duplicating the
+ * schema.
+ */
+void BKE_paint_layers_effect_mask_filter_params(
+    const MaterialPaintLayer &effect,
+    float (&r_params)[PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM]);
+
 /** How far an edit of an effect's input reaches in the effect's output. */
 enum class EffectReach : int8_t {
   /** One output texel reads one input texel: an edit moves the result inside the edited rect. */
@@ -755,6 +768,24 @@ void BKE_paint_layers_effect_region_clip(const rcti &dirty,
                                          int width,
                                          int height,
                                          rcti &r_out);
+
+/**
+ * The rectangle of an owned effect's \a width x \a height result that a map writer may lay from
+ * it, the answer #paint_layer_owned_effect_result_compute gives its callers: \a changed_region
+ * grown by the halo of \a effect's filter and clamped to the canvas, or the whole canvas when no
+ * region is offered, it is empty, or it is not in the input's own texel grid
+ * (#BKE_paint_layers_effect_region_is_exact). Shared with the worker job's regional write, which
+ * computes an effect's result off the main thread and has to clip the band it writes the same way.
+ */
+void BKE_paint_layers_effect_valid_region(const Material &ma,
+                                          const MaterialPaintLayer &row,
+                                          const MaterialPaintLayer &effect,
+                                          int channel,
+                                          int tile_number,
+                                          const rcti *changed_region,
+                                          int width,
+                                          int height,
+                                          rcti &r_valid_region);
 
 /**
  * Whether \a correction stands for an effect row's result: the description builder names the effect
@@ -937,6 +968,110 @@ void BKE_paint_layers_effect_gpu_cache_free_material(const Material &ma);
 
 /** The GPU effect cache's byte budget currently in force, for the gather's perf reporting. */
 size_t BKE_paint_layers_effect_gpu_cache_budget();
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Owned Effect GPU Provider
+ *
+ * The one hook the bake takes into the GPU half. The editors register the combined preview's GPU
+ * effect pipeline here, and the bake of an effect that owns its result asks it before it falls back
+ * to the CPU compute, so a bake reads the result the screen already keeps instead of paying the
+ * whole-canvas CPU render and kernel.
+ * \{ */
+
+/**
+ * Computes an owned effect's result the way the combined preview's effect pass does. The result is a
+ * float RGBA #ImBuf at the input's size with the CPU effect buffer's semantics: premultiplied by the
+ * input's content alpha, and a kind flagged #PAINT_LAYER_KIND_RESULT_HAS_ALPHA writes its own alpha.
+ * Null is a refusal (no GPU context, the effect's pass failed) and sends the caller to the CPU path.
+ *
+ * \param changed_region: the rectangle the caller (a bake that knows the stroke's region) offers
+ * for a regional dispatch, in the input's texel grid, or null for the whole canvas. The texture is
+ * valid as a whole once the provider returns; the valid rectangle a map writer needs -- the band
+ * the dispatch actually changed, grown by the halo -- is filled by the caller
+ * (#paint_layer_owned_effect_result_compute) with the same arithmetic the CPU path answers with.
+ *
+ * The result lives in the combined preview's own GPU effect cache, keyed the way the preview keys
+ * it -- the effect hash plus #PaintLayerEffectKeyExtras and the maps' versions -- so a bake and
+ * the screen share one computed result. The provider is asked on the main thread with a current GPU
+ * context only; the bake job's worker has neither and stays on the CPU path.
+ *
+ * The contract the two registration functions below pin: the hook is set on the main thread, before
+ * the first bake starts its worker -- the job's precompute and the sync bake both read it after the
+ * editors have registered, so a registration that races a bake is a caller's bug the plain pointer
+ * does not guard; the provider is always called on the main thread with a GPU context it may have
+ * to enable itself; a null answer -- or no provider at all -- is the CPU fallback, never an error.
+ */
+using PaintLayerOwnedEffectGpuProvider = std::shared_ptr<ImBuf> (*)(const Material &ma,
+                                                                    const MaterialPaintLayer &row,
+                                                                    const MaterialPaintLayer &effect,
+                                                                    const int channel,
+                                                                    const int tile_number,
+                                                                    const rcti *changed_region);
+
+/**
+ * Register \a provider as the GPU answer for owned effects. Every call replaces the previous one,
+ * and null takes the hook away again -- the state before the editors register, in which every bake
+ * takes the CPU path. Main thread only, and before the first bake's worker starts reading the hook:
+ * the registration is a plain pointer, so an edit that races a bake is the caller's own to keep out.
+ */
+void BKE_paint_layers_owned_effect_gpu_provider_set(PaintLayerOwnedEffectGpuProvider provider);
+
+/** The provider currently registered, or null. */
+PaintLayerOwnedEffectGpuProvider BKE_paint_layers_owned_effect_gpu_provider_get();
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Mask Effect GPU Provider
+ *
+ * The one hook a mask-stack effect (a Blur, a Noise, an item of a row's mask stack) takes into the
+ * GPU half. The editors register the combined preview's GPU effect pipeline here, and the mask
+ * effect's compute asks it before it runs the CPU kernel, so a mask item's grey is laid by the same
+ * pass the screen keeps instead of the serial-per-texel CPU kernel.
+ * \{ */
+
+/**
+ * Computes the kernel of a mask-stack effect over a grey canvas. The provider receives the grey the
+ * mask has built up to the effect -- RGB holding the same grey in all three channels, alpha one, at
+ * the mask canvas' size -- and fills \a r_result with the kernel's raw result: no normalize, no
+ * blend of the item's own invert/opacity (the reader lays those), and no luminance fold -- the
+ * caller runs the grey normalize after, for the kinds the kind table flags
+ * #PAINT_LAYER_KIND_MASK_NEEDS_LUMA.
+ *
+ * \param effect: the mask item whose kernel to run; the provider reads its own parameters only
+ *        (a filter's settings, a Noise's seed), the way the CPU kernel does.
+ * \param grey_input: the grey read in. \a r_result may alias it -- the compute fills one buffer
+ *        and hands it twice -- and that is safe for the pipeline this hook expects: the input is
+ *        read whole into a texture before any dispatch writes, so every texel's source is fixed
+ *        before the first write lands. A provider that cannot keep that order (or has no current
+ *        context, or the effect's pass fails) returns false and sends the caller to the CPU kernel,
+ *        rather than writing a buffer whose input it read half of.
+ * \param r_result: the caller-allocated result buffer, the same size as \a grey_input; the provider
+ *        fills all of it -- RGB as grey, alpha one, the shape the CPU kernel leaves.
+ *
+ * False is a refusal and falls back to the CPU path (the registered provider names its stage in
+ * the `BLENDER_PBR_PERF` log). The main thread and a
+ * current GPU context are the provider's own responsibility, the same terms the owned-effect
+ * provider works on: the hook is set on the main thread, before the first bake starts its worker,
+ * and the provider is always called on the main thread with a context it may have to enable itself.
+ */
+using PaintLayerMaskEffectGpuProvider = bool (*)(const MaterialPaintLayer &effect,
+                                                 const ImBuf &grey_input,
+                                                 ImBuf &r_result);
+
+/**
+ * Register \a provider as the GPU answer for mask-stack effects. Every call replaces the previous
+ * one, and null takes the hook away again -- the state before the editors register, in which every
+ * mask effect takes the CPU path. Reads happen during a composite; the plain pointer keeps no guard
+ * for that, the same terms the owned-effect provider keeps. Main thread only, and before the first
+ * bake starts its worker.
+ */
+void BKE_paint_layers_mask_effect_gpu_provider_set(PaintLayerMaskEffectGpuProvider provider);
+
+/** The provider currently registered, or null. */
+PaintLayerMaskEffectGpuProvider BKE_paint_layers_mask_effect_gpu_provider_get();
 
 /** \} */
 

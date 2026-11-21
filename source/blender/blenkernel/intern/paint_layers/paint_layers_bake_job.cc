@@ -316,12 +316,15 @@ static void bake_common_from_channel(Span<float> color,
  * before.
  *
  * The region the job's creation resolved for the effect (#bake_effect_region_resolve) rides along
- * to the provider, which may narrow its pass dispatches to it. The result is still a full-canvas
- * read-back: the provider's texture is valid as a whole and this codebase has no sub-region
- * texture read (CombinedGpuFrame::read_back runs GPU_texture_read whole), so the dispatch narrows
- * but the read-back does not. The commit lays only the band #bake_effect_channel_compute derives
- * from that region (#BKE_paint_layers_effect_valid_region), which is what lets the narrower
- * dispatch pay.
+ * to the provider, which may narrow its pass dispatches to it. When the creation resolved none --
+ * a first bake, whose subscription has no band yet -- the effect's content footprint
+ * (#BKE_paint_layers_effect_input_footprint_region) is offered instead, in input texels; a row
+ * whose footprint bounds nothing offers no region, and the provider computes the whole canvas as
+ * before. The result is still a full-canvas read-back: the provider's texture is valid as a whole
+ * and this codebase has no sub-region texture read (CombinedGpuFrame::read_back runs
+ * GPU_texture_read whole), so the dispatch narrows but the read-back does not. The commit lays
+ * only the band #bake_effect_channel_compute derives from that region
+ * (#BKE_paint_layers_effect_valid_region), which is what lets the narrower dispatch pay.
  */
 static void bake_job_owned_effects_gpu_precompute(Material &ma, PaintLayersBakeJob &job)
 {
@@ -354,8 +357,22 @@ static void bake_job_owned_effects_gpu_precompute(Material &ma, PaintLayersBakeJ
       channel_num++;
       /* The region the effect's subscription named at creation, or null for the whole canvas: see
        * the note above -- the read-back stays whole, the map write below is what the region pays
-       * for. */
+       * for. A creation that resolved none is offered the content footprint as the fallback, in
+       * input texels; the chain's halo is not added here, the effect stage grows its own dispatch
+       * by it. */
       const rcti *changed_region = queued.has_changed_region ? &queued.changed_region : nullptr;
+      rcti footprint;
+      if (changed_region == nullptr &&
+          BKE_paint_layers_effect_input_footprint_region(
+              ma,
+              *row,
+              *effect,
+              channel,
+              PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE},
+              footprint))
+      {
+        changed_region = &footprint;
+      }
       std::shared_ptr<ImBuf> result = provider(
           ma, *row, *effect, channel, PAINT_TILE_NUMBER_BASE, changed_region);
       if (result == nullptr) {

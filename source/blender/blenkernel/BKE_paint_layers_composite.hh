@@ -788,6 +788,32 @@ void BKE_paint_layers_effect_valid_region(const Material &ma,
                                           rcti &r_valid_region);
 
 /**
+ * Whether the content the CPU-computed \a effect reads on \a row is bounded to a rectangle of the
+ * input's canvas, and the rectangle in input pixels (an exclusive `x0, y0, x1, y1`, padded one
+ * texel past the frame's edge). The rectangle is the footprint the row's bounded UV mapping lays
+ * its content in: the preimage of the unit square under the composed chain of the transform
+ * effects' steps and the row's own mapping, which a finite kernel's result stays inside once the
+ * chain's halo is added. A bake effect with such a footprint can compute and write that rectangle
+ * alone -- the result outside it is a function of the input outside it, which the pixels the
+ * previous bake left there already answer.
+ *
+ * False when nothing here bounds the content, and the caller computes the whole canvas: a mapping
+ * that is off or repeats an axis, a projected or Decal step, a generator, an Anchor Point reader,
+ * a mesh-map atlas, a folder, a laid correction without a frame of its own, a whole-map kind in
+ * the chain below the effect, an input with no canvas of its own. A conservative false is always
+ * safe; a wrong rectangle never is.
+ *
+ * \param context: the tile context the effect's input is computed under, the same one the caller
+ *        passes the compute (the bake describes and computes on #PAINT_TILE_NUMBER_BASE).
+ */
+bool BKE_paint_layers_effect_input_footprint_region(const Material &ma,
+                                                    const MaterialPaintLayer &row,
+                                                    const MaterialPaintLayer &effect,
+                                                    int channel,
+                                                    const PaintLayerTileContext &context,
+                                                    rcti &r_region);
+
+/**
  * Whether \a correction stands for an effect row's result: the description builder names the effect
  * row it was made from in #PaintMaterialCompositeCorrection::effect_marker and leaves the marker nil
  * for every other kind (a map, a flat colour, a live reader). The one predicate every reader of the

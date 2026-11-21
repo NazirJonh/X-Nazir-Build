@@ -294,6 +294,7 @@ set(SRC
   intern/paint_layers/paint_layers_composite_intern.hh
   intern/paint_layers/paint_layers_effect_cache_intern.hh
   intern/paint_layers/paint_layers_effect_kernels.cc
+  intern/paint_layers/paint_layers_effect_footprint.cc
   intern/paint_layers/paint_layers_edit.cc
   intern/paint_layers/paint_layers_gradient.cc
   intern/paint_layers/paint_layers_gradient_surface.cc

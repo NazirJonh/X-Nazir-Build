@@ -1830,6 +1830,31 @@ TEST_F(PaintLayersMaterialMaskTest, an_edit_of_the_source_concerns_the_material_
  * lays over the row's content and the CPU composite reads instead of the effect cache.
  * \{ */
 
+namespace owned_effect_gpu_test {
+
+/** What the recording provider was last offered, for the region-offer tests below. */
+bool g_provider_had_region = false;
+rcti g_provider_region = {};
+
+/** A registered provider that records the region it was offered and refuses. */
+static std::shared_ptr<ImBuf> owned_effect_gpu_provider_records(const Material & /*ma*/,
+                                                                const MaterialPaintLayer & /*row*/,
+                                                                const MaterialPaintLayer & /*effect*/,
+                                                                const int /*channel*/,
+                                                                const int /*tile_number*/,
+                                                                const rcti *changed_region)
+{
+  /* Sticky: the inline effect compute asks the provider after the job's precompute did, without a
+   * region of its own; the test wants to know whether the job offered one at all. */
+  g_provider_had_region = g_provider_had_region || changed_region != nullptr;
+  if (changed_region != nullptr) {
+    g_provider_region = *changed_region;
+  }
+  return nullptr;
+}
+
+}  // namespace owned_effect_gpu_test
+
 class PaintLayersOwnedEffectTest : public PaintLayersMaterialBakeTest {
  public:
   void SetUp() override
@@ -1846,6 +1871,7 @@ class PaintLayersOwnedEffectTest : public PaintLayersMaterialBakeTest {
   {
     /* No test-provider may outlive its test: the hook is a plain pointer BKE reads during a bake. */
     BKE_paint_layers_owned_effect_gpu_provider_set(nullptr);
+    owned_effect_gpu_test::g_provider_had_region = false;
     BKE_paint_layers_effect_cache_free_all();
     BKE_paint_layers_bake_stroke_active_set(false);
     BKE_paint_layers_bake_drag_clear_all();
@@ -1995,6 +2021,117 @@ class PaintLayersOwnedEffectTest : public PaintLayersMaterialBakeTest {
     return landed;
   }
 };
+
+TEST_F(PaintLayersOwnedEffectTest, a_bounded_footprint_narrows_the_planner_region)
+{
+  /* The footprint is the canvas rectangle a changed input can move the result in; a row whose
+   * mapping is bounded (here scale-2 CLIP) is no longer owed a whole canvas. The subscription
+   * band is the pixel-edit signal and lives in the input maps' pixels, which the row's mapping
+   * moves: it is not intersected with the canvas-space footprint. */
+  texture_link(*source, *add_image("FootprintSource"), "Metallic");
+  MaterialPaintLayer *blur = nullptr;
+  MaterialPaintLayer *row = add_row_with_blur(&blur, 512, 512);
+  ASSERT_NE(blur, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_mapping_supported(*ma, *row));
+  const float scale[2] = {2.0f, 2.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, row, scale));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, row, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
+  ASSERT_TRUE(run_bake_job());
+
+  Image *base_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(base_map, nullptr);
+  write_map_rect(*base_map, rcti{400, 401, 400, 401}, 200);
+  mark_map_rect(*base_map, rcti{400, 401, 400, 401});
+  BKE_paint_layers_bake_notice_changes(*ma);
+
+  int band[4] = {};
+  /* The band stands, so the narrowing below is the footprint's, not a missing subscription. */
+  ASSERT_TRUE(BKE_paint_layers_bake_changed_region(*ma, *blur, band));
+  rcti resolved;
+  const rcti *region = bake_effect_region_resolve(*ma, *blur, resolved);
+  ASSERT_NE(region, nullptr);
+  /* scale 2 over 512: the unit square's preimage is [0, 256) plus the pad and the blur halo, so
+   * the write is a quarter of the canvas in each axis, not the whole 512. */
+  EXPECT_GE(region->xmin, 0);
+  EXPECT_GE(region->ymin, 0);
+  EXPECT_LE(region->xmax, 258);
+  EXPECT_LE(region->ymax, 258);
+  EXPECT_LT(BLI_rcti_size_x(region), 512);
+  EXPECT_LT(BLI_rcti_size_y(region), 512);
+
+  /* Run the job the region belongs to: the compute/commit must use the narrowed band, which the
+   * BLENDER_PBR_PERF log reports as `region=` smaller than `size=512x512`. */
+  EXPECT_TRUE(run_bake_job());
+}
+
+TEST_F(PaintLayersOwnedEffectTest, an_unbounded_row_keeps_its_subscription_band)
+{
+  /* A row the trust rules trust maps nothing, so its content footprint declines: the resolved
+   * region is the subscription's band, unchanged -- the footprint never widens what the band
+   * already names, and never disturbs a row it cannot bound. */
+  MaterialPaintLayer *blur = nullptr;
+  MaterialPaintLayer *row = add_row_with_blur(&blur, 512, 512);
+  ASSERT_NE(blur, nullptr);
+  ASSERT_TRUE(run_bake_job());
+
+  Image *base_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(base_map, nullptr);
+  write_map_rect(*base_map, rcti{400, 401, 400, 401}, 200);
+  mark_map_rect(*base_map, rcti{400, 401, 400, 401});
+  BKE_paint_layers_bake_notice_changes(*ma);
+
+  int band[4] = {};
+  ASSERT_TRUE(BKE_paint_layers_bake_changed_region(*ma, *blur, band));
+  rcti resolved;
+  const rcti *region = bake_effect_region_resolve(*ma, *blur, resolved);
+  ASSERT_NE(region, nullptr);
+  EXPECT_EQ(region->xmin, band[0]);
+  EXPECT_EQ(region->xmax, band[1]);
+  EXPECT_EQ(region->ymin, band[2]);
+  EXPECT_EQ(region->ymax, band[3]);
+}
+
+TEST_F(PaintLayersOwnedEffectTest, the_job_offers_the_footprint_when_no_band_exists)
+{
+  /* The first bake has no subscription band, so the content footprint is the fallback region the
+   * provider is offered. The source gains an Image Texture, so the row's Mapping applies and the
+   * footprint can bound it. The dispatch narrows; the read-back stays whole (v1). */
+  texture_link(*source, *add_image("FootprintProviderSource"), "Metallic");
+  owned_effect_gpu_test::g_provider_had_region = false;
+  owned_effect_gpu_test::g_provider_region = rcti{};
+  BKE_paint_layers_owned_effect_gpu_provider_set(
+      &owned_effect_gpu_test::owned_effect_gpu_provider_records);
+  MaterialPaintLayer *blur = nullptr;
+  MaterialPaintLayer *row = add_row_with_blur(&blur, 512, 512);
+  ASSERT_NE(blur, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_mapping_supported(*ma, *row));
+  const float scale[2] = {2.0f, 2.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, row, scale));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, row, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
+  ASSERT_TRUE(run_bake_job());
+  EXPECT_TRUE(owned_effect_gpu_test::g_provider_had_region)
+      << "the first bake has no subscription band, so the footprint is the fallback";
+  EXPECT_LE(BLI_rcti_size_x(&owned_effect_gpu_test::g_provider_region), 258);
+  EXPECT_LE(BLI_rcti_size_y(&owned_effect_gpu_test::g_provider_region), 258);
+}
+
+TEST_F(PaintLayersOwnedEffectTest, an_unbounded_row_offers_the_provider_no_fallback)
+{
+  /* A row whose mapping repeats an axis bounds nothing: the provider is offered no region and
+   * computes the whole canvas, the shape it had before the fallback existed. */
+  texture_link(*source, *add_image("FootprintProviderSource"), "Metallic");
+  owned_effect_gpu_test::g_provider_had_region = false;
+  BKE_paint_layers_owned_effect_gpu_provider_set(
+      &owned_effect_gpu_test::owned_effect_gpu_provider_records);
+  MaterialPaintLayer *blur = nullptr;
+  MaterialPaintLayer *row = add_row_with_blur(&blur, 512, 512);
+  ASSERT_NE(blur, nullptr);
+  const float scale[2] = {2.0f, 2.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, row, scale));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, row, MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_X));
+  ASSERT_TRUE(run_bake_job());
+  EXPECT_FALSE(owned_effect_gpu_test::g_provider_had_region);
+}
 
 TEST_F(PaintLayersOwnedEffectTest, only_an_effect_on_a_row_without_a_bake_of_its_own_owns_its_result)
 {
@@ -2573,6 +2710,31 @@ TEST_F(PaintLayersOwnedEffectTest, a_source_pixel_stroke_defers_the_material_row
   EXPECT_FALSE(BKE_paint_layers_bake_row_is_deferred(*ma, *blur));
   EXPECT_TRUE(BKE_paint_layers_material_row_due(*ma, *row))
       << "the stroke is over: the source render is due again";
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_whole_map_chain_keeps_the_whole_canvas)
+{
+  /* A Color Match reads the whole canvas; no content footprint can bound its result, so the
+   * planner must keep the whole canvas even when the row is otherwise patched regionally. */
+  MaterialPaintLayer *blur = nullptr;
+  MaterialPaintLayer *row = add_row_with_blur(&blur, 512, 512);
+  ASSERT_NE(blur, nullptr);
+  MaterialPaintLayer *match = BKE_paint_layers_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_COLOR_MATCH);
+  ASSERT_NE(match, nullptr);
+  ASSERT_TRUE(run_bake_job());
+
+  Image *base_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(base_map, nullptr);
+  write_map_rect(*base_map, rcti{400, 401, 400, 401}, 200);
+  mark_map_rect(*base_map, rcti{400, 401, 400, 401});
+  BKE_paint_layers_bake_notice_changes(*ma);
+
+  int band[4] = {};
+  ASSERT_TRUE(BKE_paint_layers_bake_changed_region(*ma, *match, band))
+      << "the whole-map refusal must be reached with a live band, not a missing subscription";
+  rcti resolved;
+  EXPECT_EQ(bake_effect_region_resolve(*ma, *match, resolved), nullptr);
 }
 
 TEST_F(PaintLayersOwnedEffectTest, a_freed_bake_map_is_replaced_not_dereferenced)

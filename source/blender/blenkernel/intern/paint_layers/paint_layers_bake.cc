@@ -58,6 +58,7 @@
 #include "BKE_node_runtime.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_gradient_surface.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_paint_material_composite_surface.hh"
@@ -94,6 +95,7 @@
 #include "../paint_material_composite_projection_internal.hh"
 #include "paint_layers_bake_intern.hh"
 #include "paint_layers_curve_patch_object_intern.hh"
+#include "paint_layers_effect_footprint.hh"
 #include "paint_layers_hash_intern.hh"
 #include "paint_layers_intern.hh"
 #include "paint_layers_kind.hh"
@@ -3450,6 +3452,70 @@ static bool bake_object_tile_write(
 }
 
 /**
+ * The rectangle of the effect's input canvas its content footprint bounds, grown by the chain's
+ * halo and clamped to the canvas: the part of the canvas a changed input texel can move the
+ * effect's result in. False when any channel the effect filters has an unbounded input (a mapping
+ * that is off or repeats, a whole-map kind in the chain, a slot), when the effect filters no
+ * channel, or when the canvas has no size -- the caller keeps the whole canvas in every refused
+ * case, exactly as it would without the footprint.
+ */
+static bool bake_effect_content_footprint(const Material &ma,
+                                          const MaterialPaintLayer &row,
+                                          const MaterialPaintLayer &effect,
+                                          const int canvas,
+                                          rcti &r_region,
+                                          bool &r_whole_map)
+{
+  if (canvas <= 0) {
+    return false;
+  }
+  r_whole_map = false;
+  BLI_rcti_init(&r_region, 0, 0, 0, 0);
+  bool have_region = false;
+  int max_halo = 0;
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    const int channel = int(info.channel);
+    if (!paint_layer_effect_filters(ma, effect, channel)) {
+      continue;
+    }
+    if (bke::paint_layers::footprint::chain_has_whole_map(ma, row, effect, channel)) {
+      /* A whole-map effect in the chain reads the whole canvas: no regional write is safe. */
+      r_whole_map = true;
+      return false;
+    }
+    rcti channel_region;
+    if (!BKE_paint_layers_effect_input_footprint_region(
+            ma,
+            row,
+            effect,
+            channel,
+            PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE},
+            channel_region))
+    {
+      /* One unbounded channel unbounds the effect: the whole canvas is the safe answer. */
+      return false;
+    }
+    if (have_region) {
+      BLI_rcti_union(&r_region, &channel_region);
+    }
+    else {
+      r_region = channel_region;
+      have_region = true;
+    }
+    max_halo = std::max(max_halo,
+                        bke::paint_layers::footprint::paint_layer_effect_chain_halo(
+                            ma, row, effect, channel, canvas, canvas));
+  }
+  if (!have_region) {
+    return false;
+  }
+  /* Expand by the chain's halo and clamp to the canvas: a neighbourhood kernel reads past the
+   * footprint, so the region the result can move in grows by what the chain reaches. */
+  BKE_paint_layers_effect_region_clip(r_region, max_halo, canvas, canvas, r_region);
+  return !BLI_rcti_is_empty(&r_region);
+}
+
+/**
  * The changed rectangle an owned effect's regional write may take, in the effect's canvas pixels,
  * or null when the whole canvas has to be computed. \a r_region is filled when a rectangle is
  * returned. The trust rules are the row's own region path's below, plus the steps of the effect's
@@ -3498,25 +3564,54 @@ const rcti *bake_effect_region_resolve(const Material &ma,
     return nullptr;
   }
   const MaterialPaintLayer *row = BKE_paint_layers_correction_owner(ma, effect);
-  if (row == nullptr || bake_subtree_has_decal_effect(*row) ||
-      bake_subtree_folds_projection(ma, *row) || BKE_paint_layers_mapping_remaps(ma, *row) ||
-      !BKE_paint_layers_active_transform_effects(ma, *row).is_empty())
-  {
+  if (row == nullptr) {
     return nullptr;
   }
-  /* The effects below the owned one are steps of its input: one that remaps (a Mirror, a laid map
-   * moved by its own mapping) sends an edit of its map anywhere in the result, as a Decal does. */
-  for (const MaterialPaintLayer &below : row->effects) {
-    if (BLI_uuid_equal(below.marker, effect.marker)) {
-      break;
-    }
-    if ((below.flag & MA_PAINT_LAYER_ENABLED) != 0 && BKE_paint_layers_mapping_remaps(ma, below)) {
+  /* A bounded footprint is the trust test for a row whose input mapping moves texels: the
+   * rectangle is the preimage of the source's unit square under the row's composed chain, so a
+   * change of the input can only move the result inside it (grown by the chain's halo). This is
+   * the case the mapping/transform refusals below cannot name: they know a remap moves texels,
+   * but not that the remap is bounded. A row whose footprint is not bounded keeps the old
+   * whole-canvas refusals. */
+  rcti content;
+  bool whole_map = false;
+  const bool bounded = bake_effect_content_footprint(
+      ma, *row, effect, effect.bake->size, content, whole_map);
+  if (whole_map) {
+    /* A whole-map effect in the chain reads the whole canvas: its result cannot be patched from a
+     * rectangle, whatever the row's mapping bounds. */
+    return nullptr;
+  }
+  if (!bounded) {
+    if (bake_subtree_has_decal_effect(*row) || bake_subtree_folds_projection(ma, *row) ||
+        BKE_paint_layers_mapping_remaps(ma, *row) ||
+        !BKE_paint_layers_active_transform_effects(ma, *row).is_empty())
+    {
       return nullptr;
     }
+    /* The effects below the owned one are steps of its input: one that remaps (a Mirror, a laid
+     * map moved by its own mapping) sends an edit of its map anywhere in the result, as a Decal
+     * does. A bounded footprint above has already described those steps and refused the ones it
+     * cannot invert; only the unbounded path needs the old walk. */
+    for (const MaterialPaintLayer &below : row->effects) {
+      if (BLI_uuid_equal(below.marker, effect.marker)) {
+        break;
+      }
+      if ((below.flag & MA_PAINT_LAYER_ENABLED) != 0 && BKE_paint_layers_mapping_remaps(ma, below))
+      {
+        return nullptr;
+      }
+    }
   }
-  /* The subscription's rectangle is in the pixels of the maps the effect reads, which are the row's
-   * canvas -- the canvas the compute renders the result at. */
+  /* The subscription's rectangle is in the pixels of the maps the effect reads, which are not the
+   * effect's canvas once the row's mapping applies: directly intersecting the two spaces would
+   * cut or miss content. The band above is the pixel-edit signal (and the maps-stand trust test);
+   * the bounded footprint already names the canvas rectangle a changed input can move, so that is
+   * the region the write takes. The unbounded path keeps the band unchanged. */
   BLI_rcti_init(&r_region, region[0], region[1], region[2], region[3]);
+  if (bounded) {
+    r_region = content;
+  }
   return &r_region;
 }
 

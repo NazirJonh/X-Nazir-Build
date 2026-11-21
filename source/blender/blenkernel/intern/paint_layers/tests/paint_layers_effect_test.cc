@@ -29,6 +29,7 @@
 #include "paint_layers_generate_test_fixture.hh"
 
 #include "BKE_paint_layers_composite.hh"
+#include "BKE_paint_layers_edit.hh"
 #include "BKE_wm_runtime.hh"
 
 #include "BLI_set.hh"
@@ -38,6 +39,7 @@
 
 #include "DNA_windowmanager_types.h"
 
+#include "../paint_layers_effect_footprint.hh"
 #include "../paint_layers_intern.hh"
 #include "../paint_layers_kind.hh"
 
@@ -6743,6 +6745,287 @@ INSTANTIATE_TEST_SUITE_P(
                     MirrorFoldCase{0.5f, 0.5f, true, 0.5f, -1.0f},
                     MirrorFoldCase{0.35f, 0.25f, false, 0.35f, 1.0f},
                     MirrorFoldCase{0.35f, 0.25f, true, 0.15f, -1.0f}));
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Effect bake footprint
+ *
+ * The preimage of the unit square under a row's composed mapping chain: the rectangle a bounded
+ * UV mapping lays content in, which a finite-reach effect's bake can compute alone. The walk goes
+ * backwards through the steps `CompositeMappingChain` composes forward, so the two agree about
+ * where a texel lands.
+ * \{ */
+
+namespace footprint_test {
+
+PaintMaterialCompositeMapping uv_mapping(const float scale_x,
+                                         const float scale_y,
+                                         const float rotation,
+                                         const float offset_u,
+                                         const float offset_v)
+{
+  PaintMaterialCompositeMapping mapping;
+  mapping.enabled = true;
+  mapping.scale[0] = scale_x;
+  mapping.scale[1] = scale_y;
+  mapping.rotation = rotation;
+  mapping.offset[0] = offset_u;
+  mapping.offset[1] = offset_v;
+  /* One copy, transparent outside the square on both axes: the only wrap the footprint bounds. */
+  mapping.wrap = MA_PAINT_LAYER_MAPPING_WRAP_CLIP;
+  return mapping;
+}
+
+PaintMaterialCompositeMapping mirror_step(const int16_t axes, const float center_u,
+                                          const float center_v)
+{
+  PaintMaterialCompositeMapping step;
+  /* A Mirror effect's step carries the fold alone: no transform, no wrap of its own. */
+  step.mirror_axes = axes;
+  step.mirror_center[0] = center_u;
+  step.mirror_center[1] = center_v;
+  return step;
+}
+
+}  // namespace footprint_test
+
+TEST(PaintLayersEffectFootprint, the_identity_mapping_spans_the_unit_square)
+{
+  const PaintMaterialCompositeMapping mapping = footprint_test::uv_mapping(
+      1.0f, 1.0f, 0.0f, 0.0f, 0.0f);
+  rctf uv;
+  EXPECT_TRUE(bke::paint_layers::footprint::uv_rect(mapping, {}, uv));
+  EXPECT_NEAR(uv.xmin, 0.0f, 1e-6f);
+  EXPECT_NEAR(uv.ymin, 0.0f, 1e-6f);
+  EXPECT_NEAR(uv.xmax, 1.0f, 1e-6f);
+  EXPECT_NEAR(uv.ymax, 1.0f, 1e-6f);
+}
+
+TEST(PaintLayersEffectFootprint, the_footprint_matches_the_editors_footprint_matrix)
+{
+  /* The editors' own footprint (uv_mapping_math.cc `uv_mapping_footprint_matrix`, the reference
+   * the mapping gizmo draws): a rectangle rotated by -rotation, computed here as the embedded
+   * formula so a sign or an order change on either side breaks this test. */
+  const float scale_x = 2.0f;
+  const float scale_y = 1.0f;
+  const float rotation = 0.4f;
+  const float offset_u = 0.25f;
+  const float offset_v = 0.1f;
+  const PaintMaterialCompositeMapping mapping = footprint_test::uv_mapping(
+      scale_x, scale_y, rotation, offset_u, offset_v);
+  rctf uv;
+  EXPECT_TRUE(bke::paint_layers::footprint::uv_rect(mapping, {}, uv));
+
+  const float a11 = scale_x * std::cos(rotation);
+  const float a21 = scale_y * std::sin(rotation);
+  const float a12 = -scale_x * std::sin(rotation);
+  const float a22 = scale_y * std::cos(rotation);
+  const float det = a11 * a22 - a12 * a21;
+  float min_u = std::numeric_limits<float>::max();
+  float min_v = std::numeric_limits<float>::max();
+  float max_u = std::numeric_limits<float>::lowest();
+  float max_v = std::numeric_limits<float>::lowest();
+  for (const float corner_u : {0.0f, 1.0f}) {
+    for (const float corner_v : {0.0f, 1.0f}) {
+      /* `A^-1 * (corner - offset)`: the canvas point the map corner reads. */
+      const float dx = corner_u - offset_u;
+      const float dy = corner_v - offset_v;
+      const float canvas_u = (a22 * dx - a12 * dy) / det;
+      const float canvas_v = (-a21 * dx + a11 * dy) / det;
+      min_u = std::min(min_u, canvas_u);
+      min_v = std::min(min_v, canvas_v);
+      max_u = std::max(max_u, canvas_u);
+      max_v = std::max(max_v, canvas_v);
+    }
+  }
+  EXPECT_NEAR(uv.xmin, min_u, 1e-5f);
+  EXPECT_NEAR(uv.ymin, min_v, 1e-5f);
+  EXPECT_NEAR(uv.xmax, max_u, 1e-5f);
+  EXPECT_NEAR(uv.ymax, max_v, 1e-5f);
+}
+
+TEST(PaintLayersEffectFootprint, the_footprint_grows_over_the_mirror_reflection)
+{
+  /* A fold's preimage of one point is the point and its reflection about the fold's center: the
+   * content shows on both sides, so the rectangle covers both. */
+  PaintMaterialCompositeMapping mapping = footprint_test::uv_mapping(1.0f, 1.0f, 0.0f, -0.6f, 0.0f);
+  mapping.mirror_axes = MA_PAINT_LAYER_MAPPING_MIRROR_U;
+  mapping.mirror_center[0] = 0.5f;
+  rctf uv;
+  EXPECT_TRUE(bke::paint_layers::footprint::uv_rect(mapping, {}, uv));
+  /* The plain preimage is [0.6, 1.6] on U (the read is `|u - 0.5| - 0.1`); the reflection about
+   * 0.5 is [-0.6, 0.4]. The box around both is wider than the canvas: the fold doubles where the
+   * content shows. */
+  EXPECT_NEAR(uv.xmin, -0.6f, 1e-6f);
+  EXPECT_NEAR(uv.xmax, 1.6f, 1e-6f);
+  EXPECT_NEAR(uv.ymin, 0.0f, 1e-6f);
+  EXPECT_NEAR(uv.ymax, 1.0f, 1e-6f);
+
+  /* Both axes folding doubles both sides at once. */
+  PaintMaterialCompositeMapping both = footprint_test::uv_mapping(1.0f, 1.0f, 0.0f, -0.6f, -0.7f);
+  both.mirror_axes = MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_V;
+  both.mirror_center[0] = 0.5f;
+  both.mirror_center[1] = 0.25f;
+  rctf uv_both;
+  EXPECT_TRUE(bke::paint_layers::footprint::uv_rect(both, {}, uv_both));
+  EXPECT_NEAR(uv_both.xmin, -0.6f, 1e-6f);
+  EXPECT_NEAR(uv_both.xmax, 1.6f, 1e-6f);
+  EXPECT_NEAR(uv_both.ymin, -1.2f, 1e-6f);
+  EXPECT_NEAR(uv_both.ymax, 1.7f, 1e-6f);
+}
+
+TEST(PaintLayersEffectFootprint, a_repeat_wrap_or_a_disabled_mapping_refuses)
+{
+  const auto with_wrap = [](const int16_t wrap) {
+    PaintMaterialCompositeMapping mapping = footprint_test::uv_mapping(1.0f, 1.0f, 0.0f, 0.0f, 0.0f);
+    mapping.wrap = wrap;
+    return mapping;
+  };
+  rctf uv;
+  /* A repeated axis floors the composed lookup, which tiles the content over the whole canvas. */
+  EXPECT_FALSE(bke::paint_layers::footprint::uv_rect(
+      with_wrap(MA_PAINT_LAYER_MAPPING_WRAP_REPEAT), {}, uv));
+  EXPECT_FALSE(bke::paint_layers::footprint::uv_rect(
+      with_wrap(MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_X), {}, uv));
+  EXPECT_FALSE(bke::paint_layers::footprint::uv_rect(
+      with_wrap(MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_Y), {}, uv));
+  /* A mapping that is off reads 1:1: the content spans the canvas wherever its own alpha does. */
+  PaintMaterialCompositeMapping off = footprint_test::uv_mapping(2.0f, 2.0f, 0.5f, 0.1f, 0.2f);
+  off.enabled = false;
+  EXPECT_FALSE(bke::paint_layers::footprint::uv_rect(off, {}, uv));
+}
+
+TEST(PaintLayersEffectFootprint, a_projected_step_refuses)
+{
+  PaintMaterialCompositeMapping mapping = footprint_test::uv_mapping(1.0f, 1.0f, 0.0f, 0.0f, 0.0f);
+  mapping.projection.present = true;
+  rctf uv;
+  EXPECT_FALSE(bke::paint_layers::footprint::uv_rect(mapping, {}, uv));
+
+  /* The row's own mapping may be plain, but a projected transform step in the chain has no UV
+   * form to invert either. */
+  PaintMaterialCompositeMapping step = footprint_test::uv_mapping(2.0f, 2.0f, 0.0f, 0.0f, 0.0f);
+  step.projection.present = true;
+  EXPECT_FALSE(bke::paint_layers::footprint::uv_rect(
+      footprint_test::uv_mapping(1.0f, 1.0f, 0.0f, 0.0f, 0.0f), {step}, uv));
+}
+
+TEST(PaintLayersEffectFootprint, a_transform_step_composes_into_the_preimage)
+{
+  /* One Transform Mapping of scale 2 and offset (0.5, 0.5), then the row's identity: the content
+   * reads where `2 * uv + 0.5` lands in the square, so the footprint shrinks to [-0.25, 0.25]. */
+  const PaintMaterialCompositeMapping step = footprint_test::uv_mapping(2.0f, 2.0f, 0.0f, 0.5f, 0.5f);
+  const PaintMaterialCompositeMapping mapping = footprint_test::uv_mapping(1.0f, 1.0f, 0.0f, 0.0f, 0.0f);
+  rctf uv;
+  EXPECT_TRUE(bke::paint_layers::footprint::uv_rect(mapping, {step}, uv));
+  EXPECT_NEAR(uv.xmin, -0.25f, 1e-6f);
+  EXPECT_NEAR(uv.xmax, 0.25f, 1e-6f);
+  EXPECT_NEAR(uv.ymin, -0.25f, 1e-6f);
+  EXPECT_NEAR(uv.ymax, 0.25f, 1e-6f);
+}
+
+TEST(PaintLayersEffectFootprint, a_mirror_step_doubles_the_corners)
+{
+  /* A Mirror effect folds about its own center before the row's mapping reads: the preimage is
+   * the square and its reflection about 0.25, so the box widens past the square. */
+  const PaintMaterialCompositeMapping step = footprint_test::mirror_step(
+      MA_PAINT_LAYER_MAPPING_MIRROR_U, 0.25f, 0.5f);
+  const PaintMaterialCompositeMapping mapping = footprint_test::uv_mapping(1.0f, 1.0f, 0.0f, 0.0f, 0.0f);
+  rctf uv;
+  EXPECT_TRUE(bke::paint_layers::footprint::uv_rect(mapping, {step}, uv));
+  EXPECT_NEAR(uv.xmin, -0.5f, 1e-6f);
+  EXPECT_NEAR(uv.xmax, 1.0f, 1e-6f);
+  EXPECT_NEAR(uv.ymin, 0.0f, 1e-6f);
+  EXPECT_NEAR(uv.ymax, 1.0f, 1e-6f);
+}
+
+TEST(PaintLayersEffectFootprint, a_truncated_chain_refuses)
+{
+  /* The description leaves transform effects past the cap out of the chain: a step the walk
+   * never sees would move content outside the rectangle computed without it. */
+  const PaintMaterialCompositeMapping step = footprint_test::uv_mapping(2.0f, 2.0f, 0.0f, 0.0f, 0.0f);
+  blender::Vector<PaintMaterialCompositeMapping> steps;
+  for (const int i : blender::IndexRange(PAINT_MATERIAL_COMPOSITE_INPUT_TRANSFORM_MAX)) {
+    steps.append(step);
+    UNUSED_VARS(i);
+  }
+  const PaintMaterialCompositeMapping mapping = footprint_test::uv_mapping(1.0f, 1.0f, 0.0f, 0.0f, 0.0f);
+  rctf uv;
+  EXPECT_FALSE(bke::paint_layers::footprint::uv_rect(mapping, steps.as_span(), uv));
+}
+
+TEST_F(PaintLayersEffectTest, a_bounded_fill_footprint_is_the_quarter_plus_a_pad_texel)
+{
+  Image *map = add_shade_image("Preview", 255, 0); /* 8x8 */
+  /* A Fill is what carries a mapping of its own: a painted map is addressed at the raw UV, so
+   * only a Fill's map (or a Material row's) reads through the mapping the footprint inverts. */
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Fill;
+  params.name = "Preview";
+  MaterialPaintLayer *row = BKE_paint_layers_add_with_policy(*ma, params);
+  ASSERT_NE(row, nullptr);
+  add_channel(*row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map);
+  const float scale[2] = {2.0f, 2.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, row, scale));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, row, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_NE(effect, nullptr);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*effect, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*effect, PAINT_LAYER_BLUR_RADIUS, 2));
+  clear_active();
+
+  rcti footprint;
+  ASSERT_TRUE(BKE_paint_layers_effect_input_footprint_region(
+      *ma, *row, *effect, int(kColor),
+      PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE}, footprint));
+  /* scale 2 over 8 texels: the unit square's preimage is [0, 4) plus the one-texel pad. */
+  EXPECT_EQ(footprint.xmin, 0);
+  EXPECT_EQ(footprint.ymin, 0);
+  EXPECT_EQ(footprint.xmax, 5);
+  EXPECT_EQ(footprint.ymax, 5);
+
+  EXPECT_EQ(bke::paint_layers::footprint::paint_layer_effect_chain_halo(
+                *ma, *row, *effect, int(kColor), 8, 8),
+            2);
+}
+
+TEST_F(PaintLayersEffectTest, an_unbounded_mapping_has_no_footprint)
+{
+  Image *map = add_shade_image("Preview", 255, 0);
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Fill;
+  params.name = "Preview";
+  MaterialPaintLayer *row = BKE_paint_layers_add_with_policy(*ma, params);
+  ASSERT_NE(row, nullptr);
+  add_channel(*row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map);
+  const float scale[2] = {2.0f, 2.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, row, scale));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, row, MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_X));
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_NE(effect, nullptr);
+  clear_active();
+
+  rcti footprint;
+  EXPECT_FALSE(BKE_paint_layers_effect_input_footprint_region(
+      *ma, *row, *effect, int(kColor),
+      PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE}, footprint));
+}
+
+TEST_F(PaintLayersEffectTest, a_whole_map_chain_has_no_footprint)
+{
+  /* Color Match reduces the whole canvas; a footprint cannot narrow it. */
+  Image *map = add_shade_image("Preview", 255, 0);
+  MaterialPaintLayer *row = add_paint_layer("Preview", map);
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_COLOR_MATCH);
+  ASSERT_NE(effect, nullptr);
+  clear_active();
+
+  rcti footprint;
+  EXPECT_FALSE(BKE_paint_layers_effect_input_footprint_region(
+      *ma, *row, *effect, int(kColor),
+      PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE}, footprint));
+}
 
 /** \} */
 

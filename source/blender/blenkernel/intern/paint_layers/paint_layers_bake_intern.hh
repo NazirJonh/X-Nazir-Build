@@ -411,7 +411,8 @@ void bake_write_stored_image(Image &image,
                              bool stored_float,
                              const void *stored,
                              const int *rect,
-                             int tile_number = 0);
+                             int tile_number = 0,
+                             int stored_width = 0);
 void bake_image_pixels_changed(Image &image,
                                ImBuf &ibuf,
                                int tile_number,

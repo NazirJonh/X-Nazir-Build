@@ -60,4 +60,25 @@ int paint_layer_effect_chain_halo(const Material &ma,
                                   const int width,
                                   const int height);
 
+/**
+ * The region of a \a size by \a size bake canvas, in bake pixels, where \a row's own bake render
+ * can lay content: the preimage of the unit UV square under the row's composed read -- the
+ * transform effects' steps first, the row's own mapping last, the same chain the bake render
+ * composes -- grown by the halo of the row's filtering effects, whose results the bake render lays
+ * over the row's content. The max edges are exclusive, padded by one texel and clamped to the
+ * canvas.
+ *
+ * False when nothing bounds the content: a folder, a row the planner keeps live (its mapping is
+ * applied by the graph, not laid into the map), a row framed off the UV plane, a reader, a
+ * generator or Mesh Map row, a row with no own content, a laid correction (its own frame is not
+ * this chain -- v1), a whole-map effect in the chain, or a mapping that does not bound the read
+ * (off, repeating, projected). A conservative false is always safe -- the caller renders the whole
+ * canvas; a wrong rectangle would keep stale content in the maps.
+ */
+bool row_source_region(const Material &ma,
+                       const MaterialPaintLayer &row,
+                       const PaintLayerTileContext &context,
+                       int size,
+                       rcti &r_region);
+
 }  // namespace blender::bke::paint_layers::footprint

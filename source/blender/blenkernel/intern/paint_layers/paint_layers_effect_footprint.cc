@@ -30,9 +30,11 @@
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
+#include "BKE_paint.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_tile.hh"
 
+#include "paint_layers_composite_intern.hh"
 #include "paint_layers_effect_footprint.hh"
 #include "paint_layers_intern.hh"
 
@@ -69,6 +71,35 @@ void uv_rect_union(rctf &r_uv, bool &r_have, const rctf &uv)
 bool correction_lays_unbounded_content(const PaintMaterialCompositeCorrection &correction)
 {
   return correction.image == nullptr;
+}
+
+/**
+ * The pixel rectangle of \a uv on a \a width by \a height canvas, shared by every
+ * UV-rectangle-to-region conversion in this file so the footprint callers agree about the pixels a
+ * mapping bounds. The evaluator clips at texel centres `((x + 0.5) / W, (y + 0.5) / H)`, so a
+ * texel carries the content when its centre lies in the UV rectangle; the \a pad absorbs the
+ * half-texel centre offset and the rounding at the frame's edge. The max edges are exclusive: the
+ * whole canvas reads back as `xmax == width`, `ymax == height`.
+ *
+ * False when the frame misses the canvas entirely: the caller keeps the whole canvas rather than
+ * treat an empty region as "nothing to bake" (v1).
+ */
+bool uv_rect_to_region(const rctf &uv, const int width, const int height, const int pad, rcti &r_region)
+{
+  /* Clamped before the float-to-int conversion: a mapping with a tiny scale can put the preimage
+   * far outside the int range, and converting an out-of-range float is undefined behavior. */
+  const auto clamp_texel = [](const double value, const int limit) {
+    return int(std::clamp(value, 0.0, double(limit)));
+  };
+  const int x0 = clamp_texel(std::floor(double(uv.xmin) * width) - pad, width);
+  const int x1 = clamp_texel(std::ceil(double(uv.xmax) * width) + pad, width);
+  const int y0 = clamp_texel(std::floor(double(uv.ymin) * height) - pad, height);
+  const int y1 = clamp_texel(std::ceil(double(uv.ymax) * height) + pad, height);
+  if (x0 >= x1 || y0 >= y1) {
+    return false;
+  }
+  BLI_rcti_init(&r_region, x0, x1, y0, y1);
+  return true;
 }
 
 }  // namespace
@@ -216,6 +247,131 @@ bool chain_has_whole_map(const Material &ma,
   return false;
 }
 
+bool row_source_region(const Material &ma,
+                       const MaterialPaintLayer &row,
+                       const PaintLayerTileContext &context,
+                       const int size,
+                       rcti &r_region)
+{
+  /* A folder's bake composites its children, which carry mappings of their own: the parent's read
+   * chain does not bound what they lay. */
+  if (!row.children.is_empty()) {
+    return false;
+  }
+  /* A row the planner keeps live is never baked: its own mapping is applied by the graph when the
+   * map is read, not laid into the map, so the described chain would bound the live read rather
+   * than the map's content. The same blocked test the planner's candidate check reads. */
+  if (BKE_paint_layers_bake_blocked(ma, row)) {
+    return false;
+  }
+  /* A frame off the UV plane (a projection kind, a Decal frame) reads the surface or the Decal
+   * map, which the described mapping does not carry: the described numbers would bound nothing. */
+  if (row.mapping.space != MA_PAINT_LAYER_MAPPING_SPACE_UV) {
+    return false;
+  }
+  /* The mapping is common to the row, so the channel it is described on only decides which of the
+   * row's own maps the entry names. Prefer a channel that carries the row's own map: the authoring
+   * policy can leave empty records for channels the row never got a map for, and the described
+   * entry is what proves the row lays content. */
+  int channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  if (row.channels != nullptr && row.channels_num > 0) {
+    channel = int(row.channels[0].channel);
+    for (int index = 0; index < row.channels_num; index++) {
+      if (row.channels[index].image != nullptr) {
+        channel = int(row.channels[index].channel);
+        break;
+      }
+    }
+  }
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return false;
+  }
+
+  /* Per channel the bake renders: a correction that lays its own maps reads through its own frame,
+   * which the row's chain does not bound, and a whole-map kind anywhere in the chain makes the
+   * bake a function of the whole canvas (v1 refuses instead of unioning laid frames). A CPU effect
+   * that filters nothing lays nothing in the bake either, so it refuses nothing here. The halo the
+   * chain's filters reach grows the rectangle at the end; the largest channel's is the one every
+   * channel's result stays inside. */
+  const MaterialPaintLayer *last_effect = static_cast<const MaterialPaintLayer *>(row.effects.last);
+  int max_halo = 0;
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    const int effect_channel = int(info.channel);
+    for (const MaterialPaintLayer &effect : row.effects) {
+      if (!paint_layer_effect_is_cpu_computed(effect) &&
+          !paint_layer_effect_filters(ma, effect, effect_channel) &&
+          paint_layer_effect_lays(ma, effect, effect_channel))
+      {
+        return false;
+      }
+    }
+    if (last_effect != nullptr) {
+      if (chain_has_whole_map(ma, row, *last_effect, effect_channel)) {
+        return false;
+      }
+      max_halo = std::max(
+          max_halo,
+          paint_layer_effect_chain_halo(ma, row, *last_effect, effect_channel, size, size));
+    }
+  }
+
+  /* The same described entry the row's bake render reads from, at the dimensions call the render
+   * makes first: its own mapping, its transform effects' steps and its corrections, described from
+   * the live source, never from the maps being updated. */
+  PaintMaterialCompositeImageLayer entry;
+  const int effective_tile = BKE_paint_layers_tile_resolve(
+      context.tile_number, nullptr, context.painted_object);
+  if (!composite_image_layer_build(ma,
+                                   row,
+                                   channel,
+                                   1.0f,
+                                   /*isolating=*/false,
+                                   /*ignore_own_bake=*/true,
+                                   entry,
+                                   effective_tile,
+                                   /*stop_before=*/nullptr,
+                                   /*slice_rect=*/nullptr,
+                                   /*dimensions_only=*/true,
+                                   /*describe_only=*/true,
+                                   /*context_surface=*/nullptr,
+                                   /*height_won_cache=*/nullptr,
+                                   paint_layer_bake_scope(row, false),
+                                   context.painted_object))
+  {
+    return false;
+  }
+  /* The same refusals the effect footprint makes about a described row: a reader lays the slice it
+   * points at, and a generator, a Mesh Map or a folder's children cover the canvas by rules that
+   * are not a frame's. */
+  if (!BLI_uuid_is_nil(entry.anchor_point_reader) || entry.gradient.enabled ||
+      entry.is_mesh_map || !entry.children.empty())
+  {
+    return false;
+  }
+  /* The row's own content -- a Fill's flat colour, a map's texels, the source's rendered map -- is
+   * what the chain bounds. A row that lays nothing of its own bounds nothing here. The mask and
+   * the opacity only cut the content away, so the rectangle stays an upper bound of where it can
+   * lie. */
+  if (!entry.has_constant_color && entry.color_image == nullptr) {
+    return false;
+  }
+  rctf uv;
+  if (!uv_rect(entry.mapping, entry.input_transforms, uv)) {
+    return false;
+  }
+  if (!uv_rect_to_region(uv, size, size, 1, r_region)) {
+    /* The frame misses the canvas entirely. */
+    return false;
+  }
+  if (max_halo > 0) {
+    /* The bake render lays the chain's filters' results over the row's content, and a
+     * neighbourhood kernel reaches past the content by its own halo: the maps' content ends at the
+     * footprint grown by the chain's reach, so that is what the caller may render alone. */
+    BKE_paint_layers_effect_region_clip(r_region, max_halo, size, size, r_region);
+  }
+  return true;
+}
+
 }  // namespace bke::paint_layers::footprint
 
 /* -------------------------------------------------------------------- */
@@ -311,26 +467,10 @@ bool BKE_paint_layers_effect_input_footprint_region(const Material &ma,
     return false;
   }
 
-  /* The evaluator clips at texel centres `((x + 0.5) / W, (y + 0.5) / H)`, so a texel carries the
-   * content when its centre lies in the UV rectangle; the one-texel pad absorbs the half-texel
-   * centre offset and the rounding at the frame's edge. */
+  /* The one-texel pad absorbs the half-texel centre offset and the rounding at the frame's edge;
+   * the rest of the conversion is the shared one. */
   constexpr int pad = 1;
-  /* Clamped before the float-to-int conversion: a mapping with a tiny scale can put the preimage
-   * far outside the int range, and converting an out-of-range float is undefined behavior. */
-  const auto clamp_texel = [](const double value, const int limit) {
-    return int(std::clamp(value, 0.0, double(limit)));
-  };
-  const int x0 = clamp_texel(std::floor(double(uv.xmin) * width) - pad, width);
-  const int x1 = clamp_texel(std::ceil(double(uv.xmax) * width) + pad, width);
-  const int y0 = clamp_texel(std::floor(double(uv.ymin) * height) - pad, height);
-  const int y1 = clamp_texel(std::ceil(double(uv.ymax) * height) + pad, height);
-  if (x0 >= x1 || y0 >= y1) {
-    /* The frame misses the canvas entirely. The caller keeps the whole canvas rather than treat
-     * an empty region as "nothing to bake" (v1). */
-    return false;
-  }
-  BLI_rcti_init(&r_region, x0, x1, y0, y1);
-  return true;
+  return uv_rect_to_region(uv, width, height, pad, r_region);
 }
 
 /** \} */

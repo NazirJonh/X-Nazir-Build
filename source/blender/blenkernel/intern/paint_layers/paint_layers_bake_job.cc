@@ -90,6 +90,7 @@
 #include "DNA_uuid_types.h"
 
 #include "paint_layers_bake_intern.hh"
+#include "paint_layers_effect_footprint.hh"
 #include "paint_layers_intern.hh"
 #include "paint_layers_kind.hh"
 
@@ -154,6 +155,15 @@ struct PaintLayersBakeJob {
      * until the commit.
      */
     bool stored_float = false;
+    /**
+     * Whether #color or #color_bytes holds only the #stored_rect of the canvas, tightly packed row
+     * by row, instead of the whole canvas. A row whose render took its footprint's rectangle stores
+     * that rectangle alone, so the conversion and the commit's write cost the footprint rather than
+     * the canvas; the commit passes the stored row width to #bake_write_stored_image. Effect
+     * results always hold the full canvas and leave it false.
+     */
+    bool stored_cropped = false;
+    int stored_rect[4] = {};
     /**
      * The band of the map this result was computed for, in map pixels, and the map it may land in.
      * Set only when the creation named a changed region, the channel's map already stood before the
@@ -221,6 +231,23 @@ struct PaintLayersBakeJob {
     int object_num = 0;
     /** Every image tile the objects' blocks cover; empty selects one tile per object. */
     Vector<int> image_tiles;
+    /**
+     * Whether this render answers for a part of the maps alone, and that part: the row's own read
+     * chain's footprint grown by its filters' halo, aligned outward to the 256-pixel tiles, in bake
+     * pixels. Resolved at creation only when the maps stood and their hash still agreed with the
+     * description (`footprint::row_source_region`): outside #region the previous render's content
+     * is valid, so the worker composites and the commit writes that rectangle alone.
+     */
+    bool has_region = false;
+    int region[4] = {};
+    /**
+     * The identity of each channel's map that stood at creation, 0 where none did. Only a channel
+     * whose map still carries that identity at the commit may take #region: a map the creation did
+     * not find holds no previous result outside the rectangle, and one replaced under the job must
+     * be rendered whole. #coverage_uid is the coverage map's identity, with the same rule.
+     */
+    std::array<uint32_t, PAINT_MATERIAL_CHANNEL_NUM> map_uid = {};
+    uint32_t coverage_uid = 0;
   };
   Vector<RowResult> rows;
   /**
@@ -291,15 +318,28 @@ struct PaintLayersBakeJob {
  * A row baked for its content alone rendered no mask and no opacity, so its quotient is the
  * content's own coverage: what the substitution reads back as the row's mask is then the content,
  * and the row's mask and opacity are laid live over it.
+ *
+ * \a rect limits the walk to the rectangle a regional render answered for, in canvas pixels of
+ * \a width; null walks the whole canvas. A regional render wrote nothing outside it, so the common
+ * factor there keeps its previous value -- zero, the map having started cleared.
  */
 static void bake_common_from_channel(Span<float> color,
                                      Span<float> coverage,
-                                     MutableSpan<float> common)
+                                     MutableSpan<float> common,
+                                     const int *rect,
+                                     const int width)
 {
-  for (const int64_t i : common.index_range()) {
-    const float content = color[i * 4 + 3];
-    if (content > 0.002f) {
-      common[i] = std::max(common[i], clamp_f(coverage[i] / content, 0.0f, 1.0f));
+  const int x0 = rect != nullptr ? rect[0] : 0;
+  const int x1 = rect != nullptr ? rect[2] : width;
+  const int y0 = rect != nullptr ? rect[1] : 0;
+  const int y1 = rect != nullptr ? rect[3] : int(common.size()) / width;
+  for (int y = y0; y < y1; y++) {
+    for (int x = x0; x < x1; x++) {
+      const int64_t i = int64_t(y) * width + x;
+      const float content = color[i * 4 + 3];
+      if (content > 0.002f) {
+        common[i] = std::max(common[i], clamp_f(coverage[i] / content, 0.0f, 1.0f));
+      }
     }
   }
 }
@@ -394,6 +434,21 @@ static void bake_job_owned_effects_gpu_precompute(Material &ma, PaintLayersBakeJ
                        readback_bytes);
 }
 
+/**
+ * The tile-aligned bake rectangle of \a footprint on a \a size canvas: the outward 256-pixel
+ * alignment the planner's band uses, so a write lands on whole tiles. False when the aligned
+ * rectangle is empty.
+ */
+static bool bake_row_region_align(const rcti &footprint, const int size, int r_region[4])
+{
+  constexpr int tile = 256;
+  r_region[0] = clamp_i((footprint.xmin / tile) * tile, 0, size);
+  r_region[1] = clamp_i((footprint.ymin / tile) * tile, 0, size);
+  r_region[2] = clamp_i(((footprint.xmax + tile - 1) / tile) * tile, 0, size);
+  r_region[3] = clamp_i(((footprint.ymax + tile - 1) / tile) * tile, 0, size);
+  return r_region[0] < r_region[2] && r_region[1] < r_region[3];
+}
+
 PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain,
                                                      Material &ma,
                                                      const Scene *scene,
@@ -403,6 +458,7 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain,
   if (!BKE_paint_layers_is_layered(ma)) {
     return nullptr;
   }
+  bke::paint_perf::ScopedTimer perf_create("job.create");
   /* The objects the view layer produced are what an Object or Generated row is rendered from, and
    * every row of the material shares them: resolve the list once and notice every edited surface
    * against it. */
@@ -570,6 +626,53 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain,
       bake_tile_object_indices_set(ma, targets);
     }
     BKE_paint_layers_bake_hash(ma, layer, row.hash);
+    /* A cache that stands and still agrees with the description is re-rendered for pixel edits
+     * alone: outside the row's own read chain no content can move, so the worker composites and the
+     * commit writes the footprint's rectangle. The first bake and a structural change keep the whole
+     * canvas, and so does a folded projection -- the same refusals the planner's band applies. The
+     * rows that carry a Decal effect never reach this loop (they are not heavy), and a row the
+     * planner keeps live is never queued here; asking the blocked test anyway keeps this caller and
+     * the planner's candidate test on one answer. */
+    bke::paint_perf::ScopedTimer perf_footprint("job.footprint");
+    const bool reuse_cache = bake->coverage != nullptr &&
+                             bake_service_image_is_live(bmain, bake->coverage);
+    const bool hash_matches = bake->hash[0] == row.hash[0] && bake->hash[1] == row.hash[1];
+    const bool blocked = BKE_paint_layers_bake_blocked(ma, layer);
+    if (reuse_cache && hash_matches && !folds_projection && !blocked)
+    {
+      rcti footprint;
+      if (bke::paint_layers::footprint::row_source_region(
+              ma,
+              layer,
+              PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE},
+              size,
+              footprint))
+      {
+        row.has_region = bake_row_region_align(footprint, size, row.region);
+      }
+      if (row.has_region) {
+        /* The maps that stand now: only theirs hold the previous result outside the rectangle, and
+         * only a channel that still names one at the commit may patch it. */
+        for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+          const int channel = int(info.channel);
+          const Image *slot = bake->images[channel];
+          row.map_uid[channel] = (slot != nullptr && bake_service_image_is_live(bmain, slot)) ?
+                                     slot->id.session_uid :
+                                     0;
+        }
+        const Image *coverage = bake->coverage;
+        row.coverage_uid = (coverage != nullptr && bake_service_image_is_live(bmain, coverage)) ?
+                               coverage->id.session_uid :
+                               0;
+      }
+    }
+    perf_footprint.note("name=%s reuse=%d hash=%d fold=%d blocked=%d crop=%d",
+                        layer.name,
+                        int(reuse_cache),
+                        int(hash_matches),
+                        int(folds_projection),
+                        int(blocked),
+                        int(row.has_region));
     job->rows.append(std::move(row));
   }
 
@@ -834,6 +937,7 @@ void BKE_paint_layers_bake_job_compute(PaintLayersBakeJob &job,
     return;
   }
   Material &ma = *job.material_copy;
+  bke::paint_perf::ScopedTimer perf_compute("job.compute");
   /* Every object tile is weighted by the same fixed channel count, whether or not each channel
    * actually renders, so progress only ever needs the two totals below. */
   int64_t total_pairs = 0;
@@ -850,6 +954,7 @@ void BKE_paint_layers_bake_job_compute(PaintLayersBakeJob &job,
     }
   };
   for (PaintLayersBakeJob::RowResult &row : job.rows) {
+    bke::paint_perf::ScopedTimer perf_row("job.row");
     MaterialPaintLayer *layer = BKE_paint_layers_find(ma, row.marker);
     if (layer == nullptr) {
       done_pairs += int64_t(row.objects.size()) * BKE_paint_material_channels().size();
@@ -861,6 +966,12 @@ void BKE_paint_layers_bake_job_compute(PaintLayersBakeJob &job,
     const size_t row_memory_start = gradient_row ? MEM_get_memory_in_use() : 0;
     Vector<int> gradient_channels;
     for (PaintLayersBakeJob::ObjectResult &object : row.objects) {
+      /* One render buffer per object, reused across its channels: at 4K a channel's float4 render
+       * is 256 MiB, and allocating a pair per channel churned the allocator for nothing. The
+       * buffers are scratch: every read of one is confined to the rectangle the render just
+       * answered for (or the whole canvas for a full render). */
+      Vector<float> color(int64_t(row.size) * row.size * 4);
+      Vector<float> coverage(int64_t(row.size) * row.size);
       for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
         /* The render of one channel is not interruptible; checking between channels keeps the
          * cancel button responsive to within one channel's render. */
@@ -876,42 +987,76 @@ void BKE_paint_layers_bake_job_compute(PaintLayersBakeJob &job,
           return;
         }
         const int channel = int(info.channel);
-        Vector<float> color(int64_t(row.size) * row.size * 4);
-        Vector<float> coverage(int64_t(row.size) * row.size);
-        const bool rendered = BKE_paint_layers_bake_render_node(
-            ma,
-            *layer,
-            channel,
-            row.size,
-            color.data(),
-            coverage.data(),
-            nullptr,
-            object.surface,
-            /* The snapshot, not the object, is what a projected row reads on this thread. */
-            PaintLayerTileContext{
-                .painted_object = PaintLayerSurfaceRef{object.object, object.snapshot},
-                .tile_number = object.uv_tile});
+        /* A standing channel map takes the footprint's rectangle: the composite runs over the
+         * source span that maps to it, and outside it the previous render stands. A channel whose
+         * map did not stand is rendered whole, because the commit lays every texel of a fresh map. */
+        const int *channel_rect = (row.has_region && row.map_uid[channel] != 0) ? row.region :
+                                                                                 nullptr;
+        bool rendered = false;
+        {
+          bke::paint_perf::ScopedTimer perf_render("job.render");
+          rendered = BKE_paint_layers_bake_render_node(
+              ma,
+              *layer,
+              channel,
+              row.size,
+              color.data(),
+              coverage.data(),
+              channel_rect,
+              object.surface,
+              /* The snapshot, not the object, is what a projected row reads on this thread. */
+              PaintLayerTileContext{
+                  .painted_object = PaintLayerSurfaceRef{object.object, object.snapshot},
+                  .tile_number = object.uv_tile});
+          perf_render.note("channel=%d ok=%d rect=%d",
+                           channel,
+                           int(rendered),
+                           int(channel_rect != nullptr));
+        }
         done_pairs++;
         report();
         if (!rendered) {
           continue;
         }
+        bke::paint_perf::ScopedTimer perf_store("job.store");
         const int64_t pixel_num = int64_t(row.size) * row.size;
         /* The common factor folds in from the straight render, before the pixels take the map's
          * own format: a byte one quantizes the alpha the quotient divides by. The per-channel
-         * coverage is not held: the fold-in is the only thing the commit needs it for. */
+         * coverage is not held: the fold-in is the only thing the commit needs it for. A regional
+         * render only answered for its rectangle, so the fold walks that alone. */
         if (object.common.is_empty()) {
           object.common = Vector<float>(pixel_num, 0.0f);
         }
-        bake_common_from_channel(color, coverage, object.common);
+        bake_common_from_channel(color, coverage, object.common, channel_rect, row.size);
+        /* A regional render only has content inside its rectangle: store that alone, tightly
+         * packed, so the format conversion and the commit's write cost the footprint rather than
+         * the canvas. The whole canvas is stored when no rectangle narrowed the render. */
+        const bool crop_stored = channel_rect != nullptr;
+        const int store_x0 = crop_stored ? channel_rect[0] : 0;
+        const int store_y0 = crop_stored ? channel_rect[1] : 0;
+        const int store_w = crop_stored ? channel_rect[2] - channel_rect[0] : row.size;
+        const int store_h = crop_stored ? channel_rect[3] - channel_rect[1] : row.size;
+        const int64_t stored_pixels = int64_t(store_w) * store_h;
         PaintLayersBakeJob::ChannelResult result;
         result.channel = channel;
         result.is_color = info.is_color;
         result.stored_float = bake_channel_needs_float(*layer, info);
+        result.stored_cropped = crop_stored;
+        if (crop_stored) {
+          result.stored_rect[0] = store_x0;
+          result.stored_rect[1] = store_y0;
+          result.stored_rect[2] = store_x0 + store_w;
+          result.stored_rect[3] = store_y0 + store_h;
+        }
         if (result.stored_float) {
-          result.color = Vector<float>(pixel_num * 4);
-          for (const int64_t i : IndexRange(pixel_num)) {
-            bake_pixel_store_float(&color[i * 4], &result.color[i * 4]);
+          result.color = Vector<float>(stored_pixels * 4);
+          for (int y = 0; y < store_h; y++) {
+            const int64_t src_row = int64_t(y + store_y0) * row.size + store_x0;
+            const int64_t dst_row = int64_t(y) * store_w;
+            for (int x = 0; x < store_w; x++) {
+              bake_pixel_store_float(&color[(src_row + x) * 4],
+                                     &result.color[(dst_row + x) * 4]);
+            }
           }
         }
         else {
@@ -924,12 +1069,19 @@ void BKE_paint_layers_bake_job_compute(PaintLayersBakeJob &job,
                   IMB_colormanagement_space_get_named(IMB_colormanagement_role_colorspace_name_get(
                       COLOR_ROLE_DEFAULT_BYTE)) :
                   nullptr;
-          result.color_bytes = Vector<uchar>(pixel_num * 4);
-          for (const int64_t i : IndexRange(pixel_num)) {
-            bake_pixel_store_byte(
-                &color[i * 4], info.is_color, byte_colorspace, &result.color_bytes[i * 4]);
+          result.color_bytes = Vector<uchar>(stored_pixels * 4);
+          for (int y = 0; y < store_h; y++) {
+            const int64_t src_row = int64_t(y + store_y0) * row.size + store_x0;
+            const int64_t dst_row = int64_t(y) * store_w;
+            for (int x = 0; x < store_w; x++) {
+              bake_pixel_store_byte(&color[(src_row + x) * 4],
+                                    info.is_color,
+                                    byte_colorspace,
+                                    &result.color_bytes[(dst_row + x) * 4]);
+            }
           }
         }
+        perf_store.note("channel=%d pixels=%lld", channel, static_cast<long long>(stored_pixels));
         object.channels.append(std::move(result));
         if (!gradient_channels.contains(channel)) {
           gradient_channels.append(channel);
@@ -960,6 +1112,7 @@ void BKE_paint_layers_bake_job_compute(PaintLayersBakeJob &job,
                                retained_results,
                                retained_mib);
     }
+    perf_row.note("name=%s size=%d crop=%d", layer->name, row.size, int(row.has_region));
   }
   for (PaintLayersBakeJob::EffectResult &effect_result : job.effects) {
     const MaterialPaintLayer *effect = BKE_paint_layers_find(ma, effect_result.marker);
@@ -1037,6 +1190,7 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
     return false;
   }
   Main &bmain = *job.bmain;
+  bke::paint_perf::ScopedTimer perf_commit("job.commit");
   Material *ma = nullptr;
   for (Material &candidate : bmain.materials) {
     if (candidate.id.session_uid == job.material_session_uid && &candidate == job.material) {
@@ -1131,6 +1285,38 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
     }
     const int object_num = tiled_row ? row.object_num : 0;
     const Span<int> image_tiles = row.image_tiles;
+    /* The rectangle is only the previous result's to keep where the maps that stood at creation are
+     * still the ones the commit writes: a map replaced under the job (an undo, a reload, a resize)
+     * holds no content outside it, so the row is left for a whole render rather than written
+     * half-blank. */
+    if (row.has_region) {
+      bool maps_stand = true;
+      for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+        const int channel = int(info.channel);
+        if (row.map_uid[channel] == 0) {
+          continue;
+        }
+        const Image *slot = layer->bake->images[channel];
+        if (slot == nullptr || slot->id.session_uid != row.map_uid[channel] ||
+            !bake_service_image_is_live(bmain, slot))
+        {
+          maps_stand = false;
+          break;
+        }
+      }
+      if (maps_stand && row.coverage_uid != 0) {
+        const Image *coverage = layer->bake->coverage;
+        maps_stand = coverage != nullptr && coverage->id.session_uid == row.coverage_uid &&
+                     bake_service_image_is_live(bmain, coverage);
+      }
+      if (!maps_stand) {
+        /* A map the rectangle would leave alone is gone: the next bake must render whole, so the
+         * stored hash is cleared rather than left to make the replacement look like a pixel edit. */
+        layer->bake->hash[0] = 0;
+        layer->bake->hash[1] = 0;
+        continue;
+      }
+    }
     /* The renders each object wrote; an object is recorded once all of its tiles landed. */
     Array<int> object_pairs_written(std::max(object_num, 1), 0);
     Array<int> object_pairs_total(std::max(object_num, 1), 0);
@@ -1161,22 +1347,49 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
         if (color_image == nullptr) {
           continue;
         }
+        /* Only the map that stood at creation may take the rectangle: outside it its previous
+         * result is what stays. The service may have replaced it (a size or format change the
+         * creation could not see): the whole stored buffer would zero what the rectangle does not
+         * cover, so the row is dropped and re-rendered whole instead. */
+        const bool channel_regional = row.has_region && row.map_uid[channel.channel] != 0;
+        if (channel_regional && color_image->id.session_uid != row.map_uid[channel.channel]) {
+          /* The service replaced the standing map mid-write: the pixels outside the rectangle are
+           * blank now, so the next bake must render whole. */
+          layer->bake->hash[0] = 0;
+          layer->bake->hash[1] = 0;
+          all_objects = false;
+          break;
+        }
         /* The stored buffer is the map's own format, so this write converts nothing: it puts down
-         * the render the worker held, not its float4. The buffer is freed here and not at the job's
-         * teardown, so the held memory falls as the maps are written. */
+         * the render the worker held, not its float4. A regional render stored its rectangle alone,
+         * so the write covers that rectangle and reads the buffer with its packed row width. The
+         * buffer is freed here and not at the job's teardown, so the held memory falls as the maps
+         * are written. */
+        const int *stored_rect = nullptr;
+        int stored_width = 0;
+        if (channel.stored_cropped) {
+          stored_rect = channel.stored_rect;
+          stored_width = channel.stored_rect[2] - channel.stored_rect[0];
+        }
         bake_write_stored_image(
             *color_image,
             channel.stored_float,
             channel.stored_float ? static_cast<const void *>(channel.color.data()) :
                                    static_cast<const void *>(channel.color_bytes.data()),
-            nullptr,
-            object.tile_number);
+            stored_rect,
+            object.tile_number,
+            stored_width);
         channel.color = Vector<float>();
         channel.color_bytes = Vector<uchar>();
         if (!written_channels.contains(channel.channel)) {
           written_channels.append(channel.channel);
         }
         object_written = true;
+      }
+      if (!all_objects) {
+        /* The row already failed, or a standing map was replaced mid-write: the rest of this
+         * object is not ours to lay. */
+        continue;
       }
       if (!object_written) {
         all_objects = false;
@@ -1189,8 +1402,16 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
         if (Image *coverage_image = bake_service_image(
                 bmain, *layer, -1, row.size, false, false, object_num, image_tiles))
         {
-          bake_write_coverage_image(
-              *coverage_image, object.common.data(), nullptr, object.tile_number);
+          /* The row's factor is zero where no channel covers, so the rectangle is the only part a
+           * partial render can change; a replaced coverage map starts blank there, and laying the
+           * whole buffer into it is right then too. */
+          const bool coverage_regional =
+              row.has_region && row.coverage_uid != 0 &&
+              coverage_image->id.session_uid == row.coverage_uid;
+          bake_write_coverage_image(*coverage_image,
+                                    object.common.data(),
+                                    coverage_regional ? row.region : nullptr,
+                                    object.tile_number);
         }
         object.common = Vector<float>();
       }

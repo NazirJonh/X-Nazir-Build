@@ -22,12 +22,16 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "BLI_listbase.h"
 #include "BLI_math_color.h"
 #include "BLI_rect.h"
+#include "BLI_ustring.hh"
 #include "BLI_uuid.h"
 
 #include "paint_layers_generate_test_fixture.hh"
 
+#include "BKE_node.hh"
+#include "BKE_node_legacy_types.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_edit.hh"
 #include "BKE_wm_runtime.hh"
@@ -7025,6 +7029,299 @@ TEST_F(PaintLayersEffectTest, a_whole_map_chain_has_no_footprint)
   EXPECT_FALSE(BKE_paint_layers_effect_input_footprint_region(
       *ma, *row, *effect, int(kColor),
       PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE}, footprint));
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Row source footprint
+ *
+ * The region of the bake canvas where the row's own bake render can lay content: the preimage of
+ * the unit square under the row's composed read (its transform effects' steps, then its own
+ * mapping), grown by the chain's halo. The max edges are exclusive: the whole canvas reads back
+ * `xmax == size`. Everything that would make the rectangle cut real content refuses it.
+ * \{ */
+
+namespace row_source_test {
+
+/** A Fill row carrying \a map on its Base Color: a Fill's map reads through the row's mapping. */
+MaterialPaintLayer *add_fill_row(Material &ma, Image &map)
+{
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Fill;
+  params.name = "Preview";
+  MaterialPaintLayer *row = BKE_paint_layers_add_with_policy(ma, params);
+  EXPECT_NE(row, nullptr);
+  if (row != nullptr) {
+    EXPECT_NE(BKE_paint_layers_channel_add(ma, row, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+    EXPECT_TRUE(BKE_paint_layers_channel_set_image(
+        ma, row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &map));
+  }
+  return row;
+}
+
+}  // namespace row_source_test
+
+TEST_F(PaintLayersEffectTest, a_bounded_row_source_footprint_is_the_quarter_plus_a_pad_texel)
+{
+  Image *map = add_shade_image("Preview", 255, 0);
+  MaterialPaintLayer *row = row_source_test::add_fill_row(*ma, *map);
+  ASSERT_NE(row, nullptr);
+  const float scale[2] = {2.0f, 2.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, row, scale));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, row, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
+  /* A CPU effect folds the mapping into the bake: without one the planner keeps the row live and
+   * the footprint refuses it. */
+  MaterialPaintLayer *blur = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_NE(blur, nullptr);
+  ASSERT_TRUE(
+      paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 2));
+  clear_active();
+
+  rcti region;
+  ASSERT_TRUE(bke::paint_layers::footprint::row_source_region(
+      *ma, *row, PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE}, 512, region));
+  /* Scale 2 over 512 texels: the unit square's preimage is [0, 256) plus the one-texel pad, grown
+   * by the box blur's two-texel halo. The max edges are exclusive, so the region covers the texels
+   * [0, 259) and is not the whole canvas. */
+  EXPECT_EQ(region.xmin, 0);
+  EXPECT_EQ(region.ymin, 0);
+  EXPECT_EQ(region.xmax, 259);
+  EXPECT_EQ(region.ymax, 259);
+  EXPECT_LT(region.xmax, 512);
+}
+
+TEST_F(PaintLayersEffectTest, a_row_source_footprint_uses_the_channel_that_carries_the_map)
+{
+  Image *map = add_shade_image("Preview", 255, 0);
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Fill;
+  params.name = "Preview";
+  MaterialPaintLayer *row = BKE_paint_layers_add_with_policy(*ma, params);
+  ASSERT_NE(row, nullptr);
+  /* The authoring policy leaves empty per-channel records; the row's map arrives on Base Color
+   * only, so the record the footprint describes must be the one with content. */
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, row, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, row, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(*ma, row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+  const float scale[2] = {2.0f, 2.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, row, scale));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, row, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
+  MaterialPaintLayer *blur = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_NE(blur, nullptr);
+  ASSERT_TRUE(
+      paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 2));
+  clear_active();
+
+  rcti region;
+  ASSERT_TRUE(bke::paint_layers::footprint::row_source_region(
+      *ma, *row, PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE}, 512, region));
+  EXPECT_EQ(region.xmin, 0);
+  EXPECT_EQ(region.ymin, 0);
+  EXPECT_EQ(region.xmax, 259);
+  EXPECT_EQ(region.ymax, 259);
+}
+
+TEST_F(PaintLayersEffectTest, an_unbounded_row_source_mapping_refuses)
+{
+  Image *map = add_shade_image("Preview", 255, 0);
+  MaterialPaintLayer *row = row_source_test::add_fill_row(*ma, *map);
+  ASSERT_NE(row, nullptr);
+  const float scale[2] = {2.0f, 2.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, row, scale));
+  /* A CPU effect so the row is bakeable: the refusals below are the mapping's, not the live row's. */
+  MaterialPaintLayer *blur = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_NE(blur, nullptr);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 2));
+  clear_active();
+
+  /* A repeated axis floors the composed lookup, which tiles the content over the whole canvas. */
+  rcti region;
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, row, MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_X));
+  EXPECT_FALSE(bke::paint_layers::footprint::row_source_region(
+      *ma, *row, PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE}, 512, region));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, row, MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_Y));
+  EXPECT_FALSE(bke::paint_layers::footprint::row_source_region(
+      *ma, *row, PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE}, 512, region));
+  /* A mapping that is off reads wherever the row's own alpha does: it bounds nothing. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, row, false));
+  EXPECT_FALSE(bke::paint_layers::footprint::row_source_region(
+      *ma, *row, PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE}, 512, region));
+}
+
+TEST_F(PaintLayersEffectTest, a_row_the_planner_keeps_live_has_no_row_source_footprint)
+{
+  Image *map = add_shade_image("Preview", 255, 0);
+  MaterialPaintLayer *row = row_source_test::add_fill_row(*ma, *map);
+  ASSERT_NE(row, nullptr);
+  const float scale[2] = {2.0f, 2.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, row, scale));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, row, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
+  clear_active();
+
+  /* Without a CPU effect the row's mapping keeps it live: the planner never bakes it, and the
+   * mapping is applied when the map is read rather than laid into the map. The described chain
+   * would bound the live read, not a map's content, so the footprint refuses it. */
+  ASSERT_TRUE(BKE_paint_layers_bake_blocked(*ma, *row));
+  rcti region;
+  EXPECT_FALSE(bke::paint_layers::footprint::row_source_region(
+      *ma, *row, PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE}, 512, region));
+}
+
+TEST_F(PaintLayersEffectTest, an_identity_row_source_mapping_spans_the_canvas)
+{
+  Image *map = add_shade_image("Preview", 255, 0);
+  MaterialPaintLayer *row = row_source_test::add_fill_row(*ma, *map);
+  ASSERT_NE(row, nullptr);
+  /* The default transform is the identity; only the wrap has to clip. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, row, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
+  clear_active();
+
+  rcti region;
+  ASSERT_TRUE(bke::paint_layers::footprint::row_source_region(
+      *ma, *row, PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE}, 512, region));
+  /* The identity's preimage is the whole square: the region is the whole canvas, and the caller
+   * does not narrow it. */
+  EXPECT_EQ(region.xmin, 0);
+  EXPECT_EQ(region.ymin, 0);
+  EXPECT_EQ(region.xmax, 512);
+  EXPECT_EQ(region.ymax, 512);
+}
+
+TEST_F(PaintLayersEffectTest, a_folder_row_has_no_row_source_footprint)
+{
+  Image *map = add_shade_image("Preview", 255, 0);
+  MaterialPaintLayer *row = row_source_test::add_fill_row(*ma, *map);
+  ASSERT_NE(row, nullptr);
+  const float scale[2] = {2.0f, 2.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, row, scale));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, row, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
+  /* A folder carrying a child: the parent's chain does not bound what the child lays. */
+  MaterialPaintLayer *child = MEM_new<MaterialPaintLayer>(__func__);
+  child->marker = BLI_uuid_generate_random();
+  BLI_addtail(&row->children, child);
+  clear_active();
+
+  rcti region;
+  EXPECT_FALSE(bke::paint_layers::footprint::row_source_region(
+      *ma, *row, PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE}, 512, region));
+
+  BLI_freelistN(&row->children);
+}
+
+TEST_F(PaintLayersEffectTest, a_row_source_footprint_is_the_effect_footprint_grown_by_the_halo)
+{
+  Image *map = add_shade_image("Preview", 255, 0);
+  MaterialPaintLayer *row = row_source_test::add_fill_row(*ma, *map);
+  ASSERT_NE(row, nullptr);
+  const float scale[2] = {2.0f, 2.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, row, scale));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, row, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_NE(effect, nullptr);
+  ASSERT_TRUE(
+      paint_layer_kind_param_int_set(*effect, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*effect, PAINT_LAYER_BLUR_RADIUS, 2));
+  clear_active();
+
+  /* The effect footprint of the blur's input is the row's own content, without the halo, on the
+   * input's own 8-texel canvas. */
+  rcti effect_region;
+  ASSERT_TRUE(BKE_paint_layers_effect_input_footprint_region(
+      *ma, *row, *effect, int(kColor),
+      PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE}, effect_region));
+  EXPECT_EQ(effect_region.xmin, 0);
+  EXPECT_EQ(effect_region.xmax, 5);
+  EXPECT_EQ(effect_region.ymin, 0);
+  EXPECT_EQ(effect_region.ymax, 5);
+
+  /* The row source render lays the blur's result over the row's content, and a box kernel of
+   * radius 2 reaches two texels past it: the region is the footprint grown by the chain's halo,
+   * on the same canvas the bake render draws. */
+  EXPECT_EQ(bke::paint_layers::footprint::paint_layer_effect_chain_halo(
+                *ma, *row, *effect, int(kColor), 8, 8),
+            2);
+  rcti region;
+  ASSERT_TRUE(bke::paint_layers::footprint::row_source_region(
+      *ma, *row, PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE}, 8, region));
+  EXPECT_EQ(region.xmin, 0);
+  EXPECT_EQ(region.ymin, 0);
+  EXPECT_EQ(region.xmax, 7);
+  EXPECT_EQ(region.ymax, 7);
+}
+
+TEST_F(PaintLayersEffectTest, a_transform_effect_moves_the_row_source_footprint)
+{
+  Image *map = add_shade_image("Preview", 255, 0);
+  MaterialPaintLayer *row = row_source_test::add_fill_row(*ma, *map);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, row, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
+  /* One Transform Mapping of scale 2 and offset (0.5, 0.5), then the row's identity: the content
+   * reads where `2 * uv + 0.5` lands in the square, so the footprint shrinks to [-0.25, 0.25]. */
+  MaterialPaintLayer *transform = add_effect(*row, MA_PAINT_LAYER_FILTER_TRANSFORM);
+  ASSERT_NE(transform, nullptr);
+  const float scale[2] = {2.0f, 2.0f};
+  const float offset[2] = {0.5f, 0.5f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, transform, scale));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(*ma, transform, offset));
+  /* A CPU effect folds the transform into the bake; its box kernel reaches two texels past the
+   * transformed content. */
+  MaterialPaintLayer *blur = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_NE(blur, nullptr);
+  ASSERT_TRUE(
+      paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 2));
+  clear_active();
+
+  rcti region;
+  ASSERT_TRUE(bke::paint_layers::footprint::row_source_region(
+      *ma, *row, PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE}, 512, region));
+  /* [-0.25, 0.25] over 512 texels, plus the pad and the blur's two-texel halo: x0 clamps at 0,
+   * x1 is `ceil(0.25 * 512) + 1 + 2`. */
+  EXPECT_EQ(region.xmin, 0);
+  EXPECT_EQ(region.ymin, 0);
+  EXPECT_EQ(region.xmax, 131);
+  EXPECT_EQ(region.ymax, 131);
+}
+
+TEST_F(PaintLayersEffectTest, a_laid_correction_refuses_the_row_source_footprint)
+{
+  Image *map = add_shade_image("Preview", 255, 0);
+  MaterialPaintLayer *row = row_source_test::add_fill_row(*ma, *map);
+  ASSERT_NE(row, nullptr);
+  const float scale[2] = {2.0f, 2.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, row, scale));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, row, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
+  /* A CPU effect makes the row bakeable, so the refusal below is the laid correction's. */
+  MaterialPaintLayer *blur = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_NE(blur, nullptr);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 2));
+  /* A Material correction lays its own maps through its own frame, which the row's chain does not
+   * bound: v1 refuses the rectangle instead of unioning the frames. The source carries a linked
+   * Principled, whose socket defaults are the plain values the correction lays. */
+  Material *other = BKE_material_add(bmain, "Other");
+  ASSERT_NE(other->nodetree, nullptr);
+  bNode *principled = bke::node_add_static_node(nullptr, *other->nodetree,
+                                                SH_NODE_BSDF_PRINCIPLED);
+  bNode *output = bke::node_add_static_node(nullptr, *other->nodetree,
+                                            SH_NODE_OUTPUT_MATERIAL);
+  bke::node_add_link(*other->nodetree,
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_OUT, "BSDF"_ustr),
+                     *output,
+                     *bke::node_find_socket(*output, SOCK_IN, "Surface"_ustr));
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add_material(
+      *ma, row, "Laid", other);
+  ASSERT_NE(correction, nullptr);
+  ASSERT_TRUE(paint_layer_effect_lays(*ma, *correction, int(kColor)))
+      << "the test's refusal is only meaningful over a correction that lays";
+  clear_active();
+
+  rcti region;
+  EXPECT_FALSE(bke::paint_layers::footprint::row_source_region(
+      *ma, *row, PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE}, 512, region));
 }
 
 /** \} */

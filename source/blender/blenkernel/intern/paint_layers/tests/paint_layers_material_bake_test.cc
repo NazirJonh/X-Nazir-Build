@@ -26,6 +26,7 @@
 #include "BKE_node_tree_interface.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_edit.hh"
+#include "BKE_paint_layers_tile.hh"
 #include "BKE_wm_runtime.hh"
 
 #include "BLI_index_range.hh"
@@ -41,6 +42,7 @@
 #include "DNA_windowmanager_types.h"
 
 #include "../paint_layers_bake_intern.hh"
+#include "../paint_layers_effect_footprint.hh"
 #include "../paint_layers_generate_intern.hh"
 #include "../paint_layers_intern.hh"
 #include "../paint_layers_kind.hh"
@@ -2020,6 +2022,79 @@ class PaintLayersOwnedEffectTest : public PaintLayersMaterialBakeTest {
     BKE_paint_layers_bake_job_free(*job);
     return landed;
   }
+
+  /**
+   * The planner's own inline bake: a light row (its maps below the heavy size) is rendered by
+   * #BKE_paint_layers_bake_plan_run, which is the path the footprint narrowing serves. False when
+   * the plan wrote nothing.
+   */
+  bool run_plan()
+  {
+    ScopedBackground background;
+    bool changed = false;
+    BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed);
+    return changed;
+  }
+
+  /**
+   * A Fill row in the Always mode carrying a fresh \a map_size square map through a CLIP mapping
+   * of \a scale, with a box Blur of radius 2 narrowed to Base Color, at an explicit square bake
+   * \a size, whose maps the planner renders. This is the row kind the planner's band and footprint
+   * narrowing serves: the mapping folds into the bake (a row with a CPU effect), its maps hold the
+   * row's own content laid through the mapping, and the content ends inside the footprint grown by
+   * the blur's halo. The blur's extra channel records are removed so the subtree stays under the
+   * node budget the planner weighs a row by: a light due row is rendered by the plan itself, which
+   * is the path the narrowing serves (a heavy one leaves for the worker job, which resolves the
+   * same footprint at creation). \a r_row and \a r_map hand the row and its source map back for
+   * edits and read-back.
+   */
+  MaterialPaintLayer *add_bounded_fill(MaterialPaintLayer **r_row,
+                                       Image **r_map,
+                                       const float scale,
+                                       const int size,
+                                       const char *name,
+                                       const int map_size = 8)
+  {
+    const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    Image *map = BKE_image_add_generated(
+        bmain, map_size, map_size, name, 32, false, IMA_GENTYPE_BLANK, black, false, false, false);
+    PaintLayerAddParams params;
+    params.kind = PaintLayerAddKind::Fill;
+    params.name = name;
+    MaterialPaintLayer *row = BKE_paint_layers_add_with_policy(*ma, params);
+    EXPECT_NE(row, nullptr);
+    add_channel(*row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map);
+    /* The authoring policy created records for every channel of the material's set, and each one
+     * costs the node budget the planner weighs a row's subtree by. Base Color alone keeps the row
+     * under it: a light due row is rendered by the plan itself, which is the path the narrowing
+     * serves; a heavy one leaves for the worker job, which resolves the same footprint. */
+    for (int i = row->channels_num - 1; i >= 0; i--) {
+      const int channel = int(row->channels[i].channel);
+      if (channel != int(PAINT_MATERIAL_CHANNEL_BASE_COLOR)) {
+        EXPECT_TRUE(BKE_paint_layers_channel_remove(*ma, row, eMaterialPaintChannel(channel)));
+      }
+    }
+    const float scale2[2] = {scale, scale};
+    EXPECT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, row, scale2));
+    EXPECT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, row, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
+    MaterialPaintLayer *blur = BKE_paint_layers_filter_add(*ma, row, MA_PAINT_LAYER_FILTER_BLUR);
+    EXPECT_NE(blur, nullptr);
+    EXPECT_TRUE(
+        paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+    EXPECT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 2));
+    for (int i = blur->channels_num - 1; i >= 0; i--) {
+      const int channel = int(blur->channels[i].channel);
+      if (channel != int(PAINT_MATERIAL_CHANNEL_BASE_COLOR)) {
+        EXPECT_TRUE(BKE_paint_layers_channel_remove(*ma, blur, eMaterialPaintChannel(channel)));
+      }
+    }
+    EXPECT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *row, MA_PAINT_LAYER_BAKE_ALWAYS));
+    EXPECT_TRUE(BKE_paint_layers_bake_size_set(*ma, *row, size));
+    BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+    *r_row = row;
+    *r_map = map;
+    return row;
+  }
 };
 
 TEST_F(PaintLayersOwnedEffectTest, a_bounded_footprint_narrows_the_planner_region)
@@ -2992,6 +3067,401 @@ TEST_F(PaintLayersMaterialBakeTest, an_edit_of_a_material_row_that_covers_nothin
   EXPECT_FALSE(BKE_paint_layers_bake_changed_region(*ma, *row, region))
       << "a row that covers nothing cannot be moved by any region";
   EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_BAKE_STALE, 0);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Row source render narrowed by the row's own footprint
+ *
+ * The planner renders a Fill row's bake whole the first time and, while the maps stand and the
+ * description still agrees with them, takes only the rectangle the row's own read chain bounds:
+ * the preimage of the unit square under the row's mapping, grown by its blur's halo, aligned
+ * outward to the 256 tiles. Scale 4 over a 512 canvas lays the content in `[0, 128)` plus the
+ * pad and the halo, so the aligned write rect is `[0, 256) x [0, 256)` -- a quarter of the
+ * canvas -- and a sentinel written outside it survives every narrowed write. The row is a Fill,
+ * not a Material row: a Material row's maps are rendered from its source by a different path,
+ * which this narrowing does not serve.
+ * \{ */
+
+TEST_F(PaintLayersOwnedEffectTest, a_bounded_fill_row_full_edit_is_written_in_its_footprint)
+{
+  MaterialPaintLayer *row = nullptr;
+  Image *map = nullptr;
+  add_bounded_fill(&row, &map, 4.0f, 512, "Bounded");
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(run_plan());
+  ASSERT_NE(row->bake, nullptr);
+  ASSERT_NE(row->bake->coverage, nullptr);
+  Image *base_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(base_map, nullptr);
+  const Vector<uchar> before = read_map(*base_map);
+
+  /* A texel outside the `[0, 256)` write rect: a narrowed write leaves it, a whole one recomputes
+   * it. */
+  write_map_rect(*base_map, rcti{460, 470, 460, 470}, 255);
+  edit_map_rect(*map, rcti{0, 8, 0, 8}, 200);
+  BKE_paint_layers_bake_notice_changes(*ma);
+
+  /* The reference: an identical row whose first bake happens after the edit, so its one render is
+   * a full one of the same edited content. */
+  MaterialPaintLayer *reference = nullptr;
+  Image *reference_map = nullptr;
+  add_bounded_fill(&reference, &reference_map, 4.0f, 512, "BoundedRef");
+  ASSERT_NE(reference, nullptr);
+  write_map_rect(*reference_map, rcti{0, 8, 0, 8}, 200);
+
+  ASSERT_TRUE(run_plan());
+  Image *after_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_EQ(after_map, base_map) << "the narrowed write reuses the map, it does not replace it";
+  const Vector<uchar> after = read_map(*after_map);
+  const Vector<uchar> full = read_map(*reference->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
+  ASSERT_EQ(after.size(), full.size());
+
+  EXPECT_EQ(map_byte_at(after, 512, 460, 460), 255)
+      << "the write took the footprint's rectangle alone; the sentinel outside it stands";
+  /* Inside the footprint the edit landed; just past the content's edge and outside both, the
+   * bounded row lays what the full render lays. */
+  EXPECT_NEAR(map_byte_at(after, 512, 60, 60), map_byte_at(full, 512, 60, 60), 3);
+  EXPECT_NEAR(map_byte_at(after, 512, 130, 60), map_byte_at(full, 512, 130, 60), 3)
+      << "the halo just past the content's edge matches the full render";
+  EXPECT_NEAR(map_byte_at(after, 512, 135, 60), map_byte_at(full, 512, 135, 60), 3);
+  EXPECT_NEAR(map_byte_at(after, 512, 300, 300), map_byte_at(full, 512, 300, 300), 3);
+  EXPECT_NE(map_byte_at(after, 512, 60, 60), map_byte_at(before, 512, 60, 60))
+      << "the edited content was re-rendered inside the footprint";
+}
+
+TEST_F(PaintLayersOwnedEffectTest, an_unbounded_fill_row_keeps_re_rendering_whole)
+{
+  MaterialPaintLayer *row = nullptr;
+  Image *map = nullptr;
+  add_bounded_fill(&row, &map, 4.0f, 512, "Unbounded");
+  ASSERT_NE(row, nullptr);
+  /* The mapping off reads the map at the raw UV: the content spans wherever the map's alpha does,
+   * and nothing bounds it. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, row, false));
+  ASSERT_TRUE(run_plan());
+  ASSERT_NE(row->bake, nullptr);
+  Image *base_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(base_map, nullptr);
+  const Vector<uchar> before = read_map(*base_map);
+  write_map_rect(*base_map, rcti{460, 470, 460, 470}, 255);
+
+  edit_map_rect(*map, rcti{0, 8, 0, 8}, 200);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  ASSERT_TRUE(run_plan());
+  const Vector<uchar> after = read_map(*row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
+
+  EXPECT_NE(map_byte_at(after, 512, 460, 460), 255)
+      << "an unbounded row is rendered whole; the sentinel outside any footprint is rewritten";
+  EXPECT_NE(map_byte_at(after, 512, 460, 460), map_byte_at(before, 512, 460, 460));
+  EXPECT_NE(map_byte_at(after, 512, 300, 300), map_byte_at(before, 512, 300, 300))
+      << "the edited content covers the canvas, as the unmapped fill reads it";
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_structural_change_re_renders_a_bounded_fill_row_whole)
+{
+  MaterialPaintLayer *row = nullptr;
+  Image *map = nullptr;
+  add_bounded_fill(&row, &map, 4.0f, 512, "Structural");
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(run_plan());
+  Image *base_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(base_map, nullptr);
+  const Vector<uchar> before = read_map(*base_map);
+  write_map_rect(*base_map, rcti{460, 470, 460, 470}, 255);
+
+  edit_map_rect(*map, rcti{0, 8, 0, 8}, 200);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  /* Scale 5 lays the content in `[0, 103)` -- its aligned rect is still `[0, 256)`, so only a
+   * whole render can reach the sentinel. The row's bake hash folds its mapping values (a row with
+   * a CPU effect bakes them in), so the change is a structural one. */
+  const float scale[2] = {5.0f, 5.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, row, scale));
+  uint32_t hash[2];
+  BKE_paint_layers_bake_hash(*ma, *row, hash);
+  ASSERT_TRUE(hash[0] != row->bake->hash[0] || hash[1] != row->bake->hash[1])
+      << "the test's premise is a structural hash that moved";
+
+  ASSERT_TRUE(run_plan());
+  const Vector<uchar> after = read_map(*row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
+  EXPECT_NE(map_byte_at(after, 512, 460, 460), 255)
+      << "a hash mismatch renders whole; the old content outside the new footprint is not kept";
+  EXPECT_NE(map_byte_at(after, 512, 80, 80), map_byte_at(before, 512, 80, 80))
+      << "the whole render laid the edited fill at the new structure's scale";
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_first_bake_lays_transparent_outside_a_bounded_footprint)
+{
+  MaterialPaintLayer *row = nullptr;
+  Image *map = nullptr;
+  add_bounded_fill(&row, &map, 4.0f, 512, "First");
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(run_plan());
+  ASSERT_NE(row->bake, nullptr);
+  Image *base_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(base_map, nullptr);
+
+  /* The first bake is a full render: the bounded fill lays opaque content inside its footprint and
+   * transparent outside it -- alpha 0, not black with an alpha of 1 -- and the coverage follows. */
+  const Vector<uchar> pixels = read_map(*base_map);
+  EXPECT_EQ(pixels[(int64_t(60) * 512 + 60) * 4 + 3], 255)
+      << "the fill's own alpha inside the footprint";
+  EXPECT_EQ(pixels[(int64_t(400) * 512 + 400) * 4 + 3], 0)
+      << "nothing of a bounded row lies outside its footprint";
+  Image *coverage = row->bake->coverage;
+  ASSERT_NE(coverage, nullptr);
+  const Vector<uchar> coverage_pixels = read_map(*coverage);
+  EXPECT_EQ(map_byte_at(coverage_pixels, 512, 60, 60), 255);
+  EXPECT_EQ(map_byte_at(coverage_pixels, 512, 400, 400), 0);
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_whole_map_effect_keeps_a_bounded_fill_row_whole)
+{
+  Image *map = add_image("Matched");
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Fill;
+  params.name = "Matched";
+  MaterialPaintLayer *row = BKE_paint_layers_add_with_policy(*ma, params);
+  ASSERT_NE(row, nullptr);
+  add_channel(*row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map);
+  for (int i = row->channels_num - 1; i >= 0; i--) {
+    const int channel = int(row->channels[i].channel);
+    if (channel != int(PAINT_MATERIAL_CHANNEL_BASE_COLOR)) {
+      ASSERT_TRUE(BKE_paint_layers_channel_remove(*ma, row, eMaterialPaintChannel(channel)));
+    }
+  }
+  const float scale[2] = {4.0f, 4.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, row, scale));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, row, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
+  MaterialPaintLayer *match = BKE_paint_layers_filter_add(*ma, row,
+                                                         MA_PAINT_LAYER_FILTER_COLOR_MATCH);
+  ASSERT_NE(match, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *row, MA_PAINT_LAYER_BAKE_ALWAYS));
+  ASSERT_TRUE(BKE_paint_layers_bake_size_set(*ma, *row, 512));
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+  ASSERT_TRUE(run_plan());
+  Image *base_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(base_map, nullptr);
+  write_map_rect(*base_map, rcti{460, 470, 460, 470}, 255);
+
+  edit_map_rect(*map, rcti{0, 8, 0, 8}, 200);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  ASSERT_TRUE(run_plan());
+  const Vector<uchar> after = read_map(*row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
+  EXPECT_NE(map_byte_at(after, 512, 460, 460), 255)
+      << "a Color Match reads the whole canvas; no footprint narrows its row's render";
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_laid_correction_keeps_the_row_source_footprint_off)
+{
+  Image *map = add_image("FillLaid");
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Fill;
+  params.name = "FillLaid";
+  MaterialPaintLayer *row = BKE_paint_layers_add_with_policy(*ma, params);
+  ASSERT_NE(row, nullptr);
+  add_channel(*row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map);
+  const float scale[2] = {4.0f, 4.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, row, scale));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, row, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
+  /* A CPU effect makes the row bakeable, so the refusal below is the laid correction's. */
+  MaterialPaintLayer *blur = BKE_paint_layers_filter_add(*ma, row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_NE(blur, nullptr);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 2));
+  /* A Material correction lays its own maps through its own frame, which the row's chain does not
+   * bound: v1 refuses the rectangle instead of unioning the frames. The fixture's source supplies
+   * Metallic as a plain value, so the correction lays. */
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add_material(
+      *ma, row, "Laid", source);
+  ASSERT_NE(correction, nullptr);
+  ASSERT_TRUE(paint_layer_effect_lays(*ma, *correction, PAINT_MATERIAL_CHANNEL_METALLIC))
+      << "the test's refusal is only meaningful over a correction that lays";
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+
+  rcti region;
+  EXPECT_FALSE(bke::paint_layers::footprint::row_source_region(
+      *ma, *row, PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE}, 512, region));
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_full_update_re_renders_a_bounded_fill_row_in_its_footprint)
+{
+  MaterialPaintLayer *row = nullptr;
+  Image *map = nullptr;
+  add_bounded_fill(&row, &map, 4.0f, 512, "FullUpdate");
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(run_plan());
+  Image *base_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  Image *coverage = row->bake->coverage;
+  ASSERT_NE(base_map, nullptr);
+  ASSERT_NE(coverage, nullptr);
+  const Vector<uchar> before = read_map(*base_map);
+  /* Sentinels outside the `[0, 256)` write rect, in the colour map and in the coverage map. */
+  write_map_rect(*base_map, rcti{460, 470, 460, 470}, 255);
+  write_map_rect(*coverage, rcti{460, 470, 460, 470}, 255);
+
+  /* A full update carries no rectangle: the row is due again although its hash still matches, which
+   * is the path a full render takes on standing maps -- and it renders the footprint alone. */
+  BKE_image_partial_update_mark_full_update(map);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  int band[4] = {};
+  ASSERT_FALSE(BKE_paint_layers_bake_changed_region(*ma, *row, band))
+      << "the test's premise is a due row with no subscription band";
+
+  ASSERT_TRUE(run_plan());
+  const Vector<uchar> after = read_map(*row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
+  EXPECT_EQ(map_byte_at(after, 512, 460, 460), 255)
+      << "the full render took the footprint's rectangle; the sentinel outside it stands";
+  EXPECT_EQ(map_byte_at(read_map(*row->bake->coverage), 512, 460, 460), 255)
+      << "the coverage write takes the same rectangle";
+  /* Inside the footprint the re-render lays the content the first bake laid. */
+  EXPECT_EQ(map_byte_at(after, 512, 60, 60), map_byte_at(before, 512, 60, 60));
+  EXPECT_NEAR(map_byte_at(after, 512, 130, 60), map_byte_at(before, 512, 130, 60), 3);
+}
+
+TEST_F(PaintLayersOwnedEffectTest, an_edit_whose_band_misses_the_footprint_keeps_the_band_whole)
+{
+  MaterialPaintLayer *row = nullptr;
+  Image *map = nullptr;
+  /* The source map shares the canvas' side, so a far-corner edit names a far-corner band. */
+  add_bounded_fill(&row, &map, 4.0f, 512, "MissBand", 512);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(run_plan());
+  Image *base_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(base_map, nullptr);
+  const Vector<uchar> before = read_map(*base_map);
+  write_map_rect(*base_map, rcti{460, 470, 460, 470}, 255);
+
+  /* A source edit in the far corner maps to the band `[256, 512)`, which the tile-aligned footprint
+   * `[0, 256)` misses: v1 keeps the band whole rather than write nothing, and the content it lays
+   * there is the transparent outside the row's footprint. */
+  edit_map_rect(*map, rcti{500, 512, 500, 512}, 200);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  int band[4] = {};
+  ASSERT_TRUE(BKE_paint_layers_bake_changed_region(*ma, *row, band));
+  ASSERT_TRUE(run_plan());
+  const Vector<uchar> after = read_map(*row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
+  EXPECT_NE(map_byte_at(after, 512, 460, 460), 255)
+      << "the band was rendered whole; the sentinel inside it is rewritten";
+  EXPECT_EQ(map_byte_at(after, 512, 60, 60), map_byte_at(before, 512, 60, 60))
+      << "the footprint the band misses keeps the previous render";
+}
+
+/* -------------------------------------------------------------------- */
+/** \name Row source render narrowed in the worker job
+ *
+ * A heavy row (its maps at or above the heavy side) leaves the planner for the worker job, which
+ * composites from the localized copy and commits on the main thread. With the maps standing and
+ * the hash unchanged, the creation resolves the same footprint and the job renders and writes its
+ * tile-aligned rectangle; a first bake, a structural change and a live row keep the whole canvas.
+ * Scale 4 over a 2048 canvas lays the content in the first 512 texels, grown by the halo and
+ * aligned outward to `[0, 768)` -- a ninth of the canvas -- so a sentinel written outside it
+ * survives every narrowed write.
+ * \{ */
+
+TEST_F(PaintLayersOwnedEffectTest, a_bounded_fill_row_heavy_edit_is_written_in_its_footprint)
+{
+  MaterialPaintLayer *row = nullptr;
+  Image *map = nullptr;
+  add_bounded_fill(&row, &map, 4.0f, 2048, "HeavyBounded");
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(run_bake_job());
+  Image *base_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(base_map, nullptr);
+  ASSERT_NE(row->bake->coverage, nullptr);
+  /* The first bake is a whole render: the bounded fill lays nothing outside its footprint, so the
+   * map is transparent there -- alpha 0, not black with an alpha of 1. */
+  const Vector<uchar> first = read_map(*base_map);
+  EXPECT_EQ(first[(int64_t(1000) * 2048 + 1000) * 4 + 3], 0)
+      << "nothing of a bounded row lies outside its footprint";
+  /* Sentinels outside the `[0, 768)` write rect, in the colour map and in the coverage map. */
+  write_map_rect(*base_map, rcti{1000, 1010, 1000, 1010}, 255);
+  write_map_rect(*row->bake->coverage, rcti{1000, 1010, 1000, 1010}, 255);
+
+  /* The reference: an identical heavy row whose first (whole) bake happens after the same edit. */
+  MaterialPaintLayer *reference = nullptr;
+  Image *reference_map = nullptr;
+  add_bounded_fill(&reference, &reference_map, 4.0f, 2048, "HeavyBoundedRef");
+  ASSERT_NE(reference, nullptr);
+  edit_map_rect(*map, rcti{0, 8, 0, 8}, 200);
+  edit_map_rect(*reference_map, rcti{0, 8, 0, 8}, 200);
+  BKE_paint_layers_bake_notice_changes(*ma);
+
+  ASSERT_TRUE(run_bake_job());
+  Image *after_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_EQ(after_map, base_map) << "the narrowed write reuses the map, it does not replace it";
+  const Vector<uchar> after = read_map(*after_map);
+  const Vector<uchar> full = read_map(*reference->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
+
+  EXPECT_EQ(map_byte_at(after, 2048, 1000, 1000), 255)
+      << "the job wrote the footprint's rectangle alone; the sentinel outside it stands";
+  EXPECT_EQ(map_byte_at(read_map(*row->bake->coverage), 2048, 1000, 1000), 255)
+      << "the coverage write takes the same rectangle";
+  EXPECT_NEAR(map_byte_at(after, 2048, 60, 60), map_byte_at(full, 2048, 60, 60), 3)
+      << "the content inside the footprint matches a whole render";
+  EXPECT_NEAR(map_byte_at(after, 2048, 514, 514), map_byte_at(full, 2048, 514, 514), 3)
+      << "the halo just past the content's edge matches a whole render";
+  EXPECT_NE(map_byte_at(after, 2048, 60, 60), 0)
+      << "the edited content was re-rendered inside the footprint";
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_full_update_re_renders_a_heavy_fill_row_in_its_footprint)
+{
+  MaterialPaintLayer *row = nullptr;
+  Image *map = nullptr;
+  add_bounded_fill(&row, &map, 4.0f, 2048, "HeavyFullUpdate");
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(run_bake_job());
+  Image *base_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(base_map, nullptr);
+  ASSERT_NE(row->bake->coverage, nullptr);
+  const Vector<uchar> before = read_map(*base_map);
+  write_map_rect(*base_map, rcti{1000, 1010, 1000, 1010}, 255);
+  write_map_rect(*row->bake->coverage, rcti{1000, 1010, 1000, 1010}, 255);
+
+  /* A full update carries no rectangle: the row is due again although its hash still matches, and
+   * the job's full render takes the footprint alone. */
+  BKE_image_partial_update_mark_full_update(map);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  int band[4] = {};
+  ASSERT_FALSE(BKE_paint_layers_bake_changed_region(*ma, *row, band))
+      << "the test's premise is a due row with no subscription band";
+
+  ASSERT_TRUE(run_bake_job());
+  const Vector<uchar> after = read_map(*row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
+  EXPECT_EQ(map_byte_at(after, 2048, 1000, 1000), 255)
+      << "the job's full render took the footprint's rectangle; the sentinel outside it stands";
+  EXPECT_EQ(map_byte_at(read_map(*row->bake->coverage), 2048, 1000, 1000), 255)
+      << "the coverage write takes the same rectangle";
+  EXPECT_EQ(map_byte_at(after, 2048, 60, 60), map_byte_at(before, 2048, 60, 60))
+      << "inside the footprint the re-render lays what the first bake laid";
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_structural_change_re_renders_a_heavy_fill_row_whole)
+{
+  MaterialPaintLayer *row = nullptr;
+  Image *map = nullptr;
+  add_bounded_fill(&row, &map, 4.0f, 2048, "HeavyStructural");
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(run_bake_job());
+  Image *base_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(base_map, nullptr);
+  write_map_rect(*base_map, rcti{1000, 1010, 1000, 1010}, 255);
+
+  /* Scale 8 keeps the content in `[0, 256)`, whose aligned rect is `[0, 512)`; the sentinel is
+   * outside both. Only a whole render reaches it. The row's bake hash folds its mapping values, so
+   * the change is a structural one. */
+  const float scale[2] = {8.0f, 8.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, row, scale));
+  uint32_t hash[2];
+  hash_get(*ma, *row, hash);
+  ASSERT_TRUE(hash[0] != row->bake->hash[0] || hash[1] != row->bake->hash[1])
+      << "the test's premise is a structural hash that moved";
+
+  ASSERT_TRUE(run_bake_job());
+  const Vector<uchar> after = read_map(*row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
+  EXPECT_NE(map_byte_at(after, 2048, 1000, 1000), 255)
+      << "a hash mismatch renders whole; the old content outside the footprint is not kept";
 }
 
 /** \} */

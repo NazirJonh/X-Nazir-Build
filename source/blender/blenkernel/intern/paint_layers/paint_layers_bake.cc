@@ -3817,7 +3817,9 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
        * is out of date and a rectangle-only write would keep the old content outside it. */
       uint32_t current_hash[2];
       BKE_paint_layers_bake_hash(ma, layer, current_hash);
-      if (current_hash[0] != bake->hash[0] || current_hash[1] != bake->hash[1]) {
+      const bool hash_matches = current_hash[0] == bake->hash[0] &&
+                                current_hash[1] == bake->hash[1];
+      if (!hash_matches) {
         has_region = false;
       }
       /* A Decal step moves texels across the surface (a fold, a rotation): a changed rectangle of the
@@ -3831,6 +3833,23 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
         has_region = false;
       }
       const bool reuse_cache = bake->coverage != nullptr;
+      /* When the maps stand and the description still agrees with them, the content the row's bake
+       * render lays is bounded by the row's own read chain (its transform effects' steps, its own
+       * mapping, grown by its filters' halo): only the footprint's rectangle of the maps can move,
+       * and the render and the coverage write take it alone. The same refusals as the band above
+       * keep a Decal frame or a folded projection on the whole canvas. */
+      rcti source_footprint;
+      bool have_footprint = false;
+      if (reuse_cache && hash_matches && !bake_subtree_has_decal_effect(layer) &&
+          !bake_subtree_folds_projection(ma, layer))
+      {
+        have_footprint = bke::paint_layers::footprint::row_source_region(
+            ma,
+            layer,
+            PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE},
+            size,
+            source_footprint);
+      }
       int src_width = 0;
       int src_height = 0;
       bool have_source_dims = false;
@@ -3853,6 +3872,35 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
         rect[1] = clamp_i((int(int64_t(region[2]) * size / src_height) / tile) * tile, 0, size);
         rect[2] = clamp_i(((int(int64_t(region[1]) * size / src_width) / tile) + 1) * tile, 0, size);
         rect[3] = clamp_i(((int(int64_t(region[3]) * size / src_height) / tile) + 1) * tile, 0, size);
+        /* A band outside the row's own footprint re-renders content the chain cannot move there:
+         * keep the intersection, and keep the band whole when the two miss each other (v1). */
+        if (have_footprint) {
+          const int fx0 = clamp_i((source_footprint.xmin / tile) * tile, 0, size);
+          const int fy0 = clamp_i((source_footprint.ymin / tile) * tile, 0, size);
+          const int fx1 = clamp_i(((source_footprint.xmax + tile - 1) / tile) * tile, 0, size);
+          const int fy1 = clamp_i(((source_footprint.ymax + tile - 1) / tile) * tile, 0, size);
+          const int ix0 = max_ii(rect[0], fx0);
+          const int iy0 = max_ii(rect[1], fy0);
+          const int ix1 = min_ii(rect[2], fx1);
+          const int iy1 = min_ii(rect[3], fy1);
+          if (ix0 < ix1 && iy0 < iy1) {
+            rect[0] = ix0;
+            rect[1] = iy0;
+            rect[2] = ix1;
+            rect[3] = iy1;
+          }
+        }
+        rect_ptr = rect;
+      }
+      else if (have_footprint) {
+        /* A full render on standing maps: outside the footprint the maps hold the previous render's,
+         * which the chain keeps valid -- it cannot move content out there -- so the render and the
+         * coverage write take the footprint's tile-aligned rectangle alone. */
+        constexpr int tile = 256;
+        rect[0] = clamp_i((source_footprint.xmin / tile) * tile, 0, size);
+        rect[1] = clamp_i((source_footprint.ymin / tile) * tile, 0, size);
+        rect[2] = clamp_i(((source_footprint.xmax + tile - 1) / tile) * tile, 0, size);
+        rect[3] = clamp_i(((source_footprint.ymax + tile - 1) / tile) * tile, 0, size);
         rect_ptr = rect;
       }
 

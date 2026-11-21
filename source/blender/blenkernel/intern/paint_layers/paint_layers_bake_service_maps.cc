@@ -363,12 +363,17 @@ void bake_write_image(Image &image,
  * Write a stored buffer -- the per-pixel format #bake_pixel_store_float or #bake_pixel_store_byte
  * produce, which a worker job holds instead of its straight-RGBA render -- into \a image, or only
  * into \a rect. No conversion happens here: the values are already the map's own.
+ *
+ * \param stored_width: when positive, \a stored holds only \a rect, tightly packed row by row with
+ *        this row width (the crop a regional row render stores); zero reads \a stored as the whole
+ *        image buffer, indexed by the image's own width.
  */
 void bake_write_stored_image(Image &image,
                              const bool stored_float,
                              const void *stored,
                              const int *rect,
-                             const int tile_number)
+                             const int tile_number,
+                             const int stored_width)
 {
   ImageUser iuser{};
   iuser.tile = tile_number;
@@ -382,6 +387,12 @@ void bake_write_stored_image(Image &image,
   const int x1 = rect != nullptr ? clamp_i(rect[2], 0, width) : width;
   const int y0 = rect != nullptr ? clamp_i(rect[1], 0, ibuf->y) : 0;
   const int y1 = rect != nullptr ? clamp_i(rect[3], 0, ibuf->y) : ibuf->y;
+  /* The index of the stored texel for the image texel (x, y): the cropped buffer's rows start at
+   * the rectangle's first column, every other buffer is the image's own. */
+  const auto stored_index = [&](const int x, const int y) {
+    return stored_width > 0 ? int64_t(y - y0) * stored_width + (x - x0) :
+                              int64_t(y) * width + x;
+  };
   if (stored_float) {
     if (float *floats = (ibuf->byte_buffer.data == nullptr && ibuf->float_buffer.data != nullptr) ?
                             ibuf->float_data_for_write() :
@@ -391,10 +402,11 @@ void bake_write_stored_image(Image &image,
       for (int y = y0; y < y1; y++) {
         for (int x = x0; x < x1; x++) {
           const int64_t i = int64_t(y) * width + x;
-          floats[i * 4 + 0] = values[i * 4 + 0];
-          floats[i * 4 + 1] = values[i * 4 + 1];
-          floats[i * 4 + 2] = values[i * 4 + 2];
-          floats[i * 4 + 3] = values[i * 4 + 3];
+          const int64_t s = stored_index(x, y);
+          floats[i * 4 + 0] = values[s * 4 + 0];
+          floats[i * 4 + 1] = values[s * 4 + 1];
+          floats[i * 4 + 2] = values[s * 4 + 2];
+          floats[i * 4 + 3] = values[s * 4 + 3];
         }
       }
     }
@@ -404,10 +416,11 @@ void bake_write_stored_image(Image &image,
     for (int y = y0; y < y1; y++) {
       for (int x = x0; x < x1; x++) {
         const int64_t i = int64_t(y) * width + x;
-        pixels[i * 4 + 0] = values[i * 4 + 0];
-        pixels[i * 4 + 1] = values[i * 4 + 1];
-        pixels[i * 4 + 2] = values[i * 4 + 2];
-        pixels[i * 4 + 3] = values[i * 4 + 3];
+        const int64_t s = stored_index(x, y);
+        pixels[i * 4 + 0] = values[s * 4 + 0];
+        pixels[i * 4 + 1] = values[s * 4 + 1];
+        pixels[i * 4 + 2] = values[s * 4 + 2];
+        pixels[i * 4 + 3] = values[s * 4 + 3];
       }
     }
   }

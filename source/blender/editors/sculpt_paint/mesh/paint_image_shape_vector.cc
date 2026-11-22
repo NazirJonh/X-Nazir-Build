@@ -166,20 +166,33 @@ struct ImageShapeVectorState : public PaintSelectFloatingSession {
   }
 };
 
-/** Live Vector sessions, so a settings change refreshes every preview without scanning windows
- *. Registered at begin, removed on free. */
-static Vector<ImageShapeVectorState *> g_live_sessions;
+/**
+ * Live Vector sessions, so a settings change refreshes every preview without scanning windows.
+ * Registered at begin, removed on free.
+ *
+ * The container lives in a function rather than at file scope: a file-scope static is built before
+ * `main` and torn down after the memory leak detector has run, so any heap buffer it still owns
+ * would be reported as a leak and then freed into an allocator whose teardown has already started.
+ * A function-local static is built on first use, after the detector was registered, and destroyed
+ * before it. (`Vector::remove` keeps the buffer, so the buffer's lifetime is what matters here,
+ * not whether the last session was unregistered.)
+ */
+static Vector<ImageShapeVectorState *> &live_sessions()
+{
+  static Vector<ImageShapeVectorState *> sessions;
+  return sessions;
+}
 
 static void image_shape_vector_session_register(ImageShapeVectorState *state)
 {
-  g_live_sessions.append(state);
+  live_sessions().append(state);
 }
 
 static void image_shape_vector_session_unregister(const ImageShapeVectorState *state)
 {
-  for (const int i : g_live_sessions.index_range()) {
-    if (g_live_sessions[i] == state) {
-      g_live_sessions.remove(i);
+  for (const int i : live_sessions().index_range()) {
+    if (live_sessions()[i] == state) {
+      live_sessions().remove(i);
       return;
     }
   }
@@ -1303,7 +1316,7 @@ void ED_paint_shape_settings_update(Main *bmain, Scene *scene, PaintShapeSetting
    * global block must NOT refresh it; only a change to a session's own copy refreshes that
    * session. Address containment (not exact equality) also catches the channel-value properties,
    * whose setter passes the address of one array element. */
-  for (shape::ImageShapeVectorState *state : shape::g_live_sessions) {
+  for (shape::ImageShapeVectorState *state : shape::live_sessions()) {
     if (!shape::shape_settings_contains(state->settings, changed)) {
       continue;
     }
@@ -1350,7 +1363,7 @@ void ED_paint_shape_brush_update(const Main *bmain, const Scene *scene, const Br
   if (bmain == nullptr || scene == nullptr) {
     return;
   }
-  for (shape::ImageShapeVectorState *state : shape::g_live_sessions) {
+  for (shape::ImageShapeVectorState *state : shape::live_sessions()) {
     /* Only sessions that actually read this brush (their scene's image-paint brush); the brush
      * contributes Strength/blend/channels to the preview, never a shape setting. */
     if (state->owner_scene != scene || scene->toolsettings == nullptr) {

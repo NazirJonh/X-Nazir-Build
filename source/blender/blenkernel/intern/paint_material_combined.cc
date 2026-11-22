@@ -1007,7 +1007,7 @@ int2 BKE_paint_material_interactive_max_output(const int2 max_output)
   /* The octave rule halves while the half still covers `max_output * 1.4`, so 731 settles a 4096
    * canvas on 1024 (1024 >= 1023.4) and not on 2048; the one constant of the interactive size. */
   constexpr int interactive_max_output = 731;
-  const auto capped = [](const int value) {
+  const auto capped = [interactive_max_output](const int value) {
     return value <= 0 ? interactive_max_output : std::min(value, interactive_max_output);
   };
   return int2(capped(max_output.x), capped(max_output.y));

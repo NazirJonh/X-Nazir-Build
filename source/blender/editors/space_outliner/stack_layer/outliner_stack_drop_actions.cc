@@ -72,13 +72,6 @@ namespace blender::ed::outliner {
 /** \name Helpers
  * \{ */
 
-/** The owner of a layered paint stack is always a material. */
-static Material &layers_owner(ID &owner)
-{
-  BLI_assert(GS(owner.name) == ID_MA);
-  return id_cast<Material &>(owner);
-}
-
 /** Whether the stack of \a material may be written to at all. */
 static bool material_editable(const Material &material)
 {

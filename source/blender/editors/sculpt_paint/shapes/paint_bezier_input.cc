@@ -652,26 +652,38 @@ struct RegistryEntry {
   PaintCurveScreenHandles handles;
 };
 
-/** The active input of every region. There is at most one modal Bézier input per region, and
- * the modal replaces its snapshot on every state change. */
-static Map<const ARegion *, RegistryEntry> g_entries;
+/**
+ * The active input of every region. There is at most one modal Bézier input per region, and
+ * the modal replaces its snapshot on every state change.
+ *
+ * The registry lives in a function rather than at file scope: a file-scope static is built before
+ * `main` and torn down after the memory leak detector has run, so a table still occupied at exit
+ * would be reported as a leak and then freed into an allocator whose teardown has already started.
+ * A function-local static is built on first use, after the detector was registered, and destroyed
+ * before it.
+ */
+static Map<const ARegion *, RegistryEntry> &entries_registry()
+{
+  static Map<const ARegion *, RegistryEntry> registry;
+  return registry;
+}
 
 void handles_set(const ARegion &region,
                  const OwnerToken &owner,
                  const PaintCurveScreenHandles &handles)
 {
-  RegistryEntry &entry = g_entries.lookup_or_add_default(&region);
+  RegistryEntry &entry = entries_registry().lookup_or_add_default(&region);
   entry.owner = owner;
   entry.handles = handles;
 }
 
 static void entry_remove(const ARegion &region)
 {
-  g_entries.remove(&region);
-  /* A static container must not keep a heap buffer alive to exit (the leak check at shutdown
-   * would report it); #Map::clear frees the table. */
-  if (g_entries.is_empty()) {
-    g_entries.clear();
+  entries_registry().remove(&region);
+  /* Drop the table once the last input is gone, so an idle editor does not keep the heap buffer
+   * for the rest of the session; #Map::clear frees it. */
+  if (entries_registry().is_empty()) {
+    entries_registry().clear();
   }
 }
 
@@ -682,7 +694,7 @@ void handles_clear(const ARegion &region)
 
 const PaintCurveScreenHandles *handles_find(const ARegion &region)
 {
-  RegistryEntry *entry = g_entries.lookup_ptr(&region);
+  RegistryEntry *entry = entries_registry().lookup_ptr(&region);
   if (entry == nullptr) {
     return nullptr;
   }

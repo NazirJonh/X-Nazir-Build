@@ -313,9 +313,27 @@ struct BakeCacheEntry {
  * read them, so none of them may be touched without it.
  */
 static std::mutex g_bake_cache_mutex;
-static Map<BakeCacheKey, BakeCacheEntry> g_bake_cache;
+
+/**
+ * The bake containers live in functions rather than at file scope: a file-scope static is built
+ * before `main` and torn down after the memory leak detector has run, so whatever it holds is
+ * reported as a leak on every exit ("Not freed memory blocks") and freed while the CRT is already
+ * coming apart -- which crashed the exit. A function-local static is built on first use, after the
+ * detector was registered, and destroyed before it, so its frees are ordinary ones. (The other way
+ * out of the same trap is `RawMap`/`RawSet`, which the codebase reaches for when a container must
+ * keep static storage duration.)
+ */
+static Map<BakeCacheKey, BakeCacheEntry> &bake_cache()
+{
+  static Map<BakeCacheKey, BakeCacheEntry> cache;
+  return cache;
+}
 /** Keys whose job has been started and has not stored a result yet. */
-static Set<BakeCacheKey> g_bake_pending;
+static Set<BakeCacheKey> &bake_pending()
+{
+  static Set<BakeCacheKey> pending;
+  return pending;
+}
 /**
  * #Image session UIDs whose #material_bake_to_images job is in flight, and those marked stale by a
  * change with no hash to compare against. Both are session-local and guarded by the mutex above.
@@ -324,8 +342,16 @@ static Set<BakeCacheKey> g_bake_pending;
  * Counted rather than a set: restarting a job frees the replaced job's data, which releases the
  * very UIDs its replacement has just claimed.
  */
-static Map<uint32_t, int> g_image_bake_pending;
-static Set<uint32_t> g_image_bake_stale;
+static Map<uint32_t, int> &image_bake_pending()
+{
+  static Map<uint32_t, int> pending;
+  return pending;
+}
+static Set<uint32_t> &image_bake_stale()
+{
+  static Set<uint32_t> stale;
+  return stale;
+}
 static uint64_t g_bake_use_serial = 0;
 
 /**
@@ -350,14 +376,14 @@ static constexpr int64_t BAKE_CACHE_BYTE_BUDGET = 512 * 1024 * 1024;
 static void bake_cache_trim_to_budget(const BakeCacheKey &keep)
 {
   int64_t total = 0;
-  for (const auto item : g_bake_cache.items()) {
+  for (const auto item : bake_cache().items()) {
     total += item.value.byte_size;
   }
-  while (total > BAKE_CACHE_BYTE_BUDGET && !g_bake_cache.is_empty()) {
+  while (total > BAKE_CACHE_BYTE_BUDGET && !bake_cache().is_empty()) {
     const BakeCacheKey *oldest_key = nullptr;
     uint64_t oldest_serial = UINT64_MAX;
     int64_t oldest_size = 0;
-    for (const auto item : g_bake_cache.items()) {
+    for (const auto item : bake_cache().items()) {
       if (item.key == keep) {
         continue;
       }
@@ -371,7 +397,7 @@ static void bake_cache_trim_to_budget(const BakeCacheKey &keep)
       break;
     }
     const BakeCacheKey key_copy = *oldest_key;
-    g_bake_cache.remove(key_copy);
+    bake_cache().remove(key_copy);
     total -= oldest_size;
   }
 }
@@ -381,7 +407,7 @@ std::shared_ptr<const MaterialSourceBake> material_source_bake_get(const Materia
 {
   const BakeCacheKey key = bake_cache_key(ma, resolution);
   std::lock_guard lock(g_bake_cache_mutex);
-  if (BakeCacheEntry *cached = g_bake_cache.lookup_ptr(key)) {
+  if (BakeCacheEntry *cached = bake_cache().lookup_ptr(key)) {
     cached->last_used_serial = ++g_bake_use_serial;
     return cached->bake;
   }
@@ -395,7 +421,7 @@ std::shared_ptr<const MaterialSourceBake> material_source_bake_get(const Materia
    * construction a bake of this same material, just an older revision of it; the exact one takes
    * over as soon as it lands, and the entries it supersedes are dropped then. Slightly stale
    * pixels for a moment beat a stroke that does nothing. */
-  for (auto item : g_bake_cache.items()) {
+  for (auto item : bake_cache().items()) {
     if (item.key.material_session_uid == key.material_session_uid) {
       item.value.last_used_serial = ++g_bake_use_serial;
       return item.value.bake;
@@ -425,7 +451,7 @@ void material_source_bake_tag_image_changed(const Image &image)
 {
   const uint32_t session_uid = image.id.session_uid;
   std::lock_guard lock(g_bake_cache_mutex);
-  for (auto item : g_bake_cache.items()) {
+  for (auto item : bake_cache().items()) {
     if (item.value.image_session_uids.contains(session_uid)) {
       /* Marked rather than dropped. Removing it would leave #material_source_bake_get with nothing
        * to serve, and a stroke started before the replacement lands would paint nothing at all for
@@ -445,7 +471,7 @@ void material_source_bake_tag_image_changed(const Image &image)
    * walk, and a material shared by several maps is walked once. */
   Map<const Material *, bool> samples_cache;
   for (Image &other : bmain->images) {
-    if (g_image_bake_stale.contains(other.id.session_uid)) {
+    if (image_bake_stale().contains(other.id.session_uid)) {
       continue;
     }
     ImageMaterialSource source;
@@ -455,7 +481,7 @@ void material_source_bake_tag_image_changed(const Image &image)
     const bool samples = samples_cache.lookup_or_add_cb(
         source.material, [&]() { return material_samples_image(*source.material, session_uid); });
     if (samples) {
-      g_image_bake_stale.add(other.id.session_uid);
+      image_bake_stale().add(other.id.session_uid);
     }
   }
 }
@@ -464,13 +490,13 @@ void material_source_bake_invalidate(const Material *ma)
 {
   std::lock_guard lock(g_bake_cache_mutex);
   if (ma == nullptr) {
-    g_bake_cache.clear();
-    g_bake_pending.clear();
+    bake_cache().clear();
+    bake_pending().clear();
     return;
   }
   const uint32_t session_uid = ma->id.session_uid;
-  g_bake_cache.remove_if([&](auto item) { return item.key.material_session_uid == session_uid; });
-  g_bake_pending.remove_if([&](const BakeCacheKey &key) {
+  bake_cache().remove_if([&](auto item) { return item.key.material_session_uid == session_uid; });
+  bake_pending().remove_if([&](const BakeCacheKey &key) {
     return key.material_session_uid == session_uid;
   });
 }
@@ -479,14 +505,14 @@ bool material_source_bake_cache_contains(const Material &ma, const int resolutio
 {
   const BakeCacheKey key = bake_cache_key(ma, resolution);
   std::lock_guard lock(g_bake_cache_mutex);
-  return g_bake_cache.contains(key);
+  return bake_cache().contains(key);
 }
 
 bool material_source_bake_is_stale(const Material &ma, const int resolution)
 {
   const BakeCacheKey key = bake_cache_key(ma, resolution);
   std::lock_guard lock(g_bake_cache_mutex);
-  const BakeCacheEntry *cached = g_bake_cache.lookup_ptr(key);
+  const BakeCacheEntry *cached = bake_cache().lookup_ptr(key);
   return cached != nullptr && cached->stale;
 }
 
@@ -494,7 +520,7 @@ bool material_source_bake_is_pending(const Material &ma, const int resolution)
 {
   const BakeCacheKey key = bake_cache_key(ma, resolution);
   std::lock_guard lock(g_bake_cache_mutex);
-  return g_bake_pending.contains(key);
+  return bake_pending().contains(key);
 }
 
 /* Membership helpers for the two runtime sets. Separate from #material_bake_to_images so the
@@ -503,28 +529,28 @@ bool material_source_bake_is_pending(const Material &ma, const int resolution)
 static void material_bake_images_pending_add(const uint32_t image_session_uid)
 {
   std::lock_guard lock(g_bake_cache_mutex);
-  g_image_bake_pending.lookup_or_add(image_session_uid, 0)++;
+  image_bake_pending().lookup_or_add(image_session_uid, 0)++;
 }
 
 static void material_bake_images_pending_remove(const uint32_t image_session_uid)
 {
   std::lock_guard lock(g_bake_cache_mutex);
-  int *count = g_image_bake_pending.lookup_ptr(image_session_uid);
+  int *count = image_bake_pending().lookup_ptr(image_session_uid);
   if (count != nullptr && --*count <= 0) {
-    g_image_bake_pending.remove(image_session_uid);
+    image_bake_pending().remove(image_session_uid);
   }
 }
 
 static void material_bake_images_stale_remove(const uint32_t image_session_uid)
 {
   std::lock_guard lock(g_bake_cache_mutex);
-  g_image_bake_stale.remove(image_session_uid);
+  image_bake_stale().remove(image_session_uid);
 }
 
 bool material_bake_source_is_baking(const Image &image)
 {
   std::lock_guard lock(g_bake_cache_mutex);
-  return g_image_bake_pending.contains(image.id.session_uid);
+  return image_bake_pending().contains(image.id.session_uid);
 }
 
 bool material_bake_source_is_stale(const Image &image)
@@ -535,7 +561,7 @@ bool material_bake_source_is_stale(const Image &image)
   }
   {
     std::lock_guard lock(g_bake_cache_mutex);
-    if (g_image_bake_stale.contains(image.id.session_uid)) {
+    if (image_bake_stale().contains(image.id.session_uid)) {
       return true;
     }
   }
@@ -1420,18 +1446,18 @@ static void material_bake_startjob(void *customdata, wmJobWorkerStatus *worker_s
     /* Replaces an entry that has gone stale, and otherwise keeps the one already there: a stroke
      * that started earlier keeps sampling the buffers it was handed either way, so replacing a
      * still-current entry would only churn memory. */
-    BakeCacheEntry &stored = g_bake_cache.lookup_or_add_default(job.key);
+    BakeCacheEntry &stored = bake_cache().lookup_or_add_default(job.key);
     if (stored.bake == nullptr || stored.stale) {
       stored = std::move(entry);
       stored.last_used_serial = ++g_bake_use_serial;
     }
-    g_bake_pending.remove(job.key);
+    bake_pending().remove(job.key);
     /* Every edit to the node trees and every change of Bake Size produces a distinct key, so
      * without this the cache would grow by one full set of buffers -- megabytes per channel at
      * the larger sizes -- for every such change over the life of the session. Only the entry just
      * stored can still be looked up for this material, so the older ones are unreachable. Any
      * stroke still sampling one holds it alive through its own `shared_ptr`. */
-    g_bake_cache.remove_if([&](auto item) {
+    bake_cache().remove_if([&](auto item) {
       return item.key.material_session_uid == job.key.material_session_uid &&
              !(item.key == job.key);
     });
@@ -1461,7 +1487,7 @@ static void material_bake_free(void *customdata)
   }
   {
     std::lock_guard lock(g_bake_cache_mutex);
-    g_bake_pending.remove(job->key);
+    bake_pending().remove(job->key);
   }
   MEM_delete(job);
 }
@@ -1481,10 +1507,10 @@ static void material_source_bake_ensure_impl(wmWindowManager &wm,
   const BakeCacheKey key = bake_cache_key(ma, resolution);
   {
     std::lock_guard lock(g_bake_cache_mutex);
-    const BakeCacheEntry *cached = g_bake_cache.lookup_ptr(key);
+    const BakeCacheEntry *cached = bake_cache().lookup_ptr(key);
     /* A stale entry still answers lookups, but its inputs have moved on, so it has to be rebaked
      * rather than treated as a hit. */
-    if ((cached != nullptr && !cached->stale) || !g_bake_pending.add(key)) {
+    if ((cached != nullptr && !cached->stale) || !bake_pending().add(key)) {
       return;
     }
   }
@@ -1493,7 +1519,7 @@ static void material_source_bake_ensure_impl(wmWindowManager &wm,
     /* A job is ended by the event loop, which background mode has none of: it would never hand its
      * result over. Skip, like the heavy bake paths do, and let a foreground call ask again. */
     std::lock_guard lock(g_bake_cache_mutex);
-    g_bake_pending.remove(key);
+    bake_pending().remove(key);
     return;
   }
 

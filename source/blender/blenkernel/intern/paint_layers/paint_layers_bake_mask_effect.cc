@@ -412,8 +412,12 @@ bool bake_effect_row_write(Main &bmain,
      * map #bake_service_image finds of another size or format is freed and a fresh blank one made,
      * whose texels outside the rectangle hold no previous result. The session id survives a reuse
      * and a fresh image gets a new one, so it is trusted where a freed map may hand its address
-     * back to the allocator. */
-    Image *map_before = bake->images[channel];
+     * back to the allocator. A slot an undo or a reset left pointing at a freed image is read as no
+     * map: its id would be a use after free, and the service would make a new one anyway. */
+    Image *slot_before = bake->images[channel];
+    Image *map_before = (slot_before != nullptr && bake_service_image_is_live(bmain, slot_before)) ?
+                            slot_before :
+                            nullptr;
     const uint32_t map_uid_before = map_before != nullptr ? map_before->id.session_uid : 0;
     Image *image = bake_service_image(
         bmain, effect, channel, size, info.is_color, bake_channel_needs_float(effect, info), 0);

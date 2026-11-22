@@ -24,6 +24,10 @@ set(SRC
 )
 
 set(LIB
+  # `testing_main.cc` calls `register_cpp_types()` which lives in blenlib. Link it as PUBLIC so
+  # that every test executable using this main function gets the symbol, including the ones that
+  # do not link blenlib themselves (e.g. `atomic_test`).
+  PUBLIC bf::blenlib
   PRIVATE bf::intern::guardedalloc
 )
 

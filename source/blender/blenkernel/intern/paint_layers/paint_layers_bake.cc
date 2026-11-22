@@ -1031,15 +1031,25 @@ void BKE_paint_layers_bake_subscribe(Material &ma, MaterialPaintLayer &layer)
    * describes the raster the hash stands for. */
   std::array<BakeMapRef, PAINT_MATERIAL_CHANNEL_NUM> map_refs{};
   BakeMapRef coverage_ref;
+  /* A bake slot can keep a pointer to an image an undo or a file reset freed. The record is read by
+   * the validity predicate, which must not dereference it: a dead slot counts as no map. Only the
+   * global Main is walked; a localized copy's slots name its own images, which the caller owns. */
+  const bool has_global_main = G_MAIN != nullptr && BKE_id_is_in_global_main(&ma.id);
+  const auto live_or_null = [&](const Image *image) -> const Image * {
+    if (image == nullptr || !has_global_main) {
+      return image;
+    }
+    return bake_service_image_is_live(*G_MAIN, image) ? image : nullptr;
+  };
   if (layer.bake != nullptr) {
     for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
-      const Image *image = layer.bake->images[channel];
+      const Image *image = live_or_null(layer.bake->images[channel]);
       map_refs[channel] = {
           image,
           image != nullptr ? image->id.session_uid : 0,
           image != nullptr ? image->runtime->pixel_version.load(std::memory_order_relaxed) : 0};
     }
-    const Image *coverage = layer.bake->coverage;
+    const Image *coverage = live_or_null(layer.bake->coverage);
     coverage_ref = {coverage,
                     coverage != nullptr ? coverage->id.session_uid : 0,
                     coverage != nullptr ?
@@ -2775,6 +2785,71 @@ int bake_size_for(const Material &ma, const MaterialPaintLayer &row)
   return size;
 }
 
+/**
+ * Whether every source image of \a layer with a known size is \a width by \a height. The band the
+ * planner takes from a changed region is scaled by one channel's dimensions; with sources of
+ * different sizes no single scale describes the edit, so the band is refused and the row keeps its
+ * whole or footprint path.
+ */
+bool bake_row_band_dimensions_match(const Material &ma,
+                                    const MaterialPaintLayer &layer,
+                                    const int width,
+                                    const int height)
+{
+  Vector<Image *> sources;
+  BKE_paint_layers_bake_collect_source_images(
+      ma, layer, sources, paint_layer_bake_scope(layer, false));
+  for (Image *source : sources) {
+    int source_width = 0;
+    int source_height = 0;
+    BKE_image_get_size(source, nullptr, &source_width, &source_height);
+    if (source_width > 0 && (source_width != width || source_height != height)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::array<uint32_t, PAINT_MATERIAL_CHANNEL_NUM> bake_plan_standing_map_uids(
+    Main &bmain,
+    MaterialPaintLayer &layer,
+    const int size,
+    const int object_num,
+    const Span<int> tile_numbers,
+    uint32_t &r_coverage_uid)
+{
+  std::array<uint32_t, PAINT_MATERIAL_CHANNEL_NUM> map_uid{};
+  r_coverage_uid = 0;
+  if (layer.bake == nullptr) {
+    return map_uid;
+  }
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    const int channel = int(info.channel);
+    if (!bake_service_image_would_reuse(
+            bmain,
+            layer,
+            channel,
+            size,
+            bake_channel_needs_float(layer, info),
+            object_num,
+            tile_numbers))
+    {
+      /* A map the service would replace, or a requested tile it would have to grow, holds no
+       * previous result for the band: the plan records no identity for it, so no object of this
+       * plan can band into it even after another object's service call grew the tile. */
+      continue;
+    }
+    const Image *image = layer.bake->images[channel];
+    map_uid[channel] = image->id.session_uid;
+  }
+  if (bake_service_image_would_reuse(
+          bmain, layer, -1, size, false, object_num, tile_numbers))
+  {
+    r_coverage_uid = layer.bake->coverage->id.session_uid;
+  }
+  return map_uid;
+}
+
 void paint_layers_bake_precreate_texture(Material &ma, MaterialPaintLayer &edited)
 {
   /* Creating Image IDs inside an edit path is why this is guarded: only an original of the local
@@ -3378,6 +3453,8 @@ static bool bake_object_tile_write(
     const int tile_number,
     const int uv_tile,
     const int *rect,
+    const std::array<uint32_t, PAINT_MATERIAL_CHANNEL_NUM> &map_uid,
+    const uint32_t coverage_uid,
     const bool reuse_cache,
     Vector<int> &r_written_channels,
     const Object *painted_object)
@@ -3386,37 +3463,77 @@ static bool bake_object_tile_write(
   Vector<float> coverage(int64_t(size) * size);
   Vector<float> common(int64_t(size) * size, 0.0f);
   bool any_channel = false;
+  /* The shared coverage map must be able to keep its previous result outside the band for the
+   * partial channel writes to be safe. A coverage map that did not stand at plan time (or that the
+   * service would replace/grow now) holds none, so every channel renders whole and the coverage
+   * write is whole too. */
+  const bool coverage_stands =
+      coverage_uid != 0 &&
+      bake_service_image_would_reuse(bmain, layer, -1, size, false, object_num, tile_numbers);
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
     const int channel = int(info.channel);
-    /* A partial re-bake needs the maps to already exist: an image created just now cannot take a
-     * partial write, its untouched region would stay blank. */
-    const int *channel_rect = (rect != nullptr && layer.bake->images[channel] != nullptr) ? rect :
-                                                                                           nullptr;
-    if (!BKE_paint_layers_bake_render_node(
-            ma,
-            layer,
-            channel,
-            size,
-            color.data(),
-            coverage.data(),
-            channel_rect,
-            surface,
-            /* The UV tile is named, not left to the surface: the effect cache keys the result on
-             * it and a projection rasterizes into it, so each tile of a block is its own render. */
-            PaintLayerTileContext{.painted_object = painted_object, .tile_number = uv_tile}))
-    {
+    const bool channel_float = bake_channel_needs_float(layer, info);
+    /* A partial re-bake needs the map that stood at plan time and is still the map the service
+     * would hand back: the plan-time uid is the provenance guard (a tile another object grew
+     * during this plan is not standing), and the reuse test catches a mid-plan replacement. */
+    const bool map_stood =
+        coverage_stands && rect != nullptr && map_uid[channel] != 0 &&
+        bake_service_image_would_reuse(
+            bmain, layer, channel, size, channel_float, object_num, tile_numbers) &&
+        layer.bake->images[channel]->id.session_uid == map_uid[channel];
+    const int *channel_rect = map_stood ? rect : nullptr;
+    const auto render = [&](const int *dst_rect) {
+      return BKE_paint_layers_bake_render_node(
+          ma,
+          layer,
+          channel,
+          size,
+          color.data(),
+          coverage.data(),
+          dst_rect,
+          surface,
+          /* The UV tile is named, not left to the surface: the effect cache keys the result on
+           * it and a projection rasterizes into it, so each tile of a block is its own render. */
+          PaintLayerTileContext{.painted_object = painted_object, .tile_number = uv_tile});
+    };
+    /* The map is made only once the render succeeded: a failed render must not leave a blank
+     * fresh map in the row's bake. */
+    if (!render(channel_rect)) {
       continue;
     }
+    /* Pointer-only provenance: whatever the plan recorded (0 when the map did not stand), a slot
+     * that held a map before this service call and holds another one after it was replaced. */
+    Image *slot_before = layer.bake->images[channel];
     Image *color_image = bake_service_image(bmain,
                                             layer,
                                             channel,
                                             size,
                                             info.is_color,
-                                            bake_channel_needs_float(layer, info),
+                                            channel_float,
                                             object_num,
                                             tile_numbers);
     if (color_image == nullptr) {
       continue;
+    }
+    if (slot_before != nullptr && color_image != slot_before) {
+      /* The service replaced the map that stood in the slot. The raster the hash was stamped on is
+       * gone: clear it even when the plan recorded no uid for the channel (a map that did not stand
+       * at plan time records 0). An aborted plan then cannot leave a matching hash over a map
+       * whose untouched tiles were never written, and the finalize below stamps the bake this
+       * render lands. */
+      layer.bake->hash[0] = 0;
+      layer.bake->hash[1] = 0;
+    }
+    if (channel_rect != nullptr && map_uid[channel] != 0 &&
+        color_image->id.session_uid != map_uid[channel])
+    {
+      /* A band was rendered but the map moved: render the whole channel again into the same
+       * buffers and write it whole. The hash was already cleared above when the pointer moved; a
+       * replacement that kept the pointer cannot happen, so no second hash clear is needed here. */
+      channel_rect = nullptr;
+      if (!render(channel_rect)) {
+        continue;
+      }
     }
     bake_write_image(*color_image, color.data(), info.is_color, channel_rect, tile_number);
     r_written_channels.append(channel);
@@ -3439,13 +3556,27 @@ static bool bake_object_tile_write(
     return false;
   }
   /* One shared coverage write for all channels; a partial re-bake touches only its rectangle, so
-   * the stored common outside it survives. */
+   * the stored common outside it survives. A coverage map the service replaced (another size or
+   * format) holds no previous result, so it takes the whole buffer -- the same fallback the
+   * channels above take. */
+  Image *coverage_before = layer.bake->coverage;
   if (Image *coverage_image = bake_service_image(
           bmain, layer, -1, size, false, false, object_num, tile_numbers))
   {
+    if (coverage_before != nullptr && coverage_image != coverage_before) {
+      /* The coverage raster the hash was stamped on is gone. Clear it for the same reason as a
+       * channel replacement: if this plan aborts before finalize, a matching hash must not survive
+       * over a coverage map whose outside-band texels were never written. The finalize below
+       * re-stamps the bake this write lands. */
+      layer.bake->hash[0] = 0;
+      layer.bake->hash[1] = 0;
+    }
+    const bool coverage_regional = coverage_stands && rect != nullptr && reuse_cache &&
+                                   coverage_uid != 0 &&
+                                   coverage_image->id.session_uid == coverage_uid;
     bake_write_coverage_image(*coverage_image,
                               common.data(),
-                              (rect != nullptr && reuse_cache) ? rect : nullptr,
+                              coverage_regional ? rect : nullptr,
                               tile_number);
   }
   return true;
@@ -3565,6 +3696,10 @@ const rcti *bake_effect_region_resolve(const Material &ma,
   }
   const MaterialPaintLayer *row = BKE_paint_layers_correction_owner(ma, effect);
   if (row == nullptr) {
+    return nullptr;
+  }
+  if (bake_subtree_has_decal_effect(*row)) {
+    /* A Decal step reads the surface, not the row's UV frame: a UV footprint cannot bound it. */
     return nullptr;
   }
   /* A bounded footprint is the trust test for a row whose input mapping moves texels: the
@@ -3863,6 +3998,14 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
           }
         }
       }
+      /* The band is scaled by the dimensions found above; a row whose other source maps differ in
+       * size has no single scale an edit's rectangle can be carried through, so the band is refused
+       * and the whole/footprint path stays. */
+      if (have_source_dims &&
+          !bake_row_band_dimensions_match(ma, layer, src_width, src_height))
+      {
+        have_source_dims = false;
+      }
       int rect[4] = {};
       const int *rect_ptr = nullptr;
       if (has_region && reuse_cache && have_source_dims) {
@@ -3902,6 +4045,18 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
         rect[2] = clamp_i(((source_footprint.xmax + tile - 1) / tile) * tile, 0, size);
         rect[3] = clamp_i(((source_footprint.ymax + tile - 1) / tile) * tile, 0, size);
         rect_ptr = rect;
+      }
+
+      /* The maps that stood when the plan picked the rectangle, including every tile the plan will
+       * ask for: only theirs hold the previous result outside it. A map missing a requested tile
+       * records no identity here, so no object of this plan bands into the blank tile another
+       * object's service call would grow. The tile writer re-checks each identity after the
+       * service call and writes whole when the map moved (#bake_object_tile_write). */
+      std::array<uint32_t, PAINT_MATERIAL_CHANNEL_NUM> map_uid{};
+      uint32_t coverage_uid = 0;
+      if (rect_ptr != nullptr) {
+        map_uid = bake_plan_standing_map_uids(
+            bmain, layer, size, object_num, image_tiles, coverage_uid);
       }
 
       const bool gradient_row = paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES);
@@ -3945,6 +4100,8 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
                                       tile_number,
                                       uv_tile,
                                       rect_ptr,
+                                      map_uid,
+                                      coverage_uid,
                                       reuse_cache,
                                       tile_channels,
                                       object_num > 0 ? targets.objects[object_index].object :

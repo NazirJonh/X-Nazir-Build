@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <string>
 
 #include "MEM_guardedalloc.h"
@@ -2163,6 +2164,334 @@ TEST_F(PaintLayersOwnedEffectTest, a_bounded_footprint_narrows_the_planner_regio
   /* Run the job the region belongs to: the compute/commit must use the narrowed band, which the
    * BLENDER_PBR_PERF log reports as `region=` smaller than `size=512x512`. */
   EXPECT_TRUE(run_bake_job());
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_replaced_planner_map_is_written_whole)
+{
+  MaterialPaintLayer *row = nullptr;
+  Image *map = nullptr;
+  /* A light row (below the heavy side) is baked by the planner itself, which is the path the
+   * replacement handling serves; scale 1 lays the content over the whole canvas. The source map is
+   * wider than the bake map, so the edit's 256-pixel chunk is a band narrower than the canvas. */
+  add_bounded_fill(&row, &map, 1.0f, 512, "ReplacedPlanner", 1024);
+  ASSERT_NE(row, nullptr);
+  ASSERT_NE(map, nullptr);
+
+  int map_width = 0;
+  int map_height = 0;
+  BKE_image_get_size(map, nullptr, &map_width, &map_height);
+  ASSERT_GT(map_width, 0);
+  ASSERT_GT(map_height, 0);
+  const rcti map_rect{0, map_width, 0, map_height};
+  write_map_rect(*map, map_rect, 120);
+  ASSERT_TRUE(run_plan());
+
+  Image *base = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(base, nullptr);
+
+  /* A wrong size forces the next bake_service_image to replace the map with a blank one. */
+  Image *replaced = bake_service_image(*bmain,
+                                       *row,
+                                       int(PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+                                       4096,
+                                       true,
+                                       false,
+                                       0);
+  ASSERT_NE(replaced, nullptr);
+  EXPECT_EQ(row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], replaced);
+
+  /* A generated blank map's write lives in the buffer it was written through, which the first
+   * plan's render released: lay the content again so this plan reads it. */
+  write_map_rect(*map, map_rect, 120);
+  const rcti dirty{4, 5, 4, 5};
+  edit_map_rect(*map, dirty, 200);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  ASSERT_TRUE(run_plan());
+
+  Image *written = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(written, nullptr);
+  int width = 0;
+  int height = 0;
+  BKE_image_get_size(written, nullptr, &width, &height);
+  ASSERT_EQ(width, 512);
+  ASSERT_EQ(height, 512);
+  const Vector<uchar> pixels = read_map(*written);
+  ASSERT_EQ(pixels.size(), int64_t(width) * height * 4);
+
+  /* Outside the 256-pixel band the edit reports: a partial write into the fresh map leaves this
+   * zero, the whole render leaves the row's 120. */
+  EXPECT_NEAR(map_byte_at(pixels, width, 400, 400), 120, 3)
+      << "a replaced planner map must be rendered and written whole";
+}
+
+TEST_F(PaintLayersOwnedEffectTest, an_owned_effect_with_a_decal_input_refuses_the_region)
+{
+  MaterialPaintLayer *blur = nullptr;
+  texture_link(*source, *add_image("DecalSource"), "Metallic");
+  MaterialPaintLayer *row = add_row_with_blur(&blur, 512, 512);
+  ASSERT_NE(blur, nullptr);
+  /* A bounded row mapping gives the owned effect a footprint it would otherwise take. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_supported(*ma, *row));
+  const float scale[2] = {2.0f, 2.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, row, scale));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, row, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
+
+  MaterialPaintLayer *mirror = BKE_paint_layers_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_MIRROR, "DecalMirror");
+  ASSERT_NE(mirror, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_mirror(*ma, mirror, MA_PAINT_LAYER_MAPPING_MIRROR_U));
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      *ma, mirror, MA_PAINT_LAYER_MAPPING_SPACE_DECAL));
+  /* Effects are bottom-to-top: the mirror must feed the blur (the Decal step is part of the blur's
+   * input, the case the bounded footprint must not ignore). */
+  BLI_remlink(&row->effects, mirror);
+  BLI_addhead(&row->effects, mirror);
+
+  ASSERT_TRUE(run_bake_job());
+  Image *base_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(base_map, nullptr);
+  write_map_rect(*base_map, rcti{400, 401, 400, 401}, 200);
+  mark_map_rect(*base_map, rcti{400, 401, 400, 401});
+  BKE_paint_layers_bake_notice_changes(*ma);
+
+  int band[4] = {};
+  ASSERT_TRUE(BKE_paint_layers_bake_changed_region(*ma, *blur, band));
+  rcti resolved;
+  EXPECT_EQ(bake_effect_region_resolve(*ma, *blur, resolved), nullptr)
+      << "a Decal step in the input makes the footprint unbounded for the regional write";
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_mixed_size_row_planner_refuses_the_band)
+{
+  /* The band is scaled by one channel's dimensions. Base is 1024 and Metallic 512: the edit below
+   * lives in the Metallic map, and scaling its 256-pixel chunk by Base's width would name a
+   * smaller rectangle than the edit really moves. With the mixed sizes refused, the plan renders
+   * whole and rewrites the canary the wrongly scaled band would leave stale. */
+  const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *base = BKE_image_add_generated(bmain,
+                                        1024,
+                                        1024,
+                                        "MixedBase",
+                                        32,
+                                        false,
+                                        IMA_GENTYPE_BLANK,
+                                        black,
+                                        false,
+                                        false,
+                                        false);
+  Image *metallic = BKE_image_add_generated(bmain,
+                                            512,
+                                            512,
+                                            "MixedMetallic",
+                                            32,
+                                            false,
+                                            IMA_GENTYPE_BLANK,
+                                            black,
+                                            false,
+                                            false,
+                                            false);
+  ASSERT_NE(base, nullptr);
+  ASSERT_NE(metallic, nullptr);
+  MaterialPaintLayer *row = add_paint_layer("MixedRow", base, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(row, nullptr);
+  add_channel(*row, PAINT_MATERIAL_CHANNEL_METALLIC, metallic);
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *row, MA_PAINT_LAYER_BAKE_ALWAYS));
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+
+  const rcti base_rect{0, 1024, 0, 1024};
+  write_map_rect(*base, base_rect, 120);
+  write_map_rect(*metallic, rcti{0, 512, 0, 512}, 120);
+  ASSERT_TRUE(run_plan());
+
+  Image *bake_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(bake_map, nullptr);
+  int width = 0;
+  int height = 0;
+  BKE_image_get_size(bake_map, nullptr, &width, &height);
+  ASSERT_EQ(width, 1024);
+  ASSERT_EQ(height, 1024);
+
+  /* The partial-update log reports the edited 256-pixel chunk, so the Metallic edit at x=150 is the
+   * chunk [0,256). The wrong Base-based scale makes that [0,512); the correct Metallic scale would
+   * make it [0,768). Measured: with the helper disabled a canary at 300 stayed 120 (inside the
+   * wrong [0,512)), so the canary is 600: outside the wrong band and inside the whole render the
+   * helper falls back to. */
+  write_map_rect(*bake_map, rcti{600, 601, 600, 601}, 255);
+  /* The generated blank source buffer is released by the first plan; lay the content again so the
+   * whole render this plan owes lays the 120 the test reads. */
+  write_map_rect(*base, base_rect, 120);
+  edit_map_rect(*metallic, rcti{150, 151, 150, 151}, 200);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  int band[4] = {};
+  ASSERT_TRUE(BKE_paint_layers_bake_changed_region(*ma, *row, band))
+      << "the test's premise is a live subscription band";
+
+  ASSERT_TRUE(run_plan());
+  const Vector<uchar> pixels = read_map(*row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
+  ASSERT_EQ(pixels.size(), int64_t(width) * height * 4);
+  EXPECT_NEAR(map_byte_at(pixels, width, 600, 600), 120, 3)
+      << "a mixed-size row is rendered whole; the wrongly scaled band left the canary stale";
+}
+
+namespace {
+
+/** Compare two byte maps of the same size, allowing a one-step quantization difference. */
+void expect_maps_match(const Vector<uchar> &actual,
+                       const Vector<uchar> &expected,
+                       const char *what)
+{
+  ASSERT_EQ(actual.size(), expected.size()) << what;
+  int mismatches = 0;
+  int first = -1;
+  for (const int64_t i : IndexRange(actual.size())) {
+    if (std::abs(int(actual[i]) - int(expected[i])) > 1) {
+      if (first < 0) {
+        first = int(i);
+      }
+      mismatches++;
+    }
+  }
+  EXPECT_EQ(mismatches, 0) << what << " differs at byte " << first;
+}
+
+}  // namespace
+
+TEST_F(PaintLayersOwnedEffectTest, a_color_replacement_with_standing_coverage_keeps_the_band_consistent)
+{
+  MaterialPaintLayer *row = nullptr;
+  Image *row_source = nullptr;
+  add_bounded_fill(&row, &row_source, 1.0f, 512, "ColorReplaced", 1024);
+  MaterialPaintLayer *reference = nullptr;
+  Image *reference_source = nullptr;
+  add_bounded_fill(&reference, &reference_source, 1.0f, 512, "ColorReference", 1024);
+  ASSERT_NE(row, nullptr);
+  ASSERT_NE(reference, nullptr);
+
+  const rcti source_rect{0, 1024, 0, 1024};
+  write_map_rect(*row_source, source_rect, 120);
+  write_map_rect(*reference_source, source_rect, 120);
+  ASSERT_TRUE(run_plan());
+
+  Image *row_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  Image *reference_map = reference->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(row_map, nullptr);
+  ASSERT_NE(reference_map, nullptr);
+  ASSERT_NE(row->bake->coverage, nullptr);
+  ASSERT_NE(reference->bake->coverage, nullptr);
+  const uint32_t coverage_uid = row->bake->coverage->id.session_uid;
+
+  /* Only the color map is replaced; the coverage map stands. */
+  Image *replaced = bake_service_image(*bmain,
+                                       *row,
+                                       int(PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+                                       4096,
+                                       true,
+                                       false,
+                                       0);
+  ASSERT_NE(replaced, nullptr);
+  EXPECT_EQ(row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], replaced);
+
+  /* The generated blank sources released their buffers in the first plan: lay them again, then the
+   * same small edit in both rows. */
+  write_map_rect(*row_source, source_rect, 120);
+  write_map_rect(*reference_source, source_rect, 120);
+  edit_map_rect(*row_source, rcti{4, 5, 4, 5}, 200);
+  edit_map_rect(*reference_source, rcti{4, 5, 4, 5}, 200);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  ASSERT_TRUE(run_plan());
+
+  ASSERT_EQ(row->bake->coverage->id.session_uid, coverage_uid)
+      << "the standing coverage map was not replaced";
+  expect_maps_match(read_map(*row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]),
+                    read_map(*reference->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]),
+                    "a replaced color map must match the reference content");
+  expect_maps_match(read_map(*row->bake->coverage),
+                    read_map(*reference->bake->coverage),
+                    "the standing coverage must match the reference");
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_coverage_replacement_with_standing_channels_keeps_the_row_consistent)
+{
+  MaterialPaintLayer *row = nullptr;
+  Image *row_source = nullptr;
+  add_bounded_fill(&row, &row_source, 1.0f, 512, "CoverageReplaced", 1024);
+  MaterialPaintLayer *reference = nullptr;
+  Image *reference_source = nullptr;
+  add_bounded_fill(&reference, &reference_source, 1.0f, 512, "CoverageReference", 1024);
+  ASSERT_NE(row, nullptr);
+  ASSERT_NE(reference, nullptr);
+
+  const rcti source_rect{0, 1024, 0, 1024};
+  write_map_rect(*row_source, source_rect, 120);
+  write_map_rect(*reference_source, source_rect, 120);
+  ASSERT_TRUE(run_plan());
+
+  ASSERT_NE(row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], nullptr);
+  ASSERT_NE(reference->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], nullptr);
+  ASSERT_NE(row->bake->coverage, nullptr);
+  ASSERT_NE(reference->bake->coverage, nullptr);
+  const uint32_t row_map_uid =
+      row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]->id.session_uid;
+
+  /* Only the coverage map is replaced; the channel maps stand. */
+  Image *replaced = bake_service_image(*bmain, *row, -1, 4096, false, false, 0);
+  ASSERT_NE(replaced, nullptr);
+  EXPECT_EQ(row->bake->coverage, replaced);
+
+  write_map_rect(*row_source, source_rect, 120);
+  write_map_rect(*reference_source, source_rect, 120);
+  edit_map_rect(*row_source, rcti{4, 5, 4, 5}, 200);
+  edit_map_rect(*reference_source, rcti{4, 5, 4, 5}, 200);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  ASSERT_TRUE(run_plan());
+
+  ASSERT_EQ(row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]->id.session_uid, row_map_uid)
+      << "the standing channel map was not replaced";
+  expect_maps_match(read_map(*row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]),
+                    read_map(*reference->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]),
+                    "a standing channel map must match the reference content");
+  expect_maps_match(read_map(*row->bake->coverage),
+                    read_map(*reference->bake->coverage),
+                    "a replaced coverage map must not zero what the standing channels need");
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_worker_coverage_replacement_keeps_the_row_consistent)
+{
+  MaterialPaintLayer *row = nullptr;
+  Image *row_source = nullptr;
+  add_bounded_fill(&row, &row_source, 4.0f, 2048, "JobCoverageReplaced", 512);
+  MaterialPaintLayer *reference = nullptr;
+  Image *reference_source = nullptr;
+  add_bounded_fill(&reference, &reference_source, 4.0f, 2048, "JobCoverageReference", 512);
+  ASSERT_NE(row, nullptr);
+  ASSERT_NE(reference, nullptr);
+
+  const rcti source_rect{0, 512, 0, 512};
+  write_map_rect(*row_source, source_rect, 120);
+  write_map_rect(*reference_source, source_rect, 120);
+  ASSERT_TRUE(run_bake_job());
+
+  ASSERT_NE(row->bake->coverage, nullptr);
+  ASSERT_NE(reference->bake->coverage, nullptr);
+
+  /* Only the coverage map is replaced; the channel maps stand. */
+  Image *replaced = bake_service_image(*bmain, *row, -1, 4096, false, false, 0);
+  ASSERT_NE(replaced, nullptr);
+  EXPECT_EQ(row->bake->coverage, replaced);
+
+  write_map_rect(*row_source, source_rect, 120);
+  write_map_rect(*reference_source, source_rect, 120);
+  edit_map_rect(*row_source, rcti{0, 8, 0, 8}, 200);
+  edit_map_rect(*reference_source, rcti{0, 8, 0, 8}, 200);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  ASSERT_TRUE(run_bake_job());
+
+  expect_maps_match(read_map(*row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]),
+                    read_map(*reference->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]),
+                    "a worker job with a replaced coverage must keep the channel content");
+  expect_maps_match(read_map(*row->bake->coverage),
+                    read_map(*reference->bake->coverage),
+                    "a worker job must not zero coverage outside the band");
 }
 
 TEST_F(PaintLayersOwnedEffectTest, an_unbounded_row_keeps_its_subscription_band)

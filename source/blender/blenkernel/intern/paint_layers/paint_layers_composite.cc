@@ -2468,7 +2468,18 @@ struct AnchorSliceCache {
   size_t total_bytes = 0;
 };
 
-static AnchorSliceCache g_anchor_slice_cache;
+/**
+ * The cache lives in a function rather than at file scope: a file-scope static is built before
+ * `main` and torn down after the memory leak detector has run, so whatever it holds is reported as
+ * a leak on every exit ("Not freed memory blocks") and freed while the CRT is already coming apart
+ * -- which crashed the exit. A function-local static is built on first use, after the detector was
+ * registered, and destroyed before it, so its frees are ordinary ones.
+ */
+static AnchorSliceCache &anchor_slice_cache()
+{
+  static AnchorSliceCache cache;
+  return cache;
+}
 /**
  * Guards the container and the byte count only. A bake job renders on a worker thread while the
  * main thread describes the composite, and both reach the cache. It is never held while a slice
@@ -2481,8 +2492,8 @@ void paint_layer_anchor_point_slice_cache_clear()
   std::lock_guard<std::mutex> lock(g_anchor_slice_cache_mutex);
   /* The buffer goes too: the cache is a static, so a kept buffer would outlive the leak check that
    * runs when the program shuts down, and a cleared cache has nothing to reuse it for. */
-  g_anchor_slice_cache.entries.clear_and_shrink();
-  g_anchor_slice_cache.total_bytes = 0;
+  anchor_slice_cache().entries.clear_and_shrink();
+  anchor_slice_cache().total_bytes = 0;
 }
 
 void BKE_paint_layers_slice_cache_free_all()
@@ -2493,10 +2504,10 @@ void BKE_paint_layers_slice_cache_free_all()
 void BKE_paint_layers_slice_cache_free_material(const Material &ma)
 {
   std::lock_guard<std::mutex> lock(g_anchor_slice_cache_mutex);
-  for (int i = int(g_anchor_slice_cache.entries.size()) - 1; i >= 0; i--) {
-    if (g_anchor_slice_cache.entries[i].key.material_uid == ma.id.session_uid) {
-      g_anchor_slice_cache.total_bytes -= g_anchor_slice_cache.entries[i].bytes;
-      g_anchor_slice_cache.entries.remove(i);
+  for (int i = int(anchor_slice_cache().entries.size()) - 1; i >= 0; i--) {
+    if (anchor_slice_cache().entries[i].key.material_uid == ma.id.session_uid) {
+      anchor_slice_cache().total_bytes -= anchor_slice_cache().entries[i].bytes;
+      anchor_slice_cache().entries.remove(i);
     }
   }
 }
@@ -2504,7 +2515,7 @@ void BKE_paint_layers_slice_cache_free_material(const Material &ma)
 size_t paint_layer_anchor_point_slice_cache_bytes()
 {
   std::lock_guard<std::mutex> lock(g_anchor_slice_cache_mutex);
-  return g_anchor_slice_cache.total_bytes;
+  return anchor_slice_cache().total_bytes;
 }
 
 void paint_layer_anchor_point_slice_cache_set_budget(const size_t bytes)
@@ -2522,7 +2533,7 @@ size_t paint_layer_anchor_point_slice_cache_budget()
 int paint_layer_anchor_point_slice_cache_entry_count()
 {
   std::lock_guard<std::mutex> lock(g_anchor_slice_cache_mutex);
-  return int(g_anchor_slice_cache.entries.size());
+  return int(anchor_slice_cache().entries.size());
 }
 
 static bool anchor_slice_key_equal(const AnchorSliceCacheKey &a, const AnchorSliceCacheKey &b)
@@ -4155,24 +4166,24 @@ bool BKE_paint_layers_slice_render(const Material &ma,
   BLI_rcti_init(&region, 0, 0, 0, 0);
   {
     std::lock_guard<std::mutex> lock(g_anchor_slice_cache_mutex);
-    for (const int i : g_anchor_slice_cache.entries.index_range()) {
-      if (!anchor_slice_key_equal(g_anchor_slice_cache.entries[i].key, key)) {
+    for (const int i : anchor_slice_cache().entries.index_range()) {
+      if (!anchor_slice_key_equal(anchor_slice_cache().entries[i].key, key)) {
         continue;
       }
-      change = map_sources_changes(g_anchor_slice_cache.entries[i].synced, images, region);
+      change = map_sources_changes(anchor_slice_cache().entries[i].synced, images, region);
       if (change == ePixelChange::None) {
         /* LRU: move the hit to the newest end. The buffers stay alive through the shared pointers
          * the caller receives, whatever the cache does next. */
-        AnchorSliceCacheEntry hit = std::move(g_anchor_slice_cache.entries[i]);
-        g_anchor_slice_cache.entries.remove(i);
+        AnchorSliceCacheEntry hit = std::move(anchor_slice_cache().entries[i]);
+        anchor_slice_cache().entries.remove(i);
         *r_color = hit.color;
         *r_coverage = hit.coverage;
-        g_anchor_slice_cache.entries.append(std::move(hit));
+        anchor_slice_cache().entries.append(std::move(hit));
         return true;
       }
-      held = std::move(g_anchor_slice_cache.entries[i]);
-      g_anchor_slice_cache.total_bytes -= held.bytes;
-      g_anchor_slice_cache.entries.remove(i);
+      held = std::move(anchor_slice_cache().entries[i]);
+      anchor_slice_cache().total_bytes -= held.bytes;
+      anchor_slice_cache().entries.remove(i);
       have_entry = true;
       break;
     }
@@ -4242,23 +4253,23 @@ bool BKE_paint_layers_slice_render(const Material &ma,
      * above. Evicting only drops the cache's reference: a description or a caller that still holds
      * the buffers keeps them alive. Another thread may have rendered the same slice meanwhile; the
      * newer one replaces it. */
-    for (int i = int(g_anchor_slice_cache.entries.size()) - 1; i >= 0; i--) {
-      if (anchor_slice_key_equal(g_anchor_slice_cache.entries[i].key, key)) {
-        g_anchor_slice_cache.total_bytes -= g_anchor_slice_cache.entries[i].bytes;
-        g_anchor_slice_cache.entries.remove(i);
+    for (int i = int(anchor_slice_cache().entries.size()) - 1; i >= 0; i--) {
+      if (anchor_slice_key_equal(anchor_slice_cache().entries[i].key, key)) {
+        anchor_slice_cache().total_bytes -= anchor_slice_cache().entries[i].bytes;
+        anchor_slice_cache().entries.remove(i);
       }
     }
     /* A slice larger than the whole budget is not kept: it would evict everything and then stay
      * pinned after the description that needed it is gone. The caller still receives it. */
     if (new_entry.bytes <= g_anchor_slice_cache_budget) {
-      while (!g_anchor_slice_cache.entries.is_empty() &&
-             g_anchor_slice_cache.total_bytes + new_entry.bytes > g_anchor_slice_cache_budget)
+      while (!anchor_slice_cache().entries.is_empty() &&
+             anchor_slice_cache().total_bytes + new_entry.bytes > g_anchor_slice_cache_budget)
       {
-        g_anchor_slice_cache.total_bytes -= g_anchor_slice_cache.entries[0].bytes;
-        g_anchor_slice_cache.entries.remove(0);
+        anchor_slice_cache().total_bytes -= anchor_slice_cache().entries[0].bytes;
+        anchor_slice_cache().entries.remove(0);
       }
-      g_anchor_slice_cache.total_bytes += new_entry.bytes;
-      g_anchor_slice_cache.entries.append(std::move(new_entry));
+      anchor_slice_cache().total_bytes += new_entry.bytes;
+      anchor_slice_cache().entries.append(std::move(new_entry));
     }
   }
   *r_color = std::move(color);

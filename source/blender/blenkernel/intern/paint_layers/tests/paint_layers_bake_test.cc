@@ -56,6 +56,7 @@
 
 #include "DNA_windowmanager_types.h"
 
+#include "../paint_layers_bake_intern.hh"
 #include "../paint_layers_intern.hh"
 
 namespace blender::bke::tests {
@@ -3440,6 +3441,183 @@ TEST_F(PaintLayersBakeTest, an_uncovered_edit_region_is_kept_for_a_projection)
   EXPECT_LE(region[2], uncovered.ymin);
   EXPECT_GE(region[3], uncovered.ymax);
   EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_BAKE_STALE, 0);
+}
+
+/**
+ * The band is scaled by one channel's dimensions; a row whose source maps differ in size has no
+ * single scale, so the helper refuses the band and the row keeps its whole/footprint path.
+ */
+TEST_F(PaintLayersBakeTest, a_mixed_size_row_refuses_the_band)
+{
+  Image *base = bake_test_add_ramp_image_sized(*bmain, "MixedBase", 16, 16);
+  Image *metallic = bake_test_add_ramp_image_sized(*bmain, "MixedMetallic", 8, 8);
+  MaterialPaintLayer *mixed = add_paint_layer("Mixed", base, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  add_channel(*mixed, PAINT_MATERIAL_CHANNEL_METALLIC, metallic);
+  EXPECT_FALSE(bake_row_band_dimensions_match(*ma, *mixed, 16, 16));
+
+  Image *even_base = bake_test_add_ramp_image_sized(*bmain, "EvenBase", 16, 16);
+  Image *even_metal = bake_test_add_ramp_image_sized(*bmain, "EvenMetallic", 16, 16);
+  MaterialPaintLayer *even = add_paint_layer("Even", even_base, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  add_channel(*even, PAINT_MATERIAL_CHANNEL_METALLIC, even_metal);
+  /* The positive half asks the row for its own dimensions, so a row whose map is not 16x16 cannot
+   * pass by asserting a size it does not have. */
+  int even_width = 0;
+  int even_height = 0;
+  ASSERT_TRUE(BKE_paint_layers_row_dimensions(
+      *ma, *even, PAINT_MATERIAL_CHANNEL_BASE_COLOR, even_width, even_height));
+  EXPECT_EQ(even_width, 16);
+  EXPECT_EQ(even_height, 16);
+  EXPECT_TRUE(bake_row_band_dimensions_match(*ma, *even, even_width, even_height));
+}
+
+/**
+ * A freed bake map leaves a dangling pointer in the runtime slot. The validity record the
+ * subscription takes must store no map for it, so the bake stops counting as current instead of
+ * dereferencing freed memory.
+ */
+TEST_F(PaintLayersBakeTest, a_freed_bake_slot_is_recorded_as_no_map)
+{
+  MaterialPaintLayer *row = add_baked_row("FreedSlot");
+  clear_active();
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
+  ASSERT_NE(row->bake, nullptr);
+  const int channel = int(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  Image *map = row->bake->images[channel];
+  ASSERT_NE(map, nullptr);
+
+  /* An undo or a file reset can free the map while the slot keeps the pointer. */
+  BKE_id_free(bmain, map);
+
+  BKE_paint_layers_bake_subscribe(*ma, *row);
+  {
+    std::lock_guard lock(bake_runtime_mutex());
+    const BakeMaterialRuntime *runtime = bake_runtime().lookup_ptr(ma->id.session_uid);
+    ASSERT_NE(runtime, nullptr);
+    const auto *maps = runtime->baked_maps.lookup_ptr(row->marker);
+    ASSERT_NE(maps, nullptr);
+    ASSERT_EQ((*maps)[channel].image, nullptr)
+        << "a dead bake slot is recorded as no map, never as a dangling pointer";
+    EXPECT_EQ((*maps)[channel].session_uid, 0u);
+  }
+  EXPECT_FALSE(BKE_paint_layers_bake_maps_are_current(*ma, *row))
+      << "a bake whose map was freed is not current";
+  /* Leave no dangling pointer in the runtime slot for teardown or a later check. */
+  row->bake->images[channel] = nullptr;
+}
+
+TEST_F(PaintLayersBakeTest, a_tiled_map_missing_a_tile_is_not_a_service_reuse)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *row = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *row, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
+  Image *base = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(base, nullptr);
+  ASSERT_NE(BKE_image_get_tile(base, 1001), nullptr);
+  ASSERT_EQ(BKE_image_get_tile(base, 1002), nullptr);
+
+  /* Service equivalence, not a band-safety property: the predicate answers what
+   * #bake_service_image would hand back. The band-safety gate is the plan-time uid snapshot, which
+   * is tested below. */
+  EXPECT_FALSE(bake_service_image_would_reuse(
+      *bmain, *row, int(PAINT_MATERIAL_CHANNEL_BASE_COLOR), 8, false, 2));
+
+  ASSERT_TRUE(BKE_paint_layers_map_coverage_tile_ensure(*base, 1002));
+  EXPECT_TRUE(bake_service_image_would_reuse(
+      *bmain, *row, int(PAINT_MATERIAL_CHANNEL_BASE_COLOR), 8, false, 2));
+}
+
+TEST_F(PaintLayersBakeTest, a_tiled_map_missing_a_tile_records_no_plan_uid)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *row = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *row, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
+  Image *base = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  Image *coverage = row->bake->coverage;
+  ASSERT_NE(base, nullptr);
+  ASSERT_NE(coverage, nullptr);
+  ASSERT_NE(BKE_image_get_tile(base, 1001), nullptr);
+  ASSERT_EQ(BKE_image_get_tile(base, 1002), nullptr);
+  ASSERT_EQ(BKE_image_get_tile(coverage, 1002), nullptr);
+
+  /* The plan asks for two objects: tile 1002 is missing now, so neither the channel map nor the
+   * coverage may be recorded as a map the band can write into. Another object's service call would
+   * grow the tile, which is exactly why the snapshot is taken before any object renders. */
+  uint32_t coverage_uid = 0;
+  std::array<uint32_t, PAINT_MATERIAL_CHANNEL_NUM> map_uid =
+      bake_plan_standing_map_uids(*bmain, *row, 8, 2, {}, coverage_uid);
+  EXPECT_EQ(map_uid[PAINT_MATERIAL_CHANNEL_BASE_COLOR], 0u)
+      << "a map missing a requested tile records no identity for the band";
+  EXPECT_EQ(coverage_uid, 0u);
+
+  ASSERT_TRUE(BKE_paint_layers_map_coverage_tile_ensure(*base, 1002));
+  ASSERT_TRUE(BKE_paint_layers_map_coverage_tile_ensure(*coverage, 1002));
+  map_uid = bake_plan_standing_map_uids(*bmain, *row, 8, 2, {}, coverage_uid);
+  EXPECT_NE(map_uid[PAINT_MATERIAL_CHANNEL_BASE_COLOR], 0u);
+  EXPECT_NE(coverage_uid, 0u);
+}
+
+TEST_F(PaintLayersBakeTest, a_new_object_tile_is_filled_after_the_first_bake)
+{
+  ma->paint_layers_image_size = 8;
+  Scene *scene = BKE_scene_add(bmain, "BakeScene");
+  add_uv_quad_object(*scene, "First");
+  add_uv_quad_object(*scene, "Second");
+  update_scene(*scene);
+  ViewLayer *view_layer = static_cast<ViewLayer *>(scene->view_layers.first);
+
+  MaterialPaintLayer *row = BKE_paint_layers_gradient_add(
+      *ma, "Object", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *row, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *row, MA_PAINT_LAYER_BAKE_ALWAYS));
+  clear_active();
+
+  PaintLayersBakeJob *job = BKE_paint_layers_bake_job_create(*bmain, *ma, scene, view_layer);
+  ASSERT_NE(job, nullptr);
+  BKE_paint_layers_bake_job_compute(*job, {}, {});
+  ASSERT_TRUE(BKE_paint_layers_bake_job_commit(*job));
+  BKE_paint_layers_bake_job_free(*job);
+
+  Image *base = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(base, nullptr);
+  ASSERT_NE(BKE_image_get_tile(base, 1002), nullptr);
+
+  /* A third object grows a new tile. Measured: adding it makes the row due with no subscription
+   * band (the object list is part of the bake, not a pixel edit), so the bake is whole and the new
+   * tile is filled like the ones a first bake laid. */
+  add_uv_quad_object(*scene, "Third");
+  update_scene(*scene);
+  int band[4] = {};
+  EXPECT_FALSE(BKE_paint_layers_bake_changed_region(*ma, *row, band))
+      << "a new object has no standing-region edit to narrow the bake";
+
+  job = BKE_paint_layers_bake_job_create(*bmain, *ma, scene, view_layer);
+  ASSERT_NE(job, nullptr);
+  BKE_paint_layers_bake_job_compute(*job, {}, {});
+  ASSERT_TRUE(BKE_paint_layers_bake_job_commit(*job));
+  BKE_paint_layers_bake_job_free(*job);
+
+  Image *after = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(after, nullptr);
+  ASSERT_NE(BKE_image_get_tile(after, 1003), nullptr)
+      << "the new object's tile was grown";
+  ASSERT_NE(row->bake->coverage, nullptr);
+  EXPECT_NE(BKE_image_get_tile(row->bake->coverage, 1003), nullptr);
+
+  /* The three objects are identical quads and the gradient reads object space, so their tiles
+   * carry the same picture: a rectangle-only write into the blank new tile would differ. */
+  const Vector<uchar> first = tile_pixel_bytes(*after, 1001);
+  const Vector<uchar> third = tile_pixel_bytes(*after, 1003);
+  ASSERT_EQ(first.size(), third.size());
+  ASSERT_FALSE(first.is_empty());
+  EXPECT_EQ(first, third) << "the new tile is filled by the bake, not left blank outside a band";
 }
 
 /**

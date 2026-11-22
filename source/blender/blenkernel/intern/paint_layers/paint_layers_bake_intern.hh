@@ -73,6 +73,34 @@ Image *bake_service_image(Main &bmain,
                           Span<int> tile_numbers = {},
                           int height = 0);
 
+/**
+ * Whether #bake_service_image would hand back the map \a layer already holds for \a channel: the
+ * slot is live and matches the requested size, format, tiled scheme and tile set. False when the
+ * service would replace the map or grow a blank tile into it, so the caller must render whole.
+ */
+bool bake_service_image_would_reuse(const Main &bmain,
+                                    MaterialPaintLayer &layer,
+                                    int channel,
+                                    int size,
+                                    bool floatbuf,
+                                    int object_num,
+                                    Span<int> tile_numbers = {},
+                                    int height = 0);
+
+/**
+ * The map identities a plan may lay a rectangle into: the channel maps and the coverage that stood
+ * and are service-reusable at plan time. A uid is zero when the map is missing, dead, would be
+ * replaced, or a requested tile is missing -- a tile another object would grow later is not a
+ * standing map for this plan, so no object may band into the blank tile.
+ */
+std::array<uint32_t, PAINT_MATERIAL_CHANNEL_NUM> bake_plan_standing_map_uids(
+    Main &bmain,
+    MaterialPaintLayer &layer,
+    int size,
+    int object_num,
+    Span<int> tile_numbers,
+    uint32_t &r_coverage_uid);
+
 /** One render of an object's tile block: a UV tile and the image tile it is written to. */
 struct PaintLayersBakeTilePair {
   /** The UDIM tile of the object's UVs the surface rasterizes. */
@@ -438,6 +466,15 @@ bool bake_row_release_apply(Main &bmain,
                             MaterialPaintLayer &layer,
                             BakeRowRelease release);
 int bake_size_for(const Material &ma, const MaterialPaintLayer &row);
+/**
+ * Whether every source image of \a layer with a known size is \a width by \a height. The planner
+ * takes its changed-region band scaled by one channel's dimensions; a row whose sources differ in
+ * size has no single scale, so the band is refused (see #BKE_paint_layers_bake_plan_run).
+ */
+bool bake_row_band_dimensions_match(const Material &ma,
+                                    const MaterialPaintLayer &layer,
+                                    int width,
+                                    int height);
 int bake_row_object_issue(const Material &ma,
                           const MaterialPaintLayer &layer,
                           const PaintLayersBakeView &view);

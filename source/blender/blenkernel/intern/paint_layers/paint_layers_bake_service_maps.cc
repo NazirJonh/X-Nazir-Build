@@ -91,6 +91,54 @@ bool bake_channel_needs_float(const MaterialPaintLayer &layer, const MaterialPai
 }
 
 /**
+ * Whether #bake_service_image would hand back the map \a layer holds for \a channel instead of
+ * making another one: the slot is live and matches the requested size, format, tiled scheme and
+ * tile set. The caller uses it to decide whether the map can take a partial write; a map the
+ * service would replace or grow a blank tile into cannot. The image is not modified.
+ */
+bool bake_service_image_would_reuse(const Main &bmain,
+                                    MaterialPaintLayer &layer,
+                                    const int channel,
+                                    const int size,
+                                    const bool floatbuf,
+                                    const int object_num,
+                                    const Span<int> tile_numbers,
+                                    const int height)
+{
+  if (layer.bake == nullptr) {
+    return false;
+  }
+  const bool tiled = object_num > 0;
+  const int map_height = (height > 0) ? height : size;
+  Image *slot = (channel >= 0) ? layer.bake->images[channel] : layer.bake->coverage;
+  if (slot == nullptr || !bake_service_image_is_live(bmain, slot)) {
+    return false;
+  }
+  int slot_width = 0;
+  int slot_height = 0;
+  BKE_image_get_size(slot, nullptr, &slot_width, &slot_height);
+  if (slot_width != size || slot_height != map_height || bake_image_is_float(*slot) != floatbuf ||
+      (slot->source == IMA_SRC_TILED) != tiled)
+  {
+    return false;
+  }
+  if (!tiled) {
+    return true;
+  }
+  /* A missing tile is blank, so the map cannot take a rectangle-only write for it: either the
+   * service grows the tile here or the caller renders the tile whole first. */
+  const int tile_num = tile_numbers.is_empty() ? object_num : int(tile_numbers.size());
+  for (int index = 0; index < tile_num; index++) {
+    const int tile_number = tile_numbers.is_empty() ? PAINT_TILE_NUMBER_BASE + index :
+                                                      tile_numbers[index];
+    if (BKE_image_get_tile(slot, tile_number) == nullptr) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
  * The map of \a layer in \a channel at \a size, made when it is missing or of another size or
  * format.
  *

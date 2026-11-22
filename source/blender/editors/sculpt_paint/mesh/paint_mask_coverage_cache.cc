@@ -436,7 +436,11 @@ std::shared_ptr<const MaskSourceCoverage> mask_source_coverage_cache_get(
 void mask_source_coverage_cache_free_all()
 {
   std::lock_guard lock(mask_coverage_cache_mutex);
-  mask_coverage_cache.clear();
+  /* The container is a file-scope static, so it is destroyed after the leak detector has run.
+   * `clear` keeps the heap buffer and would leave it to be freed then: reported as a leak and
+   * freed into an allocator whose teardown has already started. Drop the buffer here, while the
+   * exit path still runs before `exit()`. */
+  mask_coverage_cache.clear_and_shrink();
   mask_coverage_budget_bytes_used = 0;
 }
 

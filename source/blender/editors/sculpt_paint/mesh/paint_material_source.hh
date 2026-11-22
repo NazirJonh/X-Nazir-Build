@@ -328,11 +328,25 @@ bool paint_layers_curve_patch_stroke_gate_report(bContext &C,
                                                  const Brush *brush);
 
 /**
- * The one gate a stroke start answers to: the paint target is locked or hidden, or it is a Curve
- * Patch effect whose own brush is not the one in hand. The decision comes from
- * #BKE_paint_layers_target_resolve alone, so the gate and the stroke cannot disagree, and the
- * message appears once per stroke and not per dab. A Curve Patch refusal may enter the effect's
- * tool (see #curve_patch_layer_stroke_target_resolve), which is why the gate needs the context.
+ * Whether a stroke in \a settings writes nothing into \a row because it is a Fill: its maps are
+ * assigned (the constant, the texture its slots carry), not painted, so a stroke would overwrite
+ * them. Content only: a Mask-mode stroke paints the row's base mask, which is paintable whatever
+ * the row lays. A null row is not a Fill: the callers answer
+ * #PaintLayersTargetStatus::NoActiveRow themselves. The rule lives here alone, so the stroke gate
+ * and the fill paths that skip a Fill's faces cannot disagree about it.
+ */
+bool paint_layers_row_takes_no_fill_stroke(const MaterialPaintLayer *row,
+                                           const PaintModeSettings &settings);
+
+/**
+ * The one gate a stroke start answers to: the paint target is locked or hidden, the active row is
+ * a Fill (its maps are assigned, not painted), or it is a Curve Patch effect whose own brush is
+ * not the one in hand. Locked, hidden and Curve Patch come from #BKE_paint_layers_target_resolve
+ * alone, so the gate and the stroke cannot disagree; the Fill answer asks the row's kind, because
+ * the resolve keeps answering Ok for the readers that show a Fill's maps (the slot list, the Image
+ * Editor). The message appears once per stroke and not per dab. A Curve Patch refusal may enter the
+ * effect's tool (see #curve_patch_layer_stroke_target_resolve), which is why the gate needs the
+ * context.
  *
  * \param brush: the brush the stroke paints with, or null for a caller that is not a brush stroke
  * (a session entry, a shape). A null \a brush is never refused by the Curve Patch half (the entry

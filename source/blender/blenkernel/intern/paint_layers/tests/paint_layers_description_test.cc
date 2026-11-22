@@ -370,6 +370,25 @@ TEST_F(PaintLayersDescription, kind_flags_say_what_a_kind_lays_and_what_it_chang
   EXPECT_FALSE(paint_layer_kind_has_flag(*row, PAINT_LAYER_KIND_ACTS_ON_BELOW));
 }
 
+TEST_F(PaintLayersDescription, row_is_fill_names_the_content_rows_that_lay_a_value)
+{
+  Material *ma = BKE_material_add(bmain, "FillRowMat");
+  MaterialPaintLayer *row = paint_layer_add(*ma, "Row");
+
+  /* An ordinary row is a stroke target, not a Fill. */
+  EXPECT_FALSE(BKE_paint_layers_row_is_fill(*row));
+  /* A layer that lays a constant colour is a Fill: its content is edited through corrections. */
+  row->source = MA_PAINT_LAYER_SOURCE_CONSTANT;
+  EXPECT_TRUE(BKE_paint_layers_row_is_fill(*row));
+  /* A content correction of a flat kind is a Fill on its own. */
+  row->role = MA_PAINT_LAYER_ROLE_EFFECT;
+  EXPECT_TRUE(BKE_paint_layers_row_is_fill(*row));
+  /* A mask item is refused by the Mask-mode target resolve alone, even when its kind lays a flat
+   * value (a Fill correction): this predicate does not answer for it. */
+  row->role = MA_PAINT_LAYER_ROLE_MASK_ITEM;
+  EXPECT_FALSE(BKE_paint_layers_row_is_fill(*row));
+}
+
 TEST_F(PaintLayersDescription, add_policy_makes_a_filter_correction_on_the_row_it_hangs_on)
 {
   Material &ma = *BKE_material_add(bmain, "FilterAddMat");

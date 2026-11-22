@@ -74,6 +74,7 @@
 #include "BKE_mesh.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
@@ -6302,6 +6303,18 @@ static Image *paint_image_geometry_fill_canvas_image(const Scene *scene,
   Material *ma = BKE_object_material_get(ob, short(mat_nr + 1));
   if (ma == nullptr) {
     ma = BKE_object_material_get(ob, ob->actcol);
+  }
+  if (ma != nullptr && BKE_paint_layers_is_layered(*ma)) {
+    /* A Fill row takes no stroke: its slot carries the texture the user assigned, and the fill
+     * must not write into it. A layered material with no active row has no stroke target either.
+     * The Mask branch above served the row's base mask already, which is paintable whatever the
+     * row lays. */
+    const MaterialPaintLayer *row = BKE_paint_layers_active_layer_get(*ma);
+    if (row == nullptr ||
+        ed::sculpt_paint::material::paint_layers_row_takes_no_fill_stroke(row, paint_mode))
+    {
+      return nullptr;
+    }
   }
   if (ma && ma->texpaintslot && ma->paint_active_slot < ma->tot_slots) {
     return ma->texpaintslot[ma->paint_active_slot].ima;

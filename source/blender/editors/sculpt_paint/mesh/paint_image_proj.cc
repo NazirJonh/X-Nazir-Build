@@ -4426,6 +4426,12 @@ static void project_paint_prepare_all_faces(ProjPaintState *ps,
   int prev_poly = -1;
   const Span<int3> corner_tris = ps->corner_tris_eval;
   const Span<int> tri_faces = ps->corner_tri_faces_eval;
+  /* A Content stroke must not write into a Fill row's assigned texture: the faces of a material
+   * whose active row is a Fill are skipped the way linked images are. Mask mode is not asked: it
+   * paints the row's base mask, which is paintable whatever the row lays. The fill answer is
+   * cached per material below, so a stack walk happens once per material, not per triangle. */
+  Material *fill_ma_last = nullptr;
+  bool fill_ma_blocked = false;
 
   BLI_assert(ps->image_tot == 0);
 
@@ -4491,6 +4497,24 @@ static void project_paint_prepare_all_faces(ProjPaintState *ps,
         }
         else {
           tpage = slot->ima;
+        }
+
+        /* A Fill row takes no stroke: its slot carries the texture the user assigned, which a
+         * stroke must not touch, and the material's faces are skipped the way linked images are. */
+        if (!skip_tri && ps->do_material_slots) {
+          Material *face_ma = tex_get_material(ps, tri_faces[tri_index]);
+          if (face_ma != fill_ma_last) {
+            fill_ma_last = face_ma;
+            fill_ma_blocked =
+                face_ma != nullptr && BKE_paint_layers_is_layered(*face_ma) &&
+                ed::sculpt_paint::material::paint_layers_row_takes_no_fill_stroke(
+                    BKE_paint_layers_active_layer_get(*face_ma),
+                    ps->scene->toolsettings->paint_mode);
+          }
+          if (fill_ma_blocked) {
+            skip_tri = true;
+            tpage = nullptr;
+          }
         }
       }
     }

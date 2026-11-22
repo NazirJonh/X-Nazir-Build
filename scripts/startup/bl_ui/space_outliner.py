@@ -159,8 +159,14 @@ class OUTLINER_HT_tool_header(Header):
             # The procedural layers (a Gradient, and the patterns of the generator registry) are
             # not needed every time, so one dropdown holds them instead of a button each.
             row.menu("OUTLINER_MT_stack_layer_procedural_add", text="", icon='PLUS', use_dropdown=True)
-            # The full Add menu (effects, Favorites, search) has no header button: Shift+A opens it
-            # (outliner.stack_add_menu_call), and the row's context menu carries it too.
+            # The effects-only menu, with the pinned Favorites and the search over them: the button
+            # the header has always carried. The root Add menu (OUTLINER_MT_stack_layer_add) is the
+            # wider one -- the quick layers, the procedural layers, the folder and the masks too --
+            # and stays on Shift+A (outliner.stack_add_menu_call) and the row's context menu. A
+            # `menu` rather than an enum button, because an enum button cannot hold a submenu;
+            # `use_dropdown` gives it the arrow the enum buttons have.
+            row.menu("OUTLINER_MT_stack_layer_effect_add", text="", icon='SHADERFX',
+                     use_dropdown=True)
 
             # Only the add is here, as a menu of the starting masks; switching a mask off and
             # taking it away live in the row's context menu, while its slot is the one showing.
@@ -225,6 +231,26 @@ class OUTLINER_MT_stack_layer_pattern_add(Menu):
             props.label = "Add {:s} Layer".format(item.name)
 
 
+def _stack_draw_search_and_favorites(layout, menu_idname):
+    """The search entry and the pinned Favorites, shared by the root Add menu and the header's
+    effects-only menu.
+
+    The search lists the menu it is given, so it cannot live in either menu's own code without
+    the two drifting: the root menu searches over everything it draws, the narrow one over the
+    effects alone. 'INVOKE_REGION_WIN' is what the header's dropdown opens with, so the node
+    menu's 'EXEC_REGION_WIN' test would hide the entry there; the search engine drops this operator
+    from its own results (interface_template_search_menu.cc). The context is left set, which is
+    the root menu's documented contract for the callbacks add-ons append to it.
+    """
+    layout.operator_context = 'INVOKE_REGION_WIN'
+    props = layout.operator("WM_OT_search_single_menu", text="Search...", icon='VIEWZOOM')
+    props.menu_idname = menu_idname
+    # The pinned kinds come first, straight after the search, in the order the user keeps them;
+    # unpinning is on the same rows.
+    layout.menu("OUTLINER_MT_stack_add_favorites", text="Favorites", icon='PINNED')
+    layout.separator()
+
+
 class OUTLINER_MT_stack_layer_add(Menu):
     """Everything the paint stack grows with, with the search over it (type while it is open): the
     quick layers, the pinned Favorites, and the source's own effects.
@@ -255,16 +281,8 @@ class OUTLINER_MT_stack_layer_add(Menu):
         # The search over everything below, the way the node editor's Add menu has one: the generic
         # engine draws this menu off-screen and lists its buttons, so the Favorites, the effect
         # lists and an add-on's additions are all searchable for free. Drawn wherever this menu is
-        # the popup itself, not only in the keymap-invoked one: the header's dropdown opens with
-        # 'INVOKE_REGION_WIN', so the node menu's 'EXEC_REGION_WIN' test would hide it there. The
-        # search engine drops this operator from its own results (interface_template_search_menu.cc).
-        layout.operator_context = 'INVOKE_REGION_WIN'
-        props = layout.operator("WM_OT_search_single_menu", text="Search...", icon='VIEWZOOM')
-        props.menu_idname = "OUTLINER_MT_stack_layer_add"
-        # The pinned kinds come first, straight after the search, in the order the user keeps them;
-        # unpinning is on the same rows.
-        layout.menu("OUTLINER_MT_stack_add_favorites", text="Favorites", icon='PINNED')
-        layout.separator()
+        # the popup itself, not only in the keymap-invoked one.
+        _stack_draw_search_and_favorites(layout, "OUTLINER_MT_stack_layer_add")
 
         # The quick layers, the same buttons the header carries, with their names on.
         _stack_draw_quick_layers(layout, with_text=True)
@@ -280,6 +298,29 @@ class OUTLINER_MT_stack_layer_add(Menu):
         # The source's own effects, with a pin button beside every entry. The lists are C++: their
         # vocabulary is the editor's kind registry, which folds the two roles of one effect into
         # the line the current target asks for, so a new effect needs no menu change.
+        layout.menu_contents("OUTLINER_MT_stack_add_effects")
+
+
+class OUTLINER_MT_stack_layer_effect_add(Menu):
+    """What the header's Add Effect dropdown offers: the pinned Favorites, the source's own effect
+    lists, and the search over the two.
+
+    The root Add menu (OUTLINER_MT_stack_layer_add) is the wider one -- the quick layers, the
+    procedural layers, the folder and the masks as well -- and is what Shift+A
+    (outliner.stack_add_menu_call) and the row's context menu open. The header keeps this narrower
+    menu, so its dropdown stays the effects-only button it has always been.
+    """
+
+    bl_label = "Add Effect"
+    bl_options = {'SEARCH_ON_KEY_PRESS'}
+
+    def draw(self, _context):
+        layout = self.layout
+        # The search over the two lists below, then the pinned kinds, as in the root menu: the
+        # shared helper sets the context and the menu it searches.
+        _stack_draw_search_and_favorites(layout, "OUTLINER_MT_stack_layer_effect_add")
+        # The source's own effects, with a pin button beside every entry, drawn from the same C++
+        # list the root menu inlines.
         layout.menu_contents("OUTLINER_MT_stack_add_effects")
 
 
@@ -1238,6 +1279,7 @@ classes = (
     OUTLINER_MT_stack_layer_procedural_add,
     OUTLINER_MT_stack_layer_pattern_add,
     OUTLINER_MT_stack_layer_add,
+    OUTLINER_MT_stack_layer_effect_add,
     OUTLINER_MT_stack_layer_mask_add,
     OUTLINER_OT_stack_layer_mask_add,
     OUTLINER_MT_stack_layer_advanced,

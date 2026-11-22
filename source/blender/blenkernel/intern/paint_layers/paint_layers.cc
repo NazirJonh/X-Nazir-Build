@@ -3581,16 +3581,21 @@ float BKE_paint_layers_mapping_scale_normalize(const float scale)
   return scale;
 }
 
+bool BKE_paint_layers_row_is_fill(const MaterialPaintLayer &row)
+{
+  /* A Layer's content or a content correction's: a mask fill correction is refused by the Mask-mode
+   * target resolve, not here (see the declaration). */
+  return ELEM(row.role, MA_PAINT_LAYER_ROLE_LAYER, MA_PAINT_LAYER_ROLE_EFFECT) &&
+         paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_FLAT_VALUE);
+}
+
 bool BKE_paint_layers_fill_reads_map(const Material &ma,
                                      const MaterialPaintLayer &row,
                                      const int channel)
 {
   /* A Fill is never painted, but its channels may hold their own image, which is then a texture
    * source for that channel only; the other channels keep the constant. */
-  if (!ELEM(row.role, MA_PAINT_LAYER_ROLE_LAYER, MA_PAINT_LAYER_ROLE_EFFECT) ||
-      !paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_FLAT_VALUE) ||
-      paint_layer_channel_filtered(ma, channel))
-  {
+  if (!BKE_paint_layers_row_is_fill(row) || paint_layer_channel_filtered(ma, channel)) {
     return false;
   }
   const MaterialPaintLayerChannel *record = paint_layer_channel_find(row, channel);

@@ -586,12 +586,29 @@ static void texture_fill_loop_state_free(wmOperator *op)
   }
 }
 
+/**
+ * The gate every Texture Fill entry answers to: a locked or hidden target, or a Fill row of the
+ * active layered material, takes no write, and the gate reports why once. Shared by the click,
+ * line, loop and box modes, so a new entry cannot start a fill the gate would refuse.
+ */
+static bool texture_fill_stroke_gate_blocked(bContext *C, wmOperator *op, const Brush *brush)
+{
+  Object *ob = CTX_data_active_object(C);
+  Scene *scene = CTX_data_scene(C);
+  return ob != nullptr && scene != nullptr && scene->toolsettings != nullptr &&
+         ed::sculpt_paint::material::paint_layers_stroke_gate_report(
+             *C, *ob, scene->toolsettings->paint_mode, op->reports, brush);
+}
+
 static wmOperatorStatus texture_fill_loop_invoke(bContext *C,
                                                  wmOperator *op,
                                                  const wmEvent *event,
                                                  Paint *paint,
                                                  Brush *brush)
 {
+  if (texture_fill_stroke_gate_blocked(C, op, brush)) {
+    return OPERATOR_CANCELLED;
+  }
   if (!texture_fill_canvas_has_texture(C, CTX_data_active_object(C))) {
     BKE_report(op->reports, RPT_WARNING, "Texture Fill requires a PBR Paint texture to fill into");
     return OPERATOR_CANCELLED;
@@ -675,11 +692,7 @@ static bool texture_fill_click(bContext *C, wmOperator *op, const float mouse[2]
     return false;
   }
   Object *ob = CTX_data_active_object(C);
-  Scene *scene = CTX_data_scene(C);
-  if (ob != nullptr && scene != nullptr && scene->toolsettings != nullptr &&
-      ed::sculpt_paint::material::paint_layers_stroke_gate_report(
-          *C, *ob, scene->toolsettings->paint_mode, op->reports, brush))
-  {
+  if (texture_fill_stroke_gate_blocked(C, op, brush)) {
     return false;
   }
   if (!texture_fill_canvas_has_texture(C, ob)) {
@@ -760,11 +773,7 @@ static bool texture_fill_line(bContext *C,
     return false;
   }
   Object *ob = CTX_data_active_object(C);
-  Scene *scene = CTX_data_scene(C);
-  if (ob != nullptr && scene != nullptr && scene->toolsettings != nullptr &&
-      ed::sculpt_paint::material::paint_layers_stroke_gate_report(
-          *C, *ob, scene->toolsettings->paint_mode, op->reports, brush))
-  {
+  if (texture_fill_stroke_gate_blocked(C, op, brush)) {
     return false;
   }
   if (!texture_fill_canvas_has_texture(C, ob)) {
@@ -832,6 +841,9 @@ static wmOperatorStatus texture_fill_exec(bContext *C, wmOperator *op)
   Paint *paint;
   Brush *brush;
   if (!texture_fill_context_get(C, true, &paint, &brush)) {
+    return OPERATOR_CANCELLED;
+  }
+  if (texture_fill_stroke_gate_blocked(C, op, brush)) {
     return OPERATOR_CANCELLED;
   }
   if (!texture_fill_canvas_has_texture(C, CTX_data_active_object(C))) {
@@ -1567,6 +1579,7 @@ static bool texture_paint_prepare_layered_maps(bContext *C,
   Main *bmain = CTX_data_main(C);
   Scene *scene = CTX_data_scene(C);
   PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+  const PaintLayersTargetMode target_mode = BKE_paint_layers_target_mode(&paint_mode);
 
   /* Projection paint writes every layered material of the object: a locked or hidden active row
    * proves the stroke has nothing to write before any map is grown. The 2D path checks the same
@@ -1585,9 +1598,13 @@ static bool texture_paint_prepare_layered_maps(bContext *C,
     for (Material *ma : materials) {
       const int channel = BKE_paint_layers_texpaint_slot_channel(ma->paint_active_slot);
       PaintLayersTarget target;
-      if (channel < 0 ||
-          !BKE_paint_layers_target_get(
-              *ma, channel, BKE_paint_layers_target_mode(&paint_mode), target))
+      if (channel < 0 || !BKE_paint_layers_target_get(*ma, channel, target_mode, target)) {
+        continue;
+      }
+      /* A Fill row takes no stroke: its slots carry the textures the user assigned, and a map
+       * grown here would become a stroke target of them. */
+      if (ed::sculpt_paint::material::paint_layers_row_takes_no_fill_stroke(target.layer,
+                                                                           paint_mode))
       {
         continue;
       }

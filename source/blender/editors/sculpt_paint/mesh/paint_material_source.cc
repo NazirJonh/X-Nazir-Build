@@ -508,6 +508,14 @@ bool paint_layers_status_report(Material &ma,
   return true;
 }
 
+bool paint_layers_row_takes_no_fill_stroke(const MaterialPaintLayer *row,
+                                           const PaintModeSettings &settings)
+{
+  return row != nullptr &&
+         BKE_paint_layers_target_mode(&settings) == PaintLayersTargetMode::Content &&
+         BKE_paint_layers_row_is_fill(*row);
+}
+
 bool paint_layers_stroke_gate_report(bContext &C,
                                      Object &ob,
                                      const PaintModeSettings &settings,
@@ -547,6 +555,20 @@ bool paint_layers_stroke_gate_report(bContext &C,
     }
   }
   if (paint_layers_status_report(*ma, status, reports)) {
+    return true;
+  }
+  /* A Fill row (a layer or a content correction) lays the flat value or the texture its slots
+   * carry: its maps are assigned, not painted, and a stroke into them would overwrite the slot's
+   * texture. The resolve keeps answering Ok for its readers (the slot list, the Image Editor), so
+   * the stroke side asks the row's kind instead; #paint_layers_row_takes_no_fill_stroke is the one
+   * place that turns it into the answer every stroke entry and fill path shares. */
+  const MaterialPaintLayer *fill_row = BKE_paint_layers_active_layer_get(*ma);
+  if (paint_layers_row_takes_no_fill_stroke(fill_row, settings)) {
+    BKE_reportf(reports,
+                RPT_WARNING,
+                TIP_("Layer \"%s\" is a Fill and takes no stroke: assign textures to its slots "
+                     "instead"),
+                fill_row->name);
     return true;
   }
   /* A Curve Patch effect is stamped only through its own snapshot, entered from the row. Another

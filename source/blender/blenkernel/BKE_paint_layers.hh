@@ -1768,6 +1768,17 @@ blender::Vector<const MaterialPaintLayer *, 4> BKE_paint_layers_active_transform
     const Material &ma, const MaterialPaintLayer &row);
 
 /**
+ * Whether \a row is a Fill: a Layer or a content correction whose kind lays a flat value, so its
+ * content is the constant (or the texture its slots carry), never a map a stroke writes. Its mask
+ * is still paintable. This is the narrower answer the stroke gate and the fill paths ask; the
+ * fuller "takes no stroke" answer is #BKE_paint_layers_row_is_paintable, which also refuses
+ * generated and source-reading rows (those have their own refusals further along a stroke). A mask
+ * fill correction (#MA_PAINT_LAYER_ROLE_MASK_ITEM) is not asked here: its refusal lives in the
+ * Mask-mode target resolve alone.
+ */
+bool BKE_paint_layers_row_is_fill(const MaterialPaintLayer &row);
+
+/**
  * Whether strokes may write into \a row's own channels. A Fill row lays a flat value (with an
  * optional map read through its mapping); painting it would turn that map into a stroke target.
  * Its content is edited by corrections instead. A row's mask is still paintable.

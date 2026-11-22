@@ -720,8 +720,6 @@ static_assert(std::size(color_match_params) == PAINT_LAYER_COLOR_MATCH_PARAM_NUM
 static const PaintLayerKindParam exposure_params[] = {
     /* Stops of light: one unit doubles the colour, so it reads as an exposure compensation. */
     {"exposure", "Exposure", 0.0f, -5.0f, 5.0f},
-    /* Scene linear, not a factor: what the scaled colour rises or falls by. */
-    {"offset", "Offset", 0.0f, -0.5f, 0.5f},
     /* Never zero, and one leaves a colour above one alone: the power is one over it. */
     {"gamma", "Gamma", 1.0f, 0.1f, 9.99f},
 };

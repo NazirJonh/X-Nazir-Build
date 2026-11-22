@@ -417,13 +417,9 @@ class PaintLayersExposureTest : public PaintLayersFilterTest {
     return item;
   }
 
-  static void params_set(MaterialPaintLayer &filter,
-                         const float exposure,
-                         const float offset,
-                         const float gamma)
+  static void params_set(MaterialPaintLayer &filter, const float exposure, const float gamma)
   {
     EXPECT_TRUE(paint_layer_kind_param_set(filter, PAINT_LAYER_EXPOSURE_EXPOSURE, exposure));
-    EXPECT_TRUE(paint_layer_kind_param_set(filter, PAINT_LAYER_EXPOSURE_OFFSET, offset));
     EXPECT_TRUE(paint_layer_kind_param_set(filter, PAINT_LAYER_EXPOSURE_GAMMA, gamma));
   }
 };
@@ -433,7 +429,7 @@ TEST_F(PaintLayersExposureTest, exposure_over_a_row_matches_the_cpu)
   add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
   MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
   MaterialPaintLayer *exposure = add_exposure(*row, 0.7f);
-  params_set(*exposure, 1.0f, 0.05f, 1.8f);
+  params_set(*exposure, 1.0f, 1.8f);
 
   expect_graph_matches_cpu(kColor);
 }
@@ -458,7 +454,7 @@ TEST_F(PaintLayersExposureTest, a_stop_doubles_the_colour_and_an_hdr_texel_stays
   MaterialPaintLayer *exposure = add_exposure(*row);
   /* One stop doubles, and the gamma of one is the Gamma node's own no-op: a channel past one is
    * not clipped, which is what keeps the filter and its graph the same function. */
-  params_set(*exposure, 1.0f, 0.0f, 1.0f);
+  params_set(*exposure, 1.0f, 1.0f);
 
   expect_graph_matches_cpu(kColor);
   const RGBA after = cpu_pixel(kColor);
@@ -475,7 +471,7 @@ TEST_F(PaintLayersExposureTest, a_gamma_raises_a_mid_tone_towards_one)
   MaterialPaintLayer *exposure = add_exposure(*row);
   /* A gamma of two raises every positive channel to a half power; read the expectation off the
    * measured linear colour, never off a guessed encoding, so the check is the power law itself. */
-  params_set(*exposure, 0.0f, 0.0f, 2.0f);
+  params_set(*exposure, 0.0f, 2.0f);
 
   expect_graph_matches_cpu(kColor);
   const RGBA after = cpu_pixel(kColor);
@@ -489,7 +485,7 @@ TEST_F(PaintLayersExposureTest, editing_a_parameter_is_a_value_edit_both_sides_f
   add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
   MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
   MaterialPaintLayer *exposure = add_exposure(*row);
-  params_set(*exposure, 0.5f, 0.0f, 1.0f);
+  params_set(*exposure, 0.5f, 1.0f);
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   const RGBA before = graph_pixel(kColor);
 
@@ -520,8 +516,6 @@ TEST_F(PaintLayersExposureTest, a_parameter_is_clamped_to_its_range)
   EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*exposure, PAINT_LAYER_EXPOSURE_EXPOSURE), -5.0f);
   EXPECT_TRUE(paint_layer_kind_param_set(*exposure, PAINT_LAYER_EXPOSURE_EXPOSURE, 7.0f));
   EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*exposure, PAINT_LAYER_EXPOSURE_EXPOSURE), 5.0f);
-  EXPECT_TRUE(paint_layer_kind_param_set(*exposure, PAINT_LAYER_EXPOSURE_OFFSET, 2.0f));
-  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*exposure, PAINT_LAYER_EXPOSURE_OFFSET), 0.5f);
   /* The gamma never reaches zero: one over it is what the filter raises to, so the range guards it. */
   EXPECT_TRUE(paint_layer_kind_param_set(*exposure, PAINT_LAYER_EXPOSURE_GAMMA, 0.0f));
   EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*exposure, PAINT_LAYER_EXPOSURE_GAMMA), 0.1f);
@@ -534,7 +528,7 @@ TEST_F(PaintLayersExposureTest, exposure_adjustment_matches_the_cpu)
   add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
   MaterialPaintLayer *adjustment = add_adjustment(0.8f);
   ASSERT_NE(adjustment, nullptr);
-  params_set(*adjustment, -1.0f, 0.1f, 0.7f);
+  params_set(*adjustment, -1.0f, 0.7f);
 
   expect_graph_matches_cpu(kColor);
 }
@@ -551,7 +545,7 @@ TEST_F(PaintLayersExposureTest, exposure_in_the_mask_works_on_its_coverage)
   /* One stop doubles the coverage: 0.25 becomes 0.5, still inside the range a mask reads. */
   MaterialPaintLayer *item = add_mask_filter(*row);
   ASSERT_NE(item, nullptr);
-  params_set(*item, 1.0f, 0.0f, 1.0f);
+  params_set(*item, 1.0f, 1.0f);
   expect_graph_matches_cpu(kColor);
   EXPECT_NEAR(row_weight(*row, bottom, row_alone_weight_one), 0.5f, 3e-3f);
 }

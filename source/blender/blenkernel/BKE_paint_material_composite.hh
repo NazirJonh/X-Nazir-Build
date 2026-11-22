@@ -1774,6 +1774,14 @@ uint64_t BKE_paint_material_composite_stack_hash(
  *                     (see the `tile_number` of #BKE_paint_layers_composite_image_layers), so the
  *                     caller compositing a canvas tile by tile gets an entry -- and a buffer -- per
  *                     tile instead of one shared buffer that always shows the base tile.
+ * \param float_output: store the composite as **float** RGBA in straight scene-linear, unclamped,
+ *                      rather than as the byte, display-referred canvas the channel passes show.
+ *                      The Combined preview asks for this on the color channels: it shades
+ *                      scene-referred like the viewport's live graph, so a filter that overshoots
+ *                      (Exposure, Add) has to keep its values above one instead of clipping at the
+ *                      byte encode. A float and a byte entry of one channel are cached apart, and
+ *                      an entry keeps its format until it is dropped. Alpha stays straight, like
+ *                      the byte canvas; the float data carries no colorspace encoding.
  * \return null when the stack cannot be composited, which is the caller's cue to fall back.
  */
 ImBuf *BKE_paint_material_composite_cache_ensure(
@@ -1786,7 +1794,8 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
     rcti *r_changed_region = nullptr,
     FunctionRef<bool(Vector<PaintMaterialCompositeImageLayer> &)> full_layers = {},
     const int2 &output_size = int2(0),
-    int tile_number = PAINT_TILE_NUMBER_AUTO);
+    int tile_number = PAINT_TILE_NUMBER_AUTO,
+    bool float_output = false);
 
 /**
  * Mark the whole composite of \a ma out of date, or of every material when \a ma is null.
@@ -1814,19 +1823,25 @@ void BKE_paint_material_composite_cache_free_material(const Material &ma);
 void BKE_paint_material_composite_cache_free_all();
 
 /** Whether a composite of \a channel of \a ma is currently cached. Exists for tests. */
-bool BKE_paint_material_composite_cache_contains(const Material &ma, int channel);
+bool BKE_paint_material_composite_cache_contains(const Material &ma,
+                                                 int channel,
+                                                 bool float_output = false);
 
 /**
  * The cached composite of \a channel of \a ma without recomputing anything, or null when nothing is
  * cached. The throttle of the interactive Gradient preview is the caller: it keeps the previous
  * pixels on screen between refreshes instead of rebuilding them for every mouse step.
  *
+ * \param float_output: ask for the float entry of the channel rather than its byte one; the two are
+ *                      cached apart, exactly as for #BKE_paint_material_composite_cache_ensure.
+ *
  * The returned buffer is owned by the cache; do not free it, and reference it if it outlives the
  * next cache call, exactly as for #BKE_paint_material_composite_cache_ensure.
  */
 ImBuf *BKE_paint_material_composite_cache_peek(const Material &ma,
                                                int channel,
-                                               uint64_t *r_revision = nullptr);
+                                               uint64_t *r_revision = nullptr,
+                                               bool float_output = false);
 
 /**
  * The canvas of \a channel of \a ma and the size its cached buffer is stored at, which is a
@@ -1840,13 +1855,17 @@ ImBuf *BKE_paint_material_composite_cache_peek(const Material &ma,
  * The output size comes with it because the drag's own octave is chosen from what the previous frame
  * used, and this entry is where that is remembered.
  *
+ * \param float_output: measure the float entry of the channel rather than its byte one; the two are
+ *                      cached apart and can sit at different octaves.
+ *
  * \return false when nothing of that channel is cached, which is the caller's cue to measure
  *         whatever it would have measured anyway.
  */
 bool BKE_paint_material_composite_cache_sizes_get(const Material &ma,
                                                  int channel,
                                                  int2 &r_canvas,
-                                                 int2 &r_output);
+                                                 int2 &r_output,
+                                                 bool float_output = false);
 
 /**
  * The identity of a surface map. No pointers: the evaluated and the original copy of an object

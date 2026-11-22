@@ -1152,8 +1152,8 @@ enum eMaterialPaintLayerFilter : int16_t {
    */
   MA_PAINT_LAYER_FILTER_COLOR_MATCH = 22,
   /**
-   * Scale the colours below by a power of two, shift them and raise the result to a gamma: what an
-   * exposure control does to an image, per channel, in scene linear.
+   * Scale the colours below by a power of two and raise the result to a gamma: what an exposure
+   * control does to an image, per channel, in scene linear.
    */
   MA_PAINT_LAYER_FILTER_EXPOSURE = 23,
   /**

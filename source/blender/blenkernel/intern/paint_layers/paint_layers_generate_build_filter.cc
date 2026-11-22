@@ -1570,9 +1570,9 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
       return true;
     }
     case MA_PAINT_LAYER_FILTER_EXPOSURE: {
-      /* `lerp(c, (c * 2^exposure + offset)^(1 / gamma), opacity)`: the function the CPU composite
-       * applies, every parameter an input of the group so an edit of one is a value and not a
-       * different graph. The stop scale is a power of a constant two, and the Gamma node leaves a
+      /* `lerp(c, (c * 2^exposure)^(1 / gamma), opacity)`: the function the CPU composite applies,
+       * every parameter an input of the group so an edit of one is a value and not a different
+       * graph. The stop scale is a power of a constant two, and the Gamma node leaves a
        * non-positive value as it is -- which is also what keeps a colour above one above one at the
        * default gamma, so the filter brightens an HDR map instead of clipping what it holds. */
       Vector<bNodeTreeInterfaceSocket *> *params = effect_param_inputs_.lookup_ptr(&effect);
@@ -1603,17 +1603,11 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
       if (scale.socket == nullptr || inv_gamma.socket == nullptr) {
         return discard();
       }
-      bNode *shifted = vector_math_node_add(
-          tree, grid_, nodes, NODE_VECTOR_MATH_MULTIPLY_ADD, content, scale);
-      bNodeSocket *offset_in = (shifted != nullptr) ? socket_in(*shifted, "Vector_002") : nullptr;
-      if (offset_in == nullptr) {
+      bNode *scaled = vector_math_node_add(
+          tree, grid_, nodes, NODE_VECTOR_MATH_MULTIPLY, content, scale);
+      if (scaled == nullptr) {
         return discard();
       }
-      bke::node_add_link(tree,
-                         *param[PAINT_LAYER_EXPOSURE_OFFSET].node,
-                         *param[PAINT_LAYER_EXPOSURE_OFFSET].socket,
-                         *shifted,
-                         *offset_in);
 
       bNode *gamma = bke::node_add_static_node(nullptr, tree, SH_NODE_GAMMA);
       if (gamma == nullptr) {
@@ -1628,7 +1622,7 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
         return discard();
       }
       bke::node_add_link(
-          tree, *shifted, *socket_out(*shifted, "Vector"), *gamma, *gamma_color);
+          tree, *scaled, *socket_out(*scaled, "Vector"), *gamma, *gamma_color);
       bke::node_add_link(
           tree, *inv_gamma.node, *inv_gamma.socket, *gamma, *gamma_exponent);
 

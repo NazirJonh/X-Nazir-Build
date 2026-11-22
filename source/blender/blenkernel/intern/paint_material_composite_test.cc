@@ -25,7 +25,10 @@
 #include "BKE_paint_material_combined.hh"
 #include "BKE_paint_material_composite.hh"
 
+#include "paint_layers/paint_layers_kind.hh"
+
 #include "BLI_listbase_iterator.hh"
+#include "BLI_math_color.h"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector_types.hh"
 #include "BLI_rect.h"
@@ -2693,6 +2696,74 @@ TEST_F(PaintLayersCompositeTest, cache_lays_the_rows_over_the_channels_neutral_v
       BKE_paint_layers_channel_set_value(*ma, top, eMaterialPaintChannel(channel), quarter));
   ASSERT_TRUE(BKE_paint_layers_composite_image_layers(*ma, channel, layers));
   EXPECT_NE(BKE_paint_material_composite_stack_hash(layers), value_hash);
+}
+
+TEST_F(PaintLayersCompositeTest, the_float_cache_keeps_an_exposure_above_one_the_byte_clamps_it)
+{
+  /* Grey 230 decodes to scene-linear ~0.79, so one stop doubles it past one: exactly the value the
+   * Combined preview has to keep and the channel pass's byte encode clips. */
+  Image *map = add_solid_image("Row", 8, 230, 230, 230, 255);
+  MaterialPaintLayer *row = add_paint_layer("Row", map);
+  ASSERT_NE(row, nullptr);
+  MaterialPaintLayer *exposure = BKE_paint_layers_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_EXPOSURE);
+  ASSERT_NE(exposure, nullptr);
+  ASSERT_TRUE(paint_layer_kind_param_set(*exposure, PAINT_LAYER_EXPOSURE_EXPOSURE, 1.0f));
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(
+      BKE_paint_layers_composite_image_layers(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  const uint64_t stack_hash = BKE_paint_material_composite_stack_hash(layers);
+
+  /* The float entry: the straight scene-linear evaluation, unclamped. */
+  ImBuf *floated = BKE_paint_material_composite_cache_ensure(*ma,
+                                                            PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                                            layers,
+                                                            stack_hash,
+                                                            nullptr,
+                                                            nullptr,
+                                                            nullptr,
+                                                            {},
+                                                            int2(0),
+                                                            PAINT_TILE_NUMBER_AUTO,
+                                                            true);
+  ASSERT_NE(floated, nullptr);
+  ASSERT_NE(floated->float_data(), nullptr);
+  const float linear = srgb_to_linearrgb(230.0f / 255.0f);
+  EXPECT_NEAR(floated->float_data()[0], 2.0f * linear, 0.02f);
+  EXPECT_GT(floated->float_data()[0], 1.0f);
+
+  /* The byte entry of the same channel is a different row of the cache, and its encode clips. */
+  ImBuf *byte_buf = BKE_paint_material_composite_cache_ensure(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, stack_hash);
+  ASSERT_NE(byte_buf, nullptr);
+  ASSERT_NE(byte_buf->byte_data(), nullptr);
+  EXPECT_EQ(byte_buf->byte_data()[0], 255);
+
+  /* Both keep being served apart: re-asking returns the same buffer each mode built. */
+  ImBuf *floated_again = BKE_paint_material_composite_cache_ensure(*ma,
+                                                                  PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                                                  layers,
+                                                                  stack_hash,
+                                                                  nullptr,
+                                                                  nullptr,
+                                                                  nullptr,
+                                                                  {},
+                                                                  int2(0),
+                                                                  PAINT_TILE_NUMBER_AUTO,
+                                                                  true);
+  EXPECT_EQ(floated_again, floated);
+  /* The format is part of the entry's identity, so the queries of the cache see it too. */
+  EXPECT_TRUE(BKE_paint_material_composite_cache_contains(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, true));
+  EXPECT_TRUE(BKE_paint_material_composite_cache_contains(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false));
+  int2 float_canvas(0);
+  int2 float_output(0);
+  EXPECT_TRUE(BKE_paint_material_composite_cache_sizes_get(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, float_canvas, float_output, true));
+  EXPECT_EQ(float_output.x, 8);
+  EXPECT_EQ(float_output.y, 8);
 }
 
 TEST_F(PaintLayersCompositeTest, stack_hash_follows_the_order_of_the_rows)

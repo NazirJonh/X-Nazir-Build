@@ -12,6 +12,7 @@
 
 #include "DRW_render.hh"
 
+#include "DNA_scene_types.h"
 #include "DNA_space_types.h"
 #include "DNA_view3d_types.h"
 
@@ -64,6 +65,16 @@ static eDRWColorManagementType drw_color_management_type_for_v3d(const Scene &sc
 static eDRWColorManagementType drw_color_management_type_for_space_image(const SpaceImage &sima)
 {
   const Image *image = sima.image;
+
+  /* The Combined pass previews the material's layer stack beside the 3D viewport, so it shows
+   * through the same view transform and look the viewport's material shading uses; the scene's
+   * exposure and curves stay out of it for the same reason. The channel passes keep the default
+   * transform: their byte canvases are display-referred by design. */
+  if ((sima.flag & SI_PAINT_COMPOSITE_MODE) != 0 &&
+      sima.material_paint_pass == PAINT_LAYER_PASS_COMBINED && image != nullptr)
+  {
+    return eDRWColorManagementType::ViewTransformAndLook;
+  }
 
   /* Use inverse logic as there isn't a setting for `Color & Alpha`. */
   const eSpaceImage_Flag display_channels_mode = static_cast<eSpaceImage_Flag>(sima.flag);

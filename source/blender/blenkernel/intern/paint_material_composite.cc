@@ -2090,18 +2090,40 @@ void BKE_paint_material_composite_linear_to_byte(MutableSpan<float> linear,
                                      nullptr;
   const bool encode = BKE_paint_material_composite_colorspace_is_converted(colorspace);
 
-  const int64_t area_width = BLI_rcti_size_x(&area);
-  uchar *pixels = r_dst.byte_data_for_write();
-  for (int y = area.ymin; y < area.ymax; y++) {
-    float *row = linear.data() + int64_t(y - area.ymin) * area_width * 4;
-    if (encode) {
-      IMB_colormanagement_scene_linear_to_colorspace(row, int(area_width), 1, 4, colorspace);
-    }
-    uchar *out = pixels + (int64_t(y) * r_dst.x + area.xmin) * 4;
-    for (int64_t i = 0; i < area_width * 4; i++) {
-      out[i] = uchar(clamp_i(int(row[i] * 255.0f + 0.5f), 0, 255));
-    }
+  const int area_width = BLI_rcti_size_x(&area);
+  const int rows_num = BLI_rcti_size_y(&area);
+  if (area_width <= 0 || rows_num <= 0) {
+    return;
   }
+  uchar *pixels = r_dst.byte_data_for_write();
+  if (pixels == nullptr) {
+    return;
+  }
+
+  /* Rows are independent: convert and quantize them in parallel, as the evaluation above already
+   * does. Each band gets its own OCIO call over its packed rows, so the conversion is spread across
+   * the threads too; a CPUProcessor is immutable, so the same one may convert the bands
+   * concurrently. The math per texel is the one a whole-area call would do. The source is packed to
+   * the area while the destination is a window of the frame, so the row offsets differ by
+   * `area.xmin` and the frame's own width. */
+  const int grain = std::max(1, 65536 / std::max(area_width, 1));
+  threading::parallel_for(IndexRange(rows_num), grain, [&](const IndexRange range) {
+    if (encode) {
+      IMB_colormanagement_scene_linear_to_colorspace(
+          linear.data() + range.first() * int64_t(area_width) * 4,
+          area_width,
+          int(range.size()),
+          4,
+          colorspace);
+    }
+    for (const int row_index : range) {
+      const float *row = linear.data() + int64_t(row_index) * area_width * 4;
+      uchar *out = pixels + (int64_t(area.ymin + row_index) * r_dst.x + area.xmin) * 4;
+      for (int64_t i = 0; i < int64_t(area_width) * 4; i++) {
+        out[i] = uchar(clamp_i(int(row[i] * 255.0f + 0.5f), 0, 255));
+      }
+    }
+  });
 }
 
 /** \} */
@@ -3910,18 +3932,53 @@ struct CompositeCacheKey {
    * everywhere.
    */
   int tile_number = PAINT_TILE_NUMBER_BASE;
+  /**
+   * Byte when false, float when true. The byte canvas is display-referred: it encodes to the
+   * channel's colorspace and clamps at the encode, which is what the Image Editor's channel passes
+   * show. The float canvas holds the straight scene-linear evaluation unclamped, which is what the
+   * Combined preview shades from -- the same scene-referred range the viewport's live graph has.
+   * One channel can carry both, so the field rides the key.
+   */
+  bool float_format = false;
 
   uint64_t hash() const
   {
-    return get_default_hash(this->material_session_uid, this->channel, this->tile_number);
+    return get_default_hash(
+        this->material_session_uid, this->channel, this->tile_number, this->float_format);
   }
 
   friend bool operator==(const CompositeCacheKey &a, const CompositeCacheKey &b)
   {
     return a.material_session_uid == b.material_session_uid && a.channel == b.channel &&
-           a.tile_number == b.tile_number;
+           a.tile_number == b.tile_number && a.float_format == b.float_format;
   }
 };
+
+/**
+ * The key of the entry of \a channel of \a ma.
+ *
+ * Every construction of a key goes through here, so a field added to #CompositeCacheKey cannot be
+ * set by one path and forgotten by another -- the query paths
+ * (#BKE_paint_material_composite_cache_contains, #BKE_paint_material_composite_cache_peek,
+ * #BKE_paint_material_composite_cache_sizes_get) and the evaluating one
+ * (#BKE_paint_material_composite_cache_ensure) have to agree on the whole key.
+ *
+ * \param tile_number: the tile to read. #PAINT_TILE_NUMBER_AUTO resolves to the base square here,
+ *                     because no surface or object rides a cache call.
+ * \param float_format: the byte canvas when false, the float scene-linear one when true.
+ */
+static CompositeCacheKey composite_cache_key(const Material &ma,
+                                             const int channel,
+                                             const int tile_number,
+                                             const bool float_format)
+{
+  CompositeCacheKey key;
+  key.material_session_uid = ma.id.session_uid;
+  key.channel = channel;
+  key.tile_number = BKE_paint_layers_tile_resolve(tile_number, nullptr, nullptr);
+  key.float_format = float_format;
+  return key;
+}
 
 using bke::paint_material_cache::ImBufPtr;
 using bke::paint_material_cache::SubscriptionMap;
@@ -3994,9 +4051,18 @@ struct CompositeCache {
 
 static CompositeCache g_cache;
 
+/** Bytes per RGBA texel of a byte and of a float composite canvas. */
+static constexpr int64_t COMPOSITE_BYTE_TEXEL_BYTES = 4;
+static constexpr int64_t COMPOSITE_FLOAT_TEXEL_BYTES = 4 * sizeof(float);
+
 static int64_t composite_entry_size_in_bytes(const CompositeCacheEntry &entry)
 {
-  return int64_t(entry.width) * entry.height * 4;
+  /* Decided from the buffer rather than remembered, so the count follows whatever the entry
+   * actually holds. */
+  const bool is_float = entry.ibuf != nullptr && entry.ibuf->float_data() != nullptr;
+  const int64_t bytes_per_texel = is_float ? COMPOSITE_FLOAT_TEXEL_BYTES :
+                                             COMPOSITE_BYTE_TEXEL_BYTES;
+  return int64_t(entry.width) * entry.height * bytes_per_texel;
 }
 
 /**
@@ -4012,6 +4078,18 @@ static void composite_entry_reset(CompositeCacheEntry &entry)
   entry.partial_update_users.clear();
 }
 
+/** Bytes per texel a full channel set occupies: the color channels are the float ones. */
+static int64_t composite_one_set_bytes_per_texel()
+{
+  int64_t bytes_per_texel = 0;
+  for (const int i : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    bytes_per_texel += BKE_paint_material_channel_info(eMaterialPaintChannel(i)).is_color ?
+                           COMPOSITE_FLOAT_TEXEL_BYTES :
+                           COMPOSITE_BYTE_TEXEL_BYTES;
+  }
+  return bytes_per_texel;
+}
+
 /**
  * The floor is #COMPOSITE_CACHE_BUDGET_BYTES. Above it, the budget grows to hold one composite per
  * channel and tile at the size being gathered: a larger material's whole set would otherwise evict
@@ -4021,7 +4099,7 @@ static void composite_cache_enforce_budget(const CompositeCacheKey &keep,
                                            const int width,
                                            const int height)
 {
-  const int64_t one_set_bytes = int64_t(width) * height * 4 * PAINT_MATERIAL_CHANNEL_NUM;
+  const int64_t one_set_bytes = int64_t(width) * height * composite_one_set_bytes_per_texel();
   const int64_t budget_bytes = std::max(COMPOSITE_CACHE_BUDGET_BYTES, one_set_bytes);
   bke::paint_material_cache::enforce_budget(
       g_cache.entries, keep, budget_bytes, composite_entry_size_in_bytes);
@@ -4111,7 +4189,8 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
     rcti *r_changed_region,
     FunctionRef<bool(Vector<PaintMaterialCompositeImageLayer> &)> full_layers,
     const int2 &output_size,
-    const int tile_number)
+    const int tile_number,
+    const bool float_output)
 {
   bke::paint_perf::ScopedTimer perf_timer("composite_cache_ensure");
   if (r_changed_region != nullptr) {
@@ -4139,11 +4218,7 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
   int out_width = width;
   int out_height = height;
 
-  CompositeCacheKey key;
-  key.material_session_uid = ma.id.session_uid;
-  key.channel = channel;
-  /* No surface or object rides this call, so an unset tile is the base square. */
-  key.tile_number = BKE_paint_layers_tile_resolve(tile_number, nullptr, nullptr);
+  const CompositeCacheKey key = composite_cache_key(ma, channel, tile_number, float_output);
 
   CompositeCacheEntry &entry = g_cache.entries.lookup_or_add_default(key);
   entry.last_use = ++g_cache.use_counter;
@@ -4160,7 +4235,10 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
   entry.canvas_height = height;
   if (size_changed) {
     composite_entry_reset(entry);
-    entry.ibuf.reset(IMB_allocImBuf(uint(out_width), uint(out_height), ImBufFlags::ByteData));
+    entry.ibuf.reset(IMB_allocImBuf(
+        uint(out_width),
+        uint(out_height),
+        float_output ? ImBufFlags::FloatData : ImBufFlags::ByteData));
     if (entry.ibuf == nullptr) {
       g_cache.entries.remove(key);
       return nullptr;
@@ -4221,12 +4299,23 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
                   BLI_rcti_size_x(&entry.dirty_region),
                   BLI_rcti_size_y(&entry.dirty_region));
   if (rebuild_all) {
-    /* Only with the stack: the bottom layer decides the colorspace, and a region refresh cannot
-     * have changed which layer that is. Non-Color layers -- Roughness, Metallic, a normal map --
-     * must not be handed on as sRGB, or the composite is display-transformed on its way to the
-     * screen while the layer it is made of is not. */
-    BLI_assert(byte_colorspace != nullptr);
-    IMB_colormanagement_assign_byte_colorspace(entry.ibuf.get(), byte_colorspace);
+    if (float_output) {
+      /* Scene linear, so the display transform applies to it as it does to a render result. The
+       * byte canvas of the channel passes encodes to the layer's colorspace instead; this one
+       * holds the straight scene-linear evaluation unclamped, which is what lets the Combined
+       * preview keep a filter's HDR output the way the viewport's live graph does. */
+      IMB_colormanagement_assign_float_colorspace(
+          entry.ibuf.get(),
+          IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_SCENE_LINEAR));
+    }
+    else {
+      /* Only with the stack: the bottom layer decides the colorspace, and a region refresh cannot
+       * have changed which layer that is. Non-Color layers -- Roughness, Metallic, a normal map --
+       * must not be handed on as sRGB, or the composite is display-transformed on its way to the
+       * screen while the layer it is made of is not. */
+      BLI_assert(byte_colorspace != nullptr);
+      IMB_colormanagement_assign_byte_colorspace(entry.ibuf.get(), byte_colorspace);
+    }
   }
 
   if (rebuild_all || rebuild_region) {
@@ -4254,13 +4343,35 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
     bool eval_ok;
     {
       bke::paint_perf::ScopedTimer perf_eval("composite_eval_images");
-      eval_ok = BKE_paint_material_composite_eval_images(eval_layers,
-                                                         entry.ibuf.get(),
-                                                         region,
-                                                         r_stats,
-                                                         has_bottom ? bottom_color : nullptr,
-                                                         out_width,
-                                                         out_height);
+      if (float_output) {
+        /* The float canvas takes the straight scene-linear evaluation directly: no encoding, and
+         * no clamp -- a filter that overshoots (Exposure, Add) keeps its HDR value. The byte
+         * canvas clamps at its encode instead, which is its own contract. The region still bounds
+         * what gets recomputed; the target describes the whole buffer, like the byte path's. */
+        float *dst_pixels = entry.ibuf->float_data_for_write();
+        if (dst_pixels == nullptr) {
+          g_cache.entries.remove(key);
+          return nullptr;
+        }
+        const MutableSpan<float> storage(dst_pixels, int64_t(entry.ibuf->x) * entry.ibuf->y * 4);
+        eval_ok = BKE_paint_material_composite_eval_images_linear(
+            eval_layers,
+            PaintMaterialCompositeLinearTarget::frame(storage, entry.ibuf->x),
+            region,
+            r_stats,
+            has_bottom ? bottom_color : nullptr,
+            out_width,
+            out_height);
+      }
+      else {
+        eval_ok = BKE_paint_material_composite_eval_images(eval_layers,
+                                                           entry.ibuf.get(),
+                                                           region,
+                                                           r_stats,
+                                                           has_bottom ? bottom_color : nullptr,
+                                                           out_width,
+                                                           out_height);
+      }
       perf_eval.note("channel=%d region=%s gradient_items=%d gradient_samples=%lld",
                      channel,
                      region != nullptr ? "partial" : "full",
@@ -4343,21 +4454,22 @@ void BKE_paint_material_composite_cache_free_all()
   g_cache.entries.clear();
 }
 
-bool BKE_paint_material_composite_cache_contains(const Material &ma, const int channel)
+bool BKE_paint_material_composite_cache_contains(const Material &ma,
+                                                 const int channel,
+                                                 const bool float_output)
 {
-  CompositeCacheKey key;
-  key.material_session_uid = ma.id.session_uid;
-  key.channel = channel;
+  const CompositeCacheKey key = composite_cache_key(
+      ma, channel, PAINT_TILE_NUMBER_BASE, float_output);
   return g_cache.entries.contains(key);
 }
 
 ImBuf *BKE_paint_material_composite_cache_peek(const Material &ma,
                                                const int channel,
-                                               uint64_t *r_revision)
+                                               uint64_t *r_revision,
+                                               const bool float_output)
 {
-  CompositeCacheKey key;
-  key.material_session_uid = ma.id.session_uid;
-  key.channel = channel;
+  const CompositeCacheKey key = composite_cache_key(
+      ma, channel, PAINT_TILE_NUMBER_BASE, float_output);
   CompositeCacheEntry *entry = g_cache.entries.lookup_ptr(key);
   if (entry == nullptr || entry->ibuf == nullptr) {
     return nullptr;
@@ -4373,11 +4485,11 @@ ImBuf *BKE_paint_material_composite_cache_peek(const Material &ma,
 bool BKE_paint_material_composite_cache_sizes_get(const Material &ma,
                                                  const int channel,
                                                  int2 &r_canvas,
-                                                 int2 &r_output)
+                                                 int2 &r_output,
+                                                 const bool float_output)
 {
-  CompositeCacheKey key;
-  key.material_session_uid = ma.id.session_uid;
-  key.channel = channel;
+  const CompositeCacheKey key = composite_cache_key(
+      ma, channel, PAINT_TILE_NUMBER_BASE, float_output);
   const CompositeCacheEntry *entry = g_cache.entries.lookup_ptr(key);
   if (entry == nullptr || entry->ibuf == nullptr) {
     return false;

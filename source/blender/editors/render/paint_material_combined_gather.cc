@@ -700,7 +700,13 @@ ImBuf *combined_preview_ensure(Main &bmain,
             BKE_paint_layers_is_layered(ma) ?
                 FunctionRef<bool(Vector<PaintMaterialCompositeImageLayer> &)>(describe_full) :
                 FunctionRef<bool(Vector<PaintMaterialCompositeImageLayer> &)>(),
-            stack_output_size);
+            stack_output_size,
+            PAINT_TILE_NUMBER_AUTO,
+            /* The color channels shade scene-referred, like the viewport's live graph: their
+             * composites are kept float and unclamped, so a filter that overshoots (Exposure, Add)
+             * keeps its HDR value. The scalar channels stay byte -- their range is [0, 1] by
+             * definition, and the byte canvas costs a quarter of the memory. */
+            combined_channel_is_color(channel));
         perf_channel.note("channel=%d layers=%d changed=%dx%d out=%dx%d",
                           int(channel),
                           int(layers.size()),
@@ -2047,11 +2053,12 @@ void combined_preview_gpu_verify(Main &bmain,
     return;
   }
 
-  /* Compared as block means. The CPU reads 8-bit composites at the nearest texel and the GPU the
-   * maps with bilinear filtering at the base level, so in a detailed map -- a normal map above all
-   * -- two single pixels can differ a lot without either being wrong. Averaged over a block both
-   * sides measure the same thing, and what remains is a difference in the result. Relative above
-   * one, where a highlight's absolute error means little. */
+  /* Compared as block means. The CPU reads the channel composites at the nearest texel -- float
+   * scene-linear for the color channels, 8-bit for the scalar ones -- and the GPU the maps with
+   * bilinear filtering at the base level, so in a detailed map -- a normal map above all -- two
+   * single pixels can differ a lot without either being wrong. Averaged over a block both sides
+   * measure the same thing, and what remains is a difference in the result. Relative above one,
+   * where a highlight's absolute error means little. */
   constexpr int block = 8;
   int64_t blocks = 0;
   int64_t bad = 0;
@@ -2159,19 +2166,33 @@ void combined_preview_gpu_verify(Main &bmain,
                                                                         nullptr,
                                                                         nullptr,
                                                                         int2(0),
-                                                                        tile_number);
-      if (composite != nullptr && composite->byte_data() != nullptr && composite->x > 0) {
-        const uchar *p = composite->byte_data() +
-                         (int64_t(int(worst_uv.y * composite->y)) * composite->x +
-                          int(worst_uv.x * composite->x)) *
+                                                                        tile_number,
+                                                                        combined_channel_is_color(
+                                                                            channel));
+      if (composite != nullptr && composite->x > 0) {
+        if (composite->float_data() != nullptr) {
+          /* A color channel's float composite is straight scene-linear, read as it is: the HDR a
+           * filter left above one is exactly what the GPU accumulator holds. */
+          const float *p = composite->float_data() +
+                           (int64_t(int(worst_uv.y * composite->y)) * composite->x +
+                            int(worst_uv.x * composite->x)) *
                              4;
-        cpu_value = float4(float(p[0]), float(p[1]), float(p[2]), float(p[3])) * (1.0f / 255.0f);
-        if (combined_channel_is_color(channel) && combined_ibuf_is_srgb(*composite)) {
-          cpu_value.x = srgb_to_linearrgb(cpu_value.x);
-          cpu_value.y = srgb_to_linearrgb(cpu_value.y);
-          cpu_value.z = srgb_to_linearrgb(cpu_value.z);
+          cpu_value = float4(p[0], p[1], p[2], p[3]);
+          cpu_known = true;
         }
-        cpu_known = true;
+        else if (composite->byte_data() != nullptr) {
+          const uchar *p = composite->byte_data() +
+                           (int64_t(int(worst_uv.y * composite->y)) * composite->x +
+                            int(worst_uv.x * composite->x)) *
+                             4;
+          cpu_value = float4(float(p[0]), float(p[1]), float(p[2]), float(p[3])) * (1.0f / 255.0f);
+          if (combined_channel_is_color(channel) && combined_ibuf_is_srgb(*composite)) {
+            cpu_value.x = srgb_to_linearrgb(cpu_value.x);
+            cpu_value.y = srgb_to_linearrgb(cpu_value.y);
+            cpu_value.z = srgb_to_linearrgb(cpu_value.z);
+          }
+          cpu_known = true;
+        }
       }
     }
     if (cpu_known) {

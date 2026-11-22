@@ -103,11 +103,9 @@ enum PaintLayerInvertParam : int {
 enum PaintLayerExposureParam : int {
   /** The power of two the colour is scaled by: one stop per unit. */
   PAINT_LAYER_EXPOSURE_EXPOSURE = 0,
-  /** What the scaled colour rises or falls by, in scene linear. */
-  PAINT_LAYER_EXPOSURE_OFFSET = 1,
   /** The power every positive value is raised to, read as one over it. */
-  PAINT_LAYER_EXPOSURE_GAMMA = 2,
-  PAINT_LAYER_EXPOSURE_PARAM_NUM = 3,
+  PAINT_LAYER_EXPOSURE_GAMMA = 1,
+  PAINT_LAYER_EXPOSURE_PARAM_NUM = 2,
 };
 
 /** The positions of the Posterize filter's parameters in its schema. */
@@ -390,11 +388,10 @@ inline void paint_layer_invert_apply(float rgb[3],
 }
 
 /**
- * The Exposure filter applied to \a rgb in place: the colour scaled by `2^exposure`, shifted by the
- * offset, then raised to one over the gamma. The power is the Gamma node's own function -- a
- * non-positive value is left as it is -- so a default gamma leaves a colour above one above one:
- * the filter brightens an HDR map instead of clipping what it already holds. Alpha is not part of
- * \a rgb and so stays untouched.
+ * The Exposure filter applied to \a rgb in place: the colour scaled by `2^exposure`, then raised to
+ * one over the gamma. The power is the Gamma node's own function -- a non-positive value is left as
+ * it is -- so a default gamma leaves a colour above one above one: the filter brightens an HDR map
+ * instead of clipping what it already holds. Alpha is not part of \a rgb and so stays untouched.
  */
 inline void paint_layer_exposure_apply(
     float rgb[3], const float params[PAINT_LAYER_EXPOSURE_PARAM_NUM])
@@ -402,7 +399,7 @@ inline void paint_layer_exposure_apply(
   const float scale = powf(2.0f, params[PAINT_LAYER_EXPOSURE_EXPOSURE]);
   const float exponent = 1.0f / params[PAINT_LAYER_EXPOSURE_GAMMA];
   for (int i = 0; i < 3; i++) {
-    const float scaled = rgb[i] * scale + params[PAINT_LAYER_EXPOSURE_OFFSET];
+    const float scaled = rgb[i] * scale;
     rgb[i] = (scaled > 0.0f) ? powf(scaled, exponent) : scaled;
   }
 }

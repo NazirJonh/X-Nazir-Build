@@ -239,6 +239,38 @@ TEST(paint_material_combined, emission_strength_scales_the_emission)
   IMB_freeImBuf(scaled);
 }
 
+TEST(paint_material_combined, a_float_base_input_keeps_its_hdr_value)
+{
+  /* The Combined preview shades scene-referred, so a float base input -- which is what the
+   * composite cache's float mode hands over -- lights past one the way the viewport's live graph
+   * does. Clamping it here would clip the very HDR the float mode exists to keep. */
+  CombinedInputs inputs = test_default_inputs(2);
+  ImBuf *base = test_float_ibuf(2);
+  float *data = base->float_data_for_write();
+  for (const int64_t i : IndexRange(int64_t(2) * 2)) {
+    data[i * 4 + 0] = 1.5f;
+    data[i * 4 + 1] = 1.5f;
+    data[i * 4 + 2] = 1.5f;
+    data[i * 4 + 3] = 1.0f;
+  }
+  inputs.channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].ibuf = base;
+  inputs.channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].is_srgb = false;
+  inputs.channels[PAINT_MATERIAL_CHANNEL_SPECULAR].constant = float4(0.0f);
+  inputs.channels[PAINT_MATERIAL_CHANNEL_ROUGHNESS].constant = float4(1.0f);
+
+  ImBuf *dst = test_float_ibuf(2);
+  ASSERT_TRUE(BKE_paint_material_combined_eval(inputs, test_single_light(), dst));
+
+  /* N == L == V with the specular zeroed: the diffuse term is the base colour outright, HDR
+   * included. */
+  const float *px = dst->float_data();
+  EXPECT_NEAR(px[0], 1.5f, 1e-4f);
+  EXPECT_NEAR(px[1], 1.5f, 1e-4f);
+  EXPECT_NEAR(px[2], 1.5f, 1e-4f);
+  IMB_freeImBuf(base);
+  IMB_freeImBuf(dst);
+}
+
 TEST(paint_material_combined, alpha_passes_through_unmodified)
 {
   CombinedInputs inputs = test_default_inputs(2);

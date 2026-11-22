@@ -758,20 +758,19 @@ float4 apply_filter(int filter_kind,
       result = apply_curves(lut_tx, rgb);
       break;
     case COMBINED_FILTER_EXPOSURE: {
-      /* The CPU's `paint_layer_exposure_apply`: the colour scaled by `2^exposure`, shifted by the
-       * offset, then raised to one over the gamma. A non-positive value is left as it is (the Gamma
-       * node's own rule), so an HDR texel above one stays above one. `p0.x` is exposure, `p0.y` the
-       * offset and `p0.z` the gamma; the gamma never reaches zero (the schema clamps it to 0.1 at
-       * the least), so the reciprocal is safe. Per component: the vectorized pow is not an overload
-       * every backend has. */
+      /* The CPU's `paint_layer_exposure_apply`: the colour scaled by `2^exposure`, then raised to
+       * one over the gamma. A non-positive value is left as it is (the Gamma node's own rule), so
+       * an HDR texel above one stays above one. `p0.x` is exposure and `p0.y` the gamma; the gamma
+       * never reaches zero (the schema clamps it to 0.1 at the least), so the reciprocal is safe.
+       * Per component: the vectorized pow is not an overload every backend has. */
       float scale = pow(2.0f, p0.x);
-      float exponent = 1.0f / p0.z;
-      float shifted_x = rgb.x * scale + p0.y;
-      float shifted_y = rgb.y * scale + p0.y;
-      float shifted_z = rgb.z * scale + p0.y;
-      result = float3(shifted_x > 0.0f ? pow(shifted_x, exponent) : shifted_x,
-                      shifted_y > 0.0f ? pow(shifted_y, exponent) : shifted_y,
-                      shifted_z > 0.0f ? pow(shifted_z, exponent) : shifted_z);
+      float exponent = 1.0f / p0.y;
+      float scaled_x = rgb.x * scale;
+      float scaled_y = rgb.y * scale;
+      float scaled_z = rgb.z * scale;
+      result = float3(scaled_x > 0.0f ? pow(scaled_x, exponent) : scaled_x,
+                      scaled_y > 0.0f ? pow(scaled_y, exponent) : scaled_y,
+                      scaled_z > 0.0f ? pow(scaled_z, exponent) : scaled_z);
       break;
     }
     case COMBINED_FILTER_CHANNEL_MIXER: {
@@ -3726,15 +3725,18 @@ void shade_comp([[resource_table]] ShadeResources &srt,
     return;
   }
 
-  /* The CPU shades the byte composite of each channel, so a stack that overshoots (Add, Subtract)
-   * is already clamped to [0, 1] there; the accumulators here are not. */
-  float4 base = clamp(texelFetch(srt.base_tx, texel, 0), float4(0.0f), float4(1.0f));
+  /* The CPU shades the color channels from their float composites, which hold the straight
+   * scene-linear evaluation unclamped -- so a stack that overshoots (Add, Exposure) keeps its HDR
+   * value here too, and the view transform, not this pass, decides what a value above one looks
+   * like. The scalar channels are byte composites of a [0, 1] range on both sides, so their clamps
+   * mirror the CPU exactly. */
+  float4 base = texelFetch(srt.base_tx, texel, 0);
   float metallic = clamp(texelFetch(srt.metallic_tx, texel, 0).x, 0.0f, 1.0f);
   float roughness = clamp(texelFetch(srt.roughness_tx, texel, 0).x, 0.0f, 1.0f);
   float specular = clamp(texelFetch(srt.specular_tx, texel, 0).x, 0.0f, 1.0f);
   float ao_map = clamp(texelFetch(srt.ao_tx, texel, 0).x, 0.0f, 1.0f);
   float alpha = clamp(texelFetch(srt.alpha_tx, texel, 0).x, 0.0f, 1.0f);
-  float4 emission = clamp(texelFetch(srt.emission_tx, texel, 0), float4(0.0f), float4(1.0f));
+  float4 emission = texelFetch(srt.emission_tx, texel, 0);
 
   float4 encoded = clamp(texelFetch(srt.normal_tx, texel, 0), float4(0.0f), float4(1.0f));
   float3 normal = (srt.normal_is_encoded != 0) ? encoded.xyz * 2.0f - 1.0f : encoded.xyz;

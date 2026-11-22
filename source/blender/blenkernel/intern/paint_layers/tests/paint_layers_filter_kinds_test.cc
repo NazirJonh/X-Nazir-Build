@@ -531,11 +531,10 @@ TEST_F(PaintLayersFilterKindsTest, exposure_kind_is_a_pointwise_filter_with_a_fl
   EXPECT_FALSE(paint_layer_kind_has_flag(*exposure, PAINT_LAYER_KIND_NEEDS_BAKE));
   EXPECT_FALSE(paint_layer_kind_has_flag(*exposure, PAINT_LAYER_KIND_NO_GPU_BRANCH));
 
-  /* Three float parameters: the exposure and the offset default to a no-op, the gamma to one. */
+  /* Two float parameters: the exposure defaults to a no-op, the gamma to one. */
   EXPECT_EQ(paint_layer_kind_param_type(*exposure, PAINT_LAYER_EXPOSURE_EXPOSURE),
             PaintLayerKindParamType::Float);
   EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*exposure, PAINT_LAYER_EXPOSURE_EXPOSURE), 0.0f);
-  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*exposure, PAINT_LAYER_EXPOSURE_OFFSET), 0.0f);
   EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*exposure, PAINT_LAYER_EXPOSURE_GAMMA), 1.0f);
 
   /* The RNA enum names the kind: a filter row reads back its EXPOSURE identifier. */
@@ -551,13 +550,13 @@ TEST_F(PaintLayersFilterKindsTest, exposure_kind_is_a_pointwise_filter_with_a_fl
       nullptr, &exposure_ptr, filter_prop, filter_value, &identifier));
   EXPECT_STREQ(identifier, "EXPOSURE");
 
-  /* The collection lists exactly the schema's three parameters, labelled. */
+  /* The collection lists exactly the schema's two parameters, labelled. */
   PropertyRNA *params = RNA_struct_find_property(&exposure_ptr, "kind_params");
   ASSERT_NE(params, nullptr);
-  EXPECT_EQ(RNA_property_collection_length(&exposure_ptr, params), 3);
-  const char *names[3] = {"exposure", "offset", "gamma"};
-  const char *labels[3] = {"Exposure", "Offset", "Gamma"};
-  for (const int i : IndexRange(3)) {
+  EXPECT_EQ(RNA_property_collection_length(&exposure_ptr, params), 2);
+  const char *names[2] = {"exposure", "gamma"};
+  const char *labels[2] = {"Exposure", "Gamma"};
+  for (const int i : IndexRange(2)) {
     PointerRNA param_ptr;
     ASSERT_TRUE(RNA_property_collection_lookup_string(&exposure_ptr, params, names[i], &param_ptr))
         << names[i];

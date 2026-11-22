@@ -1070,15 +1070,18 @@ void BKE_paint_layers_bake_job_compute(PaintLayersBakeJob &job,
                       COLOR_ROLE_DEFAULT_BYTE)) :
                   nullptr;
           result.color_bytes = Vector<uchar>(stored_pixels * 4);
+          /* The row scratch the batch encoding converts in: the colour of one row in one OCIO
+           * call instead of one per texel. */
+          Vector<float> encoded_row(int64_t(store_w) * 4);
           for (int y = 0; y < store_h; y++) {
             const int64_t src_row = int64_t(y + store_y0) * row.size + store_x0;
             const int64_t dst_row = int64_t(y) * store_w;
-            for (int x = 0; x < store_w; x++) {
-              bake_pixel_store_byte(&color[(src_row + x) * 4],
-                                    info.is_color,
-                                    byte_colorspace,
-                                    &result.color_bytes[(dst_row + x) * 4]);
-            }
+            bake_pixel_store_byte_row(&color[src_row * 4],
+                                      store_w,
+                                      info.is_color,
+                                      byte_colorspace,
+                                      encoded_row.data(),
+                                      &result.color_bytes[dst_row * 4]);
           }
         }
         perf_store.note("channel=%d pixels=%lld", channel, static_cast<long long>(stored_pixels));

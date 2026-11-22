@@ -258,23 +258,52 @@ void bake_pixel_store_float(const float rgba[4], float r_store[4])
 }
 
 /**
- * The byte map's storage of one straight-RGBA value: the colour encoded into the map's colorspace
- * and quantized, the alpha clamped. Only a colour channel is encoded; a data channel keeps the
+ * Store a packed block of \a count straight-RGBA pixels that all belong to one map row: the colour
+ * encoded into \a colorspace in one OCIO call (when \a is_color), then every component quantized to
+ * bytes and the alpha clamped. Only a colour channel is encoded; a data channel keeps the
  * scene-linear value quantized as it came.
+ *
+ * \a scratch is \a count RGBA floats owned by the caller and reused across rows. It may be \a rgba
+ * itself, in which case the block is converted in place.
  */
+void bake_pixel_store_byte_row(const float *rgba,
+                               const int count,
+                               const bool is_color,
+                               const ColorSpace *colorspace,
+                               float *scratch,
+                               uchar *r_store)
+{
+  if (count <= 0) {
+    return;
+  }
+  const float *values = rgba;
+  if (is_color && colorspace != nullptr) {
+    if (scratch != rgba) {
+      memcpy(scratch, rgba, sizeof(float[4]) * size_t(count));
+    }
+    /* One OCIO call for the whole row. The conversion leaves the alpha alone, so it is clamped
+     * below like every other component. */
+    IMB_colormanagement_scene_linear_to_colorspace(scratch, count, 1, 4, colorspace);
+    values = scratch;
+  }
+  for (int i = 0; i < count; i++) {
+    const int64_t o = int64_t(i) * 4;
+    r_store[o + 0] = uchar(clamp_i(int(values[o + 0] * 255.0f + 0.5f), 0, 255));
+    r_store[o + 1] = uchar(clamp_i(int(values[o + 1] * 255.0f + 0.5f), 0, 255));
+    r_store[o + 2] = uchar(clamp_i(int(values[o + 2] * 255.0f + 0.5f), 0, 255));
+    r_store[o + 3] = uchar(
+        clamp_i(int(clamp_f(values[o + 3], 0.0f, 1.0f) * 255.0f + 0.5f), 0, 255));
+  }
+}
+
+/** The byte map's storage of one straight-RGBA value: the row helper at \a count 1. */
 void bake_pixel_store_byte(const float rgba[4],
                            const bool is_color,
                            const ColorSpace *colorspace,
                            uchar r_store[4])
 {
-  float encoded[4] = {rgba[0], rgba[1], rgba[2], clamp_f(rgba[3], 0.0f, 1.0f)};
-  if (is_color && colorspace != nullptr) {
-    IMB_colormanagement_scene_linear_to_colorspace_v3(encoded, colorspace);
-  }
-  r_store[0] = uchar(clamp_i(int(encoded[0] * 255.0f + 0.5f), 0, 255));
-  r_store[1] = uchar(clamp_i(int(encoded[1] * 255.0f + 0.5f), 0, 255));
-  r_store[2] = uchar(clamp_i(int(encoded[2] * 255.0f + 0.5f), 0, 255));
-  r_store[3] = uchar(clamp_i(int(encoded[3] * 255.0f + 0.5f), 0, 255));
+  float encoded[4];
+  bake_pixel_store_byte_row(rgba, 1, is_color, colorspace, encoded, r_store);
 }
 
 /**
@@ -330,10 +359,14 @@ void bake_write_image_rows(
     Vector<float> row(int64_t(width) * 4);
     for (int y = y0; y < y1; y++) {
       fill_row(y, width, row.data());
-      for (int x = x0; x < x1; x++) {
-        const int64_t i = int64_t(y) * width + x;
-        bake_pixel_store_byte(&row[x * 4], is_color, colorspace, &pixels[i * 4]);
-      }
+      /* The written span is converted in place: the row is a scratch the map does not keep, and
+       * the helper accepts the same block as its source and its scratch. */
+      bake_pixel_store_byte_row(&row[int64_t(x0) * 4],
+                                x1 - x0,
+                                is_color,
+                                colorspace,
+                                &row[int64_t(x0) * 4],
+                                &pixels[(int64_t(y) * width + x0) * 4]);
     }
   }
   bake_image_pixels_changed(image, *ibuf, tile_number, rect);

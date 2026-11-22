@@ -403,6 +403,18 @@ void bake_tile_object_indices_clear(const Material &ma,
                                     const ViewLayer *view_layer,
                                     const PaintLayersBakeView *view);
 void bake_pixel_store_float(const float rgba[4], float r_store[4]);
+/**
+ * Store a packed block of \a count straight-RGBA pixels of one map row: the colour encoded into
+ * \a colorspace in one OCIO call (when \a is_color), then every component quantized to bytes and the
+ * alpha clamped. \a scratch is \a count RGBA floats owned by the caller and reused across rows; it
+ * may be \a rgba itself (the conversion is then in place).
+ */
+void bake_pixel_store_byte_row(const float *rgba,
+                               int count,
+                               bool is_color,
+                               const ColorSpace *colorspace,
+                               float *scratch,
+                               uchar *r_store);
 void bake_pixel_store_byte(const float rgba[4],
                            bool is_color,
                            const ColorSpace *colorspace,

@@ -34,6 +34,7 @@
 #include "BLI_rect.h"
 #include "BLI_uuid.h"
 
+#include "IMB_colormanagement.hh"
 #include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
 
@@ -3679,6 +3680,57 @@ TEST_F(PaintLayersOwnedEffectTest, a_partial_bake_keeps_the_effect_cache_unchang
       << "the narrowed bake computed the folded Blur over its rectangle";
   EXPECT_EQ(paint_layer_effect_cache_entry_count(), entries_before)
       << "a cropped effect result is never inserted into the effect cache";
+}
+
+/**
+ * A row stored through the batch path lands as the same bytes the per-pixel writer produces: the
+ * colour encoded into the map's colorspace in one OCIO call left the texels identical, the data
+ * channel is not encoded at all, and the alpha is clamped and quantized the same way. The in-place
+ * form, which the row writer uses, is checked against the copied one too.
+ */
+TEST_F(PaintLayersMaterialBakeTest, a_batched_byte_row_is_the_per_pixel_encoding)
+{
+  const ColorSpace *colorspace = IMB_colormanagement_space_get_named(
+      IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_DEFAULT_BYTE));
+  ASSERT_NE(colorspace, nullptr);
+  const float row[16] = {0.05f,
+                         0.25f,
+                         0.5f,
+                         1.0f,
+                         0.9f,
+                         0.5f,
+                         0.1f,
+                         0.25f,
+                         0.0f,
+                         1.0f,
+                         0.33f,
+                         1.6f,
+                         0.75f,
+                         0.6f,
+                         0.2f,
+                         0.0f};
+  constexpr int count = 4;
+  for (const bool is_color : {true, false}) {
+    SCOPED_TRACE(is_color ? "a colour channel is encoded" :
+                            "a data channel is quantized as it came");
+    uchar per_pixel[count * 4];
+    uchar batched[count * 4];
+    for (int i = 0; i < count; i++) {
+      bake_pixel_store_byte(&row[i * 4], is_color, colorspace, &per_pixel[i * 4]);
+    }
+    float scratch[count * 4];
+    bake_pixel_store_byte_row(row, count, is_color, colorspace, scratch, batched);
+    for (int i = 0; i < count * 4; i++) {
+      EXPECT_EQ(batched[i], per_pixel[i]) << "byte " << i << " of the row";
+    }
+    float in_place[count * 4];
+    std::copy(row, row + count * 4, in_place);
+    uchar in_place_bytes[count * 4];
+    bake_pixel_store_byte_row(in_place, count, is_color, colorspace, in_place, in_place_bytes);
+    for (int i = 0; i < count * 4; i++) {
+      EXPECT_EQ(in_place_bytes[i], per_pixel[i]) << "in-place byte " << i << " of the row";
+    }
+  }
 }
 
 /** \} */

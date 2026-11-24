@@ -4567,6 +4567,21 @@ void wm_event_do_handlers(bContext *C)
       /* Update previous mouse position for following events to use. */
       copy_v2_v2_int(win.runtime->eventstate->prev_xy, event->xy);
 
+      /* A drop that no drop-box accepted never reaches #wm_drags_exit(): that call lives in the
+       * drop-box handler (#wm_handlers_do_intern) and only runs where a drop-box is registered.
+       * Without it #WM_CURSOR_STOP, set by #wm_drags_handle_events() for a drag over a region that
+       * accepts nothing, is never restored — and since #WM_cursor_set() keeps a modal cursor in
+       * place, the "forbidden" cursor then sticks until the next successful drop or modal
+       * operator. The release may also be consumed by an unrelated modal operator (e.g. box
+       * select), which skips the drop dispatch entirely while the release still becomes a drop
+       * event here. Either way the drags are still queued (an accepted drop empties the list), so
+       * nobody else owns the cleanup: do it at event disposal. */
+      if (event->type == EVT_DROP && event->custom == EVT_DATA_DRAGDROP &&
+          event->customdata == &wm->runtime->drags && !wm->runtime->drags.is_empty())
+      {
+        wm_drags_exit(wm, &win);
+      }
+
       /* Un-link and free here, Blender-quit then frees all. */
       BLI_remlink(&win.runtime->event_queue, event);
       wm_event_free_last_handled(&win, event);

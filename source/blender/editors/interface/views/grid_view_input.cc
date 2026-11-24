@@ -4,9 +4,9 @@
 /** \file
  * \ingroup edinterface
  *
- * Unified grid input: wheel, touch/pen drag, kinetic fling, and fixed-viewport
- * popup edge auto-scroll. Session registry lives in grid_view_session.cc;
- * item layout in grid_view_layout.cc.
+ * Unified grid input: wheel, touch/pen drag, long-press hand-over to an item's own drag,
+ * kinetic fling, and fixed-viewport popup edge auto-scroll. Session registry lives in
+ * grid_view_session.cc; item layout in grid_view_layout.cc.
  */
 
 #include <algorithm>
@@ -17,10 +17,12 @@
 
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
+#include "DNA_windowmanager_types.h"
 
 #include "BKE_context.hh"
 #include "BKE_screen.hh"
 
+#include "BLI_listbase.h"
 #include "BLI_math_base.h"
 #include "BLI_rect.h"
 #include "BLI_time.h"
@@ -74,6 +76,12 @@ static constexpr float GRID_DRAG_VELOCITY_LOWPASS_TAU = 0.05f;
 /** Max idle since the last velocity sample still counted as "released while moving" (else a pause
  * before release means a positioning drag, not a swipe). */
 static constexpr double GRID_DRAG_FLING_RELEASE_MAX_IDLE = 0.1;
+/** Long-press arming delay: a press that stays put on a draggable tile for this long hands the
+ * following gesture to that tile's own drag, whatever direction it takes. Direction alone cannot
+ * separate the two intents on a tile — vertical means scroll, yet assets are also dragged down —
+ * so the hold is the third signal. Short enough to feel deliberate, long enough that a scroll
+ * swipe (which moves immediately) never arms it. */
+static constexpr double GRID_DRAG_LONG_PRESS_TIME = 0.2;
 
 /**
  * Where a committed drag sends its scroll. A single drag machine serves every LMB drag-scroll in
@@ -120,6 +128,21 @@ struct GridDragState {
    * press time so Shift only defers to the item where one is actually present, instead of
    * disabling Shift-drag-to-scroll for every grid. */
   bool pressed_item_supports_drag = false;
+  /** Whether a button under the press starts its own WM drag (an asset tile, a view item with a
+   * drag controller). Only there does a long press make sense: it hands the gesture to that
+   * button instead of scrolling. */
+  bool press_owns_drag = false;
+  /** The press was held still for #GRID_DRAG_LONG_PRESS_TIME on such a button, so the gesture now
+   * belongs to it in any direction — the only way to start an asset drag downwards. */
+  bool long_press_armed = false;
+  /** One-shot timer arming the above while the press stays put. Owned here (like the fling timer)
+   * so every path that drops the drag state also drops it. */
+  wmTimer *long_press_timer = nullptr;
+  wmWindowManager *timer_wm = nullptr;
+  wmWindow *timer_window = nullptr;
+  /** The arming cue set the modal cursor; whoever tears the state down must clear it again (the
+   * WM drag that follows owns the cursor from then on). */
+  bool long_press_cursor_set = false;
   /** #GridDragSink::RegionV2D / #PopupBlock: previous Y for the incremental pan delta. */
   int last_y = 0;
   /** #GridDragSink::Session only: absolute scroll target is measured from this press snapshot. */
@@ -216,6 +239,92 @@ static void grid_fling_start(bContext *C,
   }
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Long-press arming (a held tile starts its own drag)
+ * \{ */
+
+/** Stop the arming timer and drop the cue it set. Safe on any state, including one where nothing
+ * was armed. */
+static void grid_long_press_stop(GridDragState &drag)
+{
+  if (drag.long_press_timer && drag.timer_wm) {
+    /* #WM_event_timer_remove() only compares pointer identity, so it is safe when the window
+     * teardown already freed the timer. */
+    WM_event_timer_remove(drag.timer_wm, drag.timer_window, drag.long_press_timer);
+  }
+  drag.long_press_timer = nullptr;
+  /* Restore only while the cue is still ours: the window may have been closed meanwhile, and once
+   * the gesture hands over to the button, the WM drag owns the modal cursor and restoring here
+   * would fight it. */
+  if (drag.long_press_cursor_set && drag.timer_wm && drag.timer_window &&
+      BLI_findindex(&drag.timer_wm->windows, drag.timer_window) != -1 &&
+      drag.timer_window->modalcursor == WM_CURSOR_HAND_CLOSED)
+  {
+    WM_cursor_modal_restore(drag.timer_window);
+  }
+  drag.long_press_cursor_set = false;
+  drag.long_press_armed = false;
+  drag.timer_wm = nullptr;
+  drag.timer_window = nullptr;
+}
+
+/** Drop the whole drag state, timer included. Every teardown path goes through here so the arming
+ * timer can never outlive the press it belongs to. */
+static void grid_drag_reset(GridDragState &drag)
+{
+  grid_long_press_stop(drag);
+  drag = {};
+}
+
+static void grid_long_press_start(bContext *C, GridDragState &drag)
+{
+  grid_long_press_stop(drag);
+  wmWindowManager *wm = CTX_wm_manager(C);
+  wmWindow *win = CTX_wm_window(C);
+  /* A timer with no window is never dispatched (see #wm_window_timers_process), so don't create
+   * one: without a window there is no cursor to cue either. */
+  if (wm == nullptr || win == nullptr) {
+    return;
+  }
+  drag.timer_wm = wm;
+  drag.timer_window = win;
+  drag.long_press_timer = WM_event_timer_add(wm, win, TIMER, GRID_DRAG_LONG_PRESS_TIME);
+}
+
+static int grid_handle_long_press_timer_event(const wmEvent *event, ARegion *region)
+{
+  GridDragState &drag = grid_input_runtime().drag;
+  /* Timers reach every region's pre-button handler, so only the owning region may consume (and
+   * remove) it. */
+  if (drag.long_press_timer == nullptr || event->type != TIMER ||
+      event->customdata != drag.long_press_timer || drag.region != region)
+  {
+    return WM_UI_HANDLER_CONTINUE;
+  }
+  /* One shot: either it arms the press or the press is already gone. */
+  WM_event_timer_remove(drag.timer_wm, drag.timer_window, drag.long_press_timer);
+  drag.long_press_timer = nullptr;
+  if (!drag.active || drag.dragging || drag.region != region || !drag.press_owns_drag) {
+    grid_long_press_stop(drag);
+    return WM_UI_HANDLER_CONTINUE;
+  }
+  drag.long_press_armed = true;
+  /* Immediate cue that the tile is now "taken": the pressed tile already draws highlighted, and
+   * the closed hand makes the change of intent visible without a per-host draw hook. */
+  if (drag.timer_window) {
+    WM_cursor_modal_set(drag.timer_window, WM_CURSOR_HAND_CLOSED);
+    drag.long_press_cursor_set = true;
+  }
+  ED_region_tag_redraw(region);
+  /* #TIMER is an "always pass" event (see #wm_event_always_pass), so returning BREAK would only
+   * trip its debug assertion: every region receives it regardless. Removing the timer is the
+   * actual consumption — that already turns this queued event into #EVENT_NONE for the handlers
+   * that run after this one. */
+  return WM_UI_HANDLER_CONTINUE;
+}
+
+/** \} */
+
 /**
  * Which session's overlay scrollbar the cursor is over (drawn outside the grid's own bounds, so
  * #region_view_find_at misses it). Empty when none. Only the embedded host draws a
@@ -298,7 +407,10 @@ static int grid_handle_fling_timer_event(bContext * /*C*/, const wmEvent *event,
   if (fabsf(fling.velocity) < GRID_FLING_STOP_VELOCITY) {
     grid_fling_stop();
   }
-  return WM_UI_HANDLER_BREAK;
+  /* Never BREAK an "always pass" event (#wm_event_always_pass): every region sees it anyway and
+   * the debug assertion forbids it. No button owns this timer, so letting the rest of the UI layer
+   * inspect it is harmless. */
+  return WM_UI_HANDLER_CONTINUE;
 }
 
 static int grid_handle_wheel_event(bContext *C, const wmEvent *event, ARegion *region)
@@ -393,6 +505,27 @@ static int grid_handle_wheel_event(bContext *C, const wmEvent *event, ARegion *r
 }
 
 /**
+ * Whether the button under the press starts its own WM drag (an Asset Browser asset tile, a view
+ * item with a drag controller). Cached at press time so the long-press timer only arms where
+ * taking the gesture is actually possible.
+ */
+static bool grid_press_owns_drag(ARegion *region, const wmEvent *event)
+{
+  const Button *but_over = but_find_mouse_over(region, event);
+  if (but_over == nullptr) {
+    return false;
+  }
+  if (button_drag_is_draggable(but_over)) {
+    return true;
+  }
+  if (but_over->type == ButtonType::ViewItem) {
+    const auto *view_but = static_cast<const ButtonViewItem *>(but_over);
+    return view_but->view_item && view_item_supports_drag(*view_but->view_item);
+  }
+  return false;
+}
+
+/**
  * Which sink a fresh LMB press should feed, and (for #GridDragSink::Session) the grid it lands on.
  * Ported from the old `asset_view_drag_scroll_handler`'s `region_wants_drag_scroll`: a press over a
  * session-backed grid tile scrolls that grid; otherwise the asset shelf / browser regions and the
@@ -426,6 +559,12 @@ static GridDragSink grid_drag_sink_for_press(const bContext *C,
   if (but_over && ELEM(but_over->type, ButtonType::Grip, ButtonType::Scroll)) {
     return GridDragSink::None;
   }
+  /* Presses on asset tiles and draggable view items are deliberately NOT declined here. The
+   * direction arbitration below splits the gesture by angle: a drag within ±45° of horizontal
+   * belongs to the button (asset DnD / box select), anything steeper scrolls. Declining the press
+   * for every draggable tile short-circuits that rule and leaves its drag as the only outcome,
+   * which makes the grid unscrollable by drag where tiles touch each other — i.e. the whole Asset
+   * Browser. See #grid_handle_drag_scroll_event. */
   /* A press landing on a session-backed grid tile scrolls that grid (a grip/scrollbar over the
    * grid is not a view item, so it keeps the press — see #grid_hit_press). */
   if (grid_hit_press(region, event, r_grid_id) != nullptr) {
@@ -509,8 +648,9 @@ static int grid_handle_drag_scroll_event(bContext *C, const wmEvent *event, AReg
   }
 
   if (event->type == LEFTMOUSE && event->val == KM_PRESS) {
-    /* Reset on any new press so a missed release never leaves stale state. */
-    drag = {};
+    /* Reset on any new press so a missed release never leaves stale state (or a live arming
+     * timer from the previous gesture). */
+    grid_drag_reset(drag);
     runtime.swallow_next_click = false;
     /* Shift+drag defers to the pressed item's own drag (e.g. Favorites reorder) when it has one;
      * cache that here so the mid-drag arbitration below doesn't need to re-resolve the item, and
@@ -560,6 +700,15 @@ static int grid_handle_drag_scroll_event(bContext *C, const wmEvent *event, AReg
       drag.tree = std::move(*tree_handle);
       drag.start_rows = *drag.tree.scroll_value;
     }
+    /* A press on a button that owns a WM drag may be held still to take that drag instead of
+     * scrolling (see #grid_handle_long_press_timer_event). Only there: elsewhere holding still
+     * means nothing, and a tap must stay a tap. */
+    if (drag.active) {
+      drag.press_owns_drag = grid_press_owns_drag(region, event);
+      if (drag.press_owns_drag) {
+        grid_long_press_start(C, drag);
+      }
+    }
     /* Always continue so the grid tile / region button still receives the press for
      * click-selection. */
     return WM_UI_HANDLER_CONTINUE;
@@ -575,7 +724,7 @@ static int grid_handle_drag_scroll_event(bContext *C, const wmEvent *event, AReg
     const float velocity = drag.velocity;
     const bool released_moving = (BLI_time_now_seconds() - drag.last_time) <
                                  GRID_DRAG_FLING_RELEASE_MAX_IDLE;
-    drag = {};
+    grid_drag_reset(drag);
     runtime.swallow_next_click = was_dragging;
     if (sink == GridDragSink::Session && was_dragging && released_moving) {
       grid_fling_start(C, region, grid_id, velocity);
@@ -588,7 +737,7 @@ static int grid_handle_drag_scroll_event(bContext *C, const wmEvent *event, AReg
 
   if (event->type == MOUSEMOVE && drag.active) {
     if (drag.region != region) {
-      drag = {};
+      grid_drag_reset(drag);
       return WM_UI_HANDLER_CONTINUE;
     }
 
@@ -597,7 +746,7 @@ static int grid_handle_drag_scroll_event(bContext *C, const wmEvent *event, AReg
       session = &grid_session_state_ensure(drag.grid_id);
       if (session->refcount == 0 || session->region != region) {
         /* The grid closed or moved regions under us; abandon the drag. */
-        drag = {};
+        grid_drag_reset(drag);
         return WM_UI_HANDLER_CONTINUE;
       }
     }
@@ -612,36 +761,39 @@ static int grid_handle_drag_scroll_event(bContext *C, const wmEvent *event, AReg
       /* Shift+drag: let the pressed item start its own WM drag (e.g. Favorites reorder), same
        * verdict as at press time -- only when that item actually has one. */
       if ((event->modifier & KM_SHIFT) && drag.pressed_item_supports_drag) {
-        drag = {};
+        grid_drag_reset(drag);
         return WM_UI_HANDLER_CONTINUE;
       }
       /* Direction-aware arbitration, decided once when the gesture crosses the threshold. The
        * Manhattan metric matches #but_drag_init (`abs(dx) + abs(dy) > threshold`); firing at `>=`
        * makes this handler win the tie, and every dispatch point runs pre-button handlers before
        * #handle_button_event, so a horizontal DnD or box-select never starts before the verdict
-       * (no post-hoc #WM_drag_free_list cancel needed). */
+       * (no post-hoc #WM_drag_free_list cancel needed).
+       *
+       * The verdict is the gesture's angle: within ±45° of horizontal it belongs to the button
+       * (asset DnD, box select, item reorder), any steeper and it scrolls. This holds for presses
+       * on tiles too, which is what keeps a dense grid drag-scrollable. A gesture that scrolls
+       * frees the pressed button, so its drag cannot start afterwards — the two outcomes are
+       * exclusive by construction, not by race.
+       *
+       * The angle alone would make a vertical asset drag impossible, so a held press overrides it:
+       * once the arming timer has fired, the tile owns the gesture in any direction. */
       const int total_dx = std::abs(event->xy[0] - drag.start_x);
       const int total_dy = std::abs(event->xy[1] - drag.start_y);
       if (total_dx + total_dy < drag_threshold) {
         return WM_UI_HANDLER_CONTINUE; /* Below threshold: neither scroll nor DnD yet. */
       }
-      bool horizontal_gesture = total_dx > total_dy;
-      if (region->regiontype == RGN_TYPE_WINDOW) {
-        const SpaceFile *sfile = CTX_wm_space_file(C);
-        if (sfile && ED_fileselect_is_asset_browser(sfile)) {
-          /* Asset Browser DnD commonly starts with a slightly diagonal movement. Give the
-           * horizontal intent a small margin over vertical touch scrolling. */
-          horizontal_gesture = float(total_dx) >= float(total_dy) * 0.8f;
-        }
-      }
-      if (horizontal_gesture) {
-        /* Horizontal-dominant: the gesture belongs to the button (item DnD / box select). */
-        drag = {};
+      /* Horizontal-dominant (±45° from horizontal) — the button's own drag. A held press is the
+       * button's drag regardless of the angle (item DnD / box select). */
+      if (drag.long_press_armed || (total_dx > total_dy)) {
+        grid_drag_reset(drag);
         return WM_UI_HANDLER_CONTINUE;
       }
       /* Vertical-dominant: commit to scrolling. Free the active button so no tooltip/DnD starts;
        * from here on every event until release is consumed (BREAK discipline). */
       drag.dragging = true;
+      /* Nothing left to arm: the gesture is now a scroll whatever happens next. */
+      grid_long_press_stop(drag);
       /* Re-anchor the incremental sinks at the commit point so the first applied delta is the next
        * event's small step, not the whole threshold distance in one jump (Session scrolls from an
        * absolute press snapshot and ignores this field). */
@@ -717,6 +869,10 @@ static int grid_view_pre_button_handler(bContext *C, const wmEvent *event, ARegi
   if (retval != WM_UI_HANDLER_CONTINUE) {
     return retval;
   }
+  retval = grid_handle_long_press_timer_event(event, region);
+  if (retval != WM_UI_HANDLER_CONTINUE) {
+    return retval;
+  }
   retval = grid_handle_wheel_event(C, event, region);
   if (retval != WM_UI_HANDLER_CONTINUE) {
     return retval;
@@ -757,7 +913,7 @@ void grid_view_input_region_freed(const ARegion *region)
     grid_fling_stop();
   }
   if (runtime.drag.region == region) {
-    runtime.drag = {};
+    grid_drag_reset(runtime.drag);
   }
 }
 

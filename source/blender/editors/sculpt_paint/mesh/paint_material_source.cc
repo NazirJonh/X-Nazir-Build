@@ -170,9 +170,12 @@ float paint_mask_texture_coverage(const Brush &brush,
   const bke::PaintRuntime *paint_runtime = paint != nullptr ? paint->runtime : nullptr;
 
   if (mask_mtex.brush_map_mode == MTEX_MAP_MODE_3D && paint_runtime != nullptr) {
-    /* Object space, like the main texture in this mode: size and offset do not apply. */
+    /* Object space, like the main texture in this mode: size and offset do not apply. The Mask
+     * slot takes the flip but never the brush texture's invert; the slot's own invert runs in
+     * #BKE_brush_mask_tex_coverage_finish below. */
     float4 rgba;
-    float value = BKE_brush_sample_tex_3d(paint, &brush, &mask_mtex, point, rgba, thread, pool);
+    float value = BKE_brush_sample_tex_3d(
+        paint, &brush, &mask_mtex, eBrushTextureSlot::Mask, point, rgba, thread, pool);
     value = math::clamp(value, 0.0f, 1.0f);
     if (paint != nullptr) {
       value = BKE_brush_mask_tex_pressure_apply(brush, *paint, value);
@@ -995,6 +998,55 @@ static void attach_direct_sample_image(DirectSampleLayout &layout,
   layout.eval_ofs_y = mtex.ofs[1];
 }
 
+SourceFlip material_source_flip(const Brush &brush, const bke::PaintRuntime *runtime)
+{
+  /* No 3D veto here: a 3D-mapped source is never sampled through these 2D coordinates -- the
+   * object-space paths sample with #BKE_brush_sample_tex_3d, whose 3D branch takes no flip, and
+   * the 2D canvas deliberately remaps 3D to a 2D mode (see paint_2d_source_map_mode_for_2d), so
+   * it does mirror. Callers that preview a 3D-mapped source decide for themselves. */
+  SourceFlip flip;
+  const BrushMaterialPaint *material_paint = brush.material_paint;
+  if (material_paint == nullptr) {
+    return flip;
+  }
+  const eMTex_BrushMappingFlags flags = material_paint->shared_source_mapping.mapping_flags;
+  flip.x = (flags & MTEX_MAPPING_FLIP_X) != 0;
+  flip.y = (flags & MTEX_MAPPING_FLIP_Y) != 0;
+  if (runtime != nullptr) {
+    /* XOR, the same static-plus-random rule as #BKE_brush_mtex_flip_x: the draw is 50/50, so each
+     * dab lands on the mirrored or the unmirrored sample. */
+    if (flags & MTEX_MAPPING_FLIP_X_RANDOM) {
+      flip.x = flip.x != runtime->tex_flip.channel_x;
+    }
+    if (flags & MTEX_MAPPING_FLIP_Y_RANDOM) {
+      flip.y = flip.y != runtime->tex_flip.channel_y;
+    }
+  }
+  return flip;
+}
+
+void material_source_flip_coords(const SourceFlip &flip, float &x, float &y)
+{
+  if (flip.x) {
+    x = -x;
+  }
+  if (flip.y) {
+    y = -y;
+  }
+}
+
+void material_source_mtex_apply_flip(const Brush &brush, MTex &mtex)
+{
+  const BrushMaterialPaint *material_paint = brush.material_paint;
+  if (material_paint == nullptr) {
+    return;
+  }
+  const int flip_bits = MTEX_MAPPING_FLIP_X | MTEX_MAPPING_FLIP_Y |
+                        MTEX_MAPPING_FLIP_X_RANDOM | MTEX_MAPPING_FLIP_Y_RANDOM;
+  const int shared_bits = int(material_paint->shared_source_mapping.mapping_flags) & flip_bits;
+  mtex.mapping_flags = eMTex_BrushMappingFlags(int(mtex.mapping_flags) | shared_bits);
+}
+
 DirectSampleLayout make_direct_sample_layout(const ChannelSourceSet::ChannelSource &source,
                                              const MTex &mtex,
                                              const bke::PaintRuntime *paint_runtime,
@@ -1005,6 +1057,10 @@ DirectSampleLayout make_direct_sample_layout(const ChannelSourceSet::ChannelSour
   if (!source.image_direct_sample) {
     return layout;
   }
+
+  const SourceFlip flip = material_source_flip(brush, paint_runtime);
+  layout.flip_x = flip.x;
+  layout.flip_y = flip.y;
 
   layout.size_x = mtex.size[0];
   layout.size_y = mtex.size[1];
@@ -1263,6 +1319,8 @@ bool sample_direct_layout(const DirectSampleLayout &layout,
     }
   }
 
+  material_source_flip_coords({layout.flip_x, layout.flip_y}, tex_x, tex_y);
+
   if (!sample_layout_image(layout, tex_x, tex_y, r_value, r_rgba)) {
     return false;
   }
@@ -1399,6 +1457,8 @@ static void prefetch_direct_layout(const DirectSampleLayout &layout,
     return;
   }
 
+  material_source_flip_coords({layout.flip_x, layout.flip_y}, tex_x, tex_y);
+
   const float u = (layout.eval_size_x * (tex_x + layout.eval_ofs_x) + 1.0f) * 0.5f;
   const float v = (layout.eval_size_y * (tex_y + layout.eval_ofs_y) + 1.0f) * 0.5f;
   prefetch_bilinear_footprint(layout.float_pixels,
@@ -1493,9 +1553,14 @@ static void sample_channel_source_with_layout(const DirectSampleLayout &layout,
   }
   float dummy_value = 0.0f;
   float *value_ptr = r_value != nullptr ? r_value : &dummy_value;
+  /* The texture-engine fallback samples this channel's own MTex, so carry the shared mapping's
+   * static flip bits into it; the stroke state supplies the random part. */
+  MTex mtex = dna::shallow_copy(*source.mtex);
+  material_source_mtex_apply_flip(brush, mtex);
   sculpt_apply_texture(ss,
                        brush,
-                       *source.mtex,
+                       mtex,
+                       eBrushTextureSlot::ChannelSource,
                        ctx,
                        thread,
                        value_ptr,
@@ -2095,42 +2160,66 @@ static bool sample_channel_source_at_uv(const ChannelSourceSet &sources,
                                         const int thread,
                                         float *r_value,
                                         float4 &r_rgba,
+                                        const SourceFlip &flip,
                                         const bool unit_space = false)
 {
   const MTex *mtex = source.mtex;
   if (mtex == nullptr) {
     return false;
   }
+  /* UV-space callers have no stroke step of their own, so the random half is not available here:
+   * the shared static bits still mirror the source, while the per-dab draw is #SourceFlip{} (all
+   * channels of a Curve Patch stamp already carry their own per-stamp mirror in the UV they pass
+   * in -- see #CurvePatchStamp::flip). */
+  float2 uv_flipped = uv;
   if (unit_space) {
+    /* \a uv is a position over the whole image: mirror inside that [0, 1] frame. */
+    if (flip.x) {
+      uv_flipped.x = 1.0f - uv_flipped.x;
+    }
+    if (flip.y) {
+      uv_flipped.y = 1.0f - uv_flipped.y;
+    }
     /* The caller already placed the texture: \a uv is a position over the whole image. A baked
      * image is stored in the same [0, 1] frame; anything else (a procedural texture) is
      * evaluated in the brush-local [-1, 1] frame, so map the position into it. */
     if (source.kind == ChannelSourceKind::Baked) {
-      return sources.sample_baked(source, uv.x, uv.y, r_value, r_rgba);
+      return sources.sample_baked(source, uv_flipped.x, uv_flipped.y, r_value, r_rgba);
     }
     float unit_value = 0.0f;
     float *unit_value_ptr = r_value != nullptr ? r_value : &unit_value;
-    if (sources.sample_image_unit(source, uv.x, uv.y, unit_value_ptr, r_rgba)) {
+    if (sources.sample_image_unit(source, uv_flipped.x, uv_flipped.y, unit_value_ptr, r_rgba)) {
       return true;
     }
-    paint_get_tex_pixel(
-        mtex, uv.x * 2.0f - 1.0f, uv.y * 2.0f - 1.0f, sources.pool(), thread, unit_value_ptr, r_rgba);
+    paint_get_tex_pixel(mtex,
+                        uv_flipped.x * 2.0f - 1.0f,
+                        uv_flipped.y * 2.0f - 1.0f,
+                        sources.pool(),
+                        thread,
+                        unit_value_ptr,
+                        r_rgba);
     return true;
   }
+  /* Brush-local frame: apply the placement first, then mirror the final coordinates around the
+   * stamp center, matching #sample_direct_layout's order. */
   const float tex_x = uv.x * mtex->size[0] + mtex->ofs[0];
   const float tex_y = uv.y * mtex->size[1] + mtex->ofs[1];
+  float tex_x_flipped = tex_x;
+  float tex_y_flipped = tex_y;
+  material_source_flip_coords(flip, tex_x_flipped, tex_y_flipped);
   if (source.kind == ChannelSourceKind::Baked) {
     /* Placed like every other kind. Sampling the bake at the raw UV instead would make the same
      * channel jump as soon as the material stops resolving to a plain image and starts being
      * baked, since the Image path here has always applied the placement. */
-    return sources.sample_baked(source, tex_x, tex_y, r_value, r_rgba);
+    return sources.sample_baked(source, tex_x_flipped, tex_y_flipped, r_value, r_rgba);
   }
   float dummy_value = 0.0f;
   float *value_ptr = r_value != nullptr ? r_value : &dummy_value;
-  if (sources.sample_image_direct(source, tex_x, tex_y, value_ptr, r_rgba)) {
+  if (sources.sample_image_direct(source, tex_x_flipped, tex_y_flipped, value_ptr, r_rgba)) {
     return true;
   }
-  paint_get_tex_pixel(mtex, tex_x, tex_y, sources.pool(), thread, value_ptr, r_rgba);
+  paint_get_tex_pixel(
+      mtex, tex_x_flipped, tex_y_flipped, sources.pool(), thread, value_ptr, r_rgba);
   return true;
 }
 
@@ -2161,7 +2250,15 @@ float ChannelUvSampler::scalar_at_uv(const eMaterialPaintChannel channel,
   }
   float value = fallback;
   float4 rgba;
-  if (!sample_channel_source_at_uv(sources_, source, uv, thread, &value, rgba, unit_uv_space_)) {
+  if (!sample_channel_source_at_uv(sources_,
+                                   source,
+                                   uv,
+                                   thread,
+                                   &value,
+                                   rgba,
+                                   material_source_flip(brush_, nullptr),
+                                   unit_uv_space_))
+  {
     return fallback;
   }
   const float2 range = stored_scalar_range(settings_, channel);
@@ -2181,7 +2278,15 @@ float ChannelUvSampler::scalar_coverage_at_uv(const eMaterialPaintChannel channe
   }
   float value;
   float4 rgba;
-  if (!sample_channel_source_at_uv(sources_, source, uv, thread, &value, rgba, unit_uv_space_)) {
+  if (!sample_channel_source_at_uv(sources_,
+                                   source,
+                                   uv,
+                                   thread,
+                                   &value,
+                                   rgba,
+                                   material_source_flip(brush_, nullptr),
+                                   unit_uv_space_))
+  {
     return 1.0f;
   }
   /* No Source Invert here (see the declaration): the Mask Source's invert applies once, where
@@ -2202,7 +2307,15 @@ float ChannelUvSampler::alpha_at_uv(const eMaterialPaintChannel channel,
     return 1.0f;
   }
   float4 rgba;
-  if (!sample_channel_source_at_uv(sources_, source, uv, thread, nullptr, rgba, unit_uv_space_)) {
+  if (!sample_channel_source_at_uv(sources_,
+                                   source,
+                                   uv,
+                                   thread,
+                                   nullptr,
+                                   rgba,
+                                   material_source_flip(brush_, nullptr),
+                                   unit_uv_space_))
+  {
     return 1.0f;
   }
   return rgba.w;
@@ -2254,7 +2367,15 @@ float3 ChannelUvSampler::color_at_uv(const eMaterialPaintChannel channel,
     return fallback;
   }
   float4 rgba;
-  if (!sample_channel_source_at_uv(sources_, source, uv, thread, nullptr, rgba, unit_uv_space_)) {
+  if (!sample_channel_source_at_uv(sources_,
+                                   source,
+                                   uv,
+                                   thread,
+                                   nullptr,
+                                   rgba,
+                                   material_source_flip(brush_, nullptr),
+                                   unit_uv_space_))
+  {
     return fallback;
   }
   return finish_color_sample(is_normal,

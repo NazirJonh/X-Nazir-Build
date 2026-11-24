@@ -398,6 +398,31 @@ float BKE_brush_curve_strength(eBrushCurvePreset preset,
                                float brush_radius);
 float BKE_brush_curve_strength(const Brush *br, float p, float len);
 
+/**
+ * Which brush texture slot an #MTex represents to the sampling helpers below. The slot identity
+ * is mode-dependent (#BKE_brush_mask_texture_get hands out #Brush.mtex in Sculpt), so it cannot
+ * be derived from the #MTex pointer alone: every caller that samples a brush texture passes the
+ * slot it resolved, and the flip/invert contract keys off the slot, not off a boolean or off the
+ * caller's intent.
+ */
+enum class eBrushTextureSlot {
+  /** The brush texture slot: #Brush.mtex everywhere but Sculpt, where the legacy mask slot
+   * (#BKE_brush_mask_texture_get with #OB_MODE_SCULPT) hands out #Brush.mtex too. This is the
+   * only slot the brush's #BRUSH_TEXTURE_INVERT applies to. */
+  Brush,
+  /** The mask texture slot: #Brush.mask_mtex outside Sculpt (also sampled as the PBR Mask
+   * Source). Its own invert is #BRUSH_MASK_TEXTURE_INVERT applied by
+   * #BKE_brush_mask_tex_coverage_finish — never the brush texture's invert here. */
+  Mask,
+  /** The Face Set color texture (#Brush.face_set_color_mtex). */
+  FaceSetColor,
+  /** A PBR channel source (#BrushMaterialPaint). Its flip comes from the shared source mapping
+   * (#BrushMaterialPaint::shared_source_mapping): static X/Y bits plus the stroke's random draw,
+   * the same contract as the brush texture. The brush's own #BRUSH_TEXTURE_INVERT never applies
+   * here; a channel's mirroring is a source-level setting, not an #MTex flag on the brush slot. */
+  ChannelSource,
+};
+
 /* Sampling. */
 
 /**
@@ -409,10 +434,16 @@ float BKE_brush_curve_strength(const Brush *br, float p, float len);
  *
  * The aspect ratio correction is read from #bke::PaintRuntime, see
  * #BKE_brush_tex_aspect_correction_update.
+ *
+ * \a slot states what \a mtex is: it decides the flip contract (static bits plus, for the Brush
+ * and Mask slots, the stroke's random flip) and whether the brush texture's invert applies, and
+ * cannot be overridden per call — see #eBrushTextureSlot. The invert runs before
+ * #Brush::texture_sample_bias, the order every sampler in this module keeps.
  */
 float BKE_brush_sample_tex_3d(const Paint *paint,
                               const Brush *br,
                               const MTex *mtex,
+                              eBrushTextureSlot slot,
                               const float3 &point,
                               float4 &rgba,
                               int thread,
@@ -429,6 +460,70 @@ float BKE_brush_sample_tex_3d(const Paint *paint,
  */
 float BKE_brush_sample_masktex(
     const Paint *paint, Brush *br, const float2 &point, int thread, ImagePool *pool);
+
+/**
+ * Whether the \a slot's texture mirrors its sampled coordinates on X/Y: the slot's static flip
+ * bits (#MTEX_MAPPING_FLIP_X / #MTEX_MAPPING_FLIP_Y) XOR-ed with this dab's random flip
+ * (#MTEX_MAPPING_FLIP_X_RANDOM / #MTEX_MAPPING_FLIP_Y_RANDOM, drawn by the stroke step into
+ * #bke::PaintRuntime::tex_flip — XOR is the correct static-plus-random rule: with the random draw
+ * always at 50/50 it exactly mirrors "the slot flips unless the random draw undoes it").
+ *
+ * The Brush and Mask slots read their own random state. The PBR channel slot reads the channel
+ * fields (#bke::BrushTexFlipState::channel_x/_y) and its static bits, which the caller copies from
+ * #BrushMaterialPaint::shared_source_mapping into the sampled #MTex; it never takes the brush
+ * texture's invert. The Face Set color slot reads its static bits only. The random part is stroke
+ * state: outside a stroke it reads as off, so previews show the static flip only. \a paint may be
+ * null (a caller without a paint context), in which case only the static bits are consulted.
+ *
+ * A slot in #MTEX_MAP_MODE_3D always reads as unflipped: object-space sampling has no 2D
+ * coordinate to mirror. Both the stroke samplers and the previews get that rule from here.
+ */
+bool BKE_brush_mtex_flip_x(const Paint *paint, const MTex &mtex, eBrushTextureSlot slot);
+bool BKE_brush_mtex_flip_y(const Paint *paint, const MTex &mtex, eBrushTextureSlot slot);
+
+/**
+ * Whether random flips (#MTEX_MAPPING_FLIP_X_RANDOM / #MTEX_MAPPING_FLIP_Y_RANDOM) can change
+ * what sampling \a mtex produces: it must reference a texture, carry at least one random flip
+ * bit, and not use object-space (#MTEX_MAP_MODE_3D) mapping, which takes no flip at all (see
+ * #BKE_brush_mtex_flip_x). The stroke step uses this to decide whether a random flip draw is
+ * worth an RNG call, so "no texture" and "3D mapping" must not spend one.
+ */
+bool BKE_brush_mtex_flip_random_eligible(const MTex &mtex);
+
+/**
+ * The same eligibility test for the PBR channel sources, which share one mapping instead of
+ * carrying a texture per slot: \a material_paint must be non-null, its
+ * #BrushMaterialPaint::shared_source_mapping must carry a random flip bit and must not be in
+ * #MTEX_MAP_MODE_3D. Shared with #BKE_brush_mtex_flip_random_eligible's callers so the stroke and
+ * the samplers cannot disagree on whether a flip draw applies.
+ */
+bool BKE_brush_material_source_flip_random_eligible(const BrushMaterialPaint *material_paint);
+
+/**
+ * The raw value flip behind #BKE_brush_texture_invert_apply, with no #Brush / slot gating: the
+ * scalar intensity flips in place, and an RGB(A) sample additionally flips its alpha, so both
+ * consumers (the scalar masks and the 2D stamp coverage) see the same flip. Only
+ * #BRUSH_TEXTURE_INVERT callers should reach it, through #BKE_brush_texture_invert_apply.
+ */
+void BKE_brush_texture_invert_value(bool has_rgb, float *r_intensity, float r_rgba[4]);
+
+/**
+ * The one invert contract for brush texture sampling, in one place: applies
+ * #BKE_brush_texture_invert_value only when \a slot is #eBrushTextureSlot::Brush and the brush
+ * has #BRUSH_TEXTURE_INVERT set — a Mask, Face Set color or PBR channel source sample never
+ * takes the brush texture's invert, and a caller cannot apply or skip it selectively.
+ *
+ * Contract order: the invert is part of the raw sample — it runs right after the texture
+ * evaluation (and the image fallback where a caller has one, so the substituted value is covered
+ * too), before #Brush::texture_sample_bias and before any colorspace decode. Callers that apply
+ * a bias do so after this call; callers that decode colorspace do so after the bias. Out-of-bounds
+ * clip paths return zero without reaching the invert, so the stamp keeps its footprint.
+ */
+void BKE_brush_texture_invert_apply(eBrushTextureSlot slot,
+                                    const Brush &brush,
+                                    bool has_rgb,
+                                    float *r_intensity,
+                                    float r_rgba[4]);
 
 /**
  * Applies the RAMP/CUTOFF #Brush.mask_pressure curve to a Mask Texture sample. Shared by
@@ -539,6 +634,11 @@ class BrushMaskLut {
  * #bke::PaintRuntime::mask_influence_random_value (see #BKE_brush_mask_tex_influence_apply).
  * Overlay previews pass false: the random factor is per dab and must not make the cursor show a
  * different mask than the one the user configured.
+ *
+ * The Mask slot's flip contract (static bits plus the stroke's random flip, see
+ * #BKE_brush_mtex_flip_x) is applied to the query coordinates before the LUT or texture
+ * evaluation; the LUT caches values in mask-texture space, so the flip is a transform of the
+ * request, not of the cache, and the same table serves flipped and unflipped queries.
  * \return 1 when no Mask texture is assigned.
  */
 float BKE_brush_mask_tex_area_coverage(const Brush &brush,

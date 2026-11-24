@@ -165,6 +165,13 @@ struct PaintVectorCurveParams {
   int stamp_use_random_angle = 0;
   float stamp_size_random = 0.0f;
   float stamp_strength_random = 0.0f;
+  /** Per-stamp spacing randomization (#bke::CurvePatchParams::stamp_spacing_random), as a fraction
+   * of the stamp step. 0 for data written before the field existed. */
+  float stamp_spacing_random = 0.0f;
+  /** Per-stamp texture flip chances (#bke::CurvePatchParams::stamp_flip_x_random / _y_random), as
+   * fractions in [0, 1]. 0 for data written before the fields existed. */
+  float stamp_flip_x_random = 0.0f;
+  float stamp_flip_y_random = 0.0f;
   int stamp_seed = 0;
   float spacing_frac = 0.0f;
   float jitter_amount = 0.0f;
@@ -277,9 +284,11 @@ struct PaintVectorItem {
    * before the id existed). Unlike the array index it survives deleting and re-adding the other
    * curves, which is what lets a live session keep the item's other fields. */
   int curve_id = 0;
-  /* No padding here: #PaintVectorCurveParams::symmetry_flags made the preceding block 4 bytes
-   * longer, which is exactly what the former `_pad1` supplied, so the 8-byte aligned binding below
-   * still starts on a multiple of 8. */
+  /* Explicit padding before a struct member: makesdna requires every struct-typed member to start
+   * on a multiple of the pointer size (8 bytes on 64 bit). The 4-byte fields above end 4 bytes short
+   * of that, so without this pad #surface_binding, the pointer below and the struct size all
+   * misalign (the "Align struct" / "Align pointer" / "Sizeerror" build errors). */
+  char _pad_surface_binding[4] = {};
   /** Surface anchoring of the curve's control points. */
   PaintVectorSurfaceBinding surface_binding = {};
   /**

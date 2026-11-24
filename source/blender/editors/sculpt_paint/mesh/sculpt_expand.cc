@@ -322,8 +322,9 @@ static float falloff_value_vertex_get(const SculptSession &ss,
   }
 
   float4 rgba;
+  /* The legacy sculpt mask hands out #Brush.mtex, so the brush texture slot's contract applies. */
   const float avg = BKE_brush_sample_tex_3d(
-      expand_cache.paint, brush, mtex, position, rgba, 0, ss.tex_pool());
+      expand_cache.paint, brush, mtex, eBrushTextureSlot::Brush, position, rgba, 0, ss.tex_pool());
 
   const float distortion = (avg - 0.5f) * expand_cache.texture_distortion_strength *
                            expand_cache.max_vert_falloff;

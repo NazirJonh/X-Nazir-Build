@@ -727,6 +727,17 @@ def draw_mask_texture_panel(layout, context, brush, *, is_popover=False, show_gr
     if (brush.mask_texture and brush.mask_texture.type == 'IMAGE' and
             mask_tex_slot.map_mode != 'STENCIL'):
         col.prop(mask_tex_slot, "use_preserve_aspect")
+
+    # The Mask slot mirrors its own coordinates, with per-stamp random flips on top. Drawn into a
+    # sub column so the returned column stays the one the placement settings went into. The '3D'
+    # mapping samples in object space and takes no flip, so the handles would do nothing there.
+    if mask_tex_slot.texture is not None:
+        if mask_tex_slot.map_mode != '3D':
+            sub = layout.column(heading="Flip", align=True)
+            sub.prop(mask_tex_slot, "use_flip_x", text="X")
+            sub.prop(mask_tex_slot, "use_flip_y", text="Y")
+            sub.prop(mask_tex_slot, "use_random_flip_x", text="Random X")
+            sub.prop(mask_tex_slot, "use_random_flip_y", text="Random Y")
     return col
 
 
@@ -974,19 +985,30 @@ class StrokePanel(BrushPanel):
                 row.active = not is_points
                 row.prop(brush, "spacing", text="Spacing", slider=True)
                 col.prop(brush, "jitter", text="Jitter", slider=True)
-                row = col.row(align=True)
-                row.prop(brush, "size_random", text="Random Size", slider=True)
-                if is_points:
-                    # Per-point radius handles: edit each point's own stamp size.
-                    row.prop(cp, "show_point_radius_handles", text="", icon='CON_TRACKTO')
-                row = col.row(align=True)
-                row.prop(brush, "strength_random", text="Random Strength", slider=True)
-                if is_points:
-                    # Per-point strength handles: edit each point's own stamp strength.
-                    row.prop(cp, "show_point_strength_handles", text="", icon='SMOOTHCURVE')
-                col.prop(tex_slot, "use_random", text="Random Rotation")
-                if tex_slot.use_random:
-                    col.prop(tex_slot, "random_angle", text="Random Rotation Amount")
+                # Per-stamp randomization lives in its own collapsed sub-panel: it is a tuning
+                # block the user reaches for occasionally, not an everyday stamp setting.
+                random_header, random_panel = col.panel(
+                    "curve_patch_random_panel", default_closed=True)
+                random_header.label(text="Random")
+                if random_panel:
+                    row = random_panel.row(align=True)
+                    row.prop(brush, "size_random", text="Size", slider=True)
+                    if is_points:
+                        # Per-point radius handles: edit each point's own stamp size.
+                        row.prop(cp, "show_point_radius_handles", text="", icon='CON_TRACKTO')
+                    row = random_panel.row(align=True)
+                    row.prop(brush, "strength_random", text="Strength", slider=True)
+                    if is_points:
+                        # Per-point strength handles: edit each point's own stamp strength.
+                        row.prop(cp, "show_point_strength_handles", text="", icon='SMOOTHCURVE')
+                    row = random_panel.row()
+                    row.active = not is_points
+                    row.prop(cp, "stamp_spacing_random", text="Spacing", slider=True)
+                    random_panel.prop(cp, "stamp_flip_x_random", text="Flip X", slider=True)
+                    random_panel.prop(cp, "stamp_flip_y_random", text="Flip Y", slider=True)
+                    random_panel.prop(tex_slot, "use_random", text="Rotation")
+                    if tex_slot.use_random:
+                        random_panel.prop(tex_slot, "random_angle", text="Rotation Amount")
                 if mode == 'SCULPT':
                     # Stamp Projection (Curve / Planar) is meaningless on a flat 2D canvas: both
                     # degenerate to the same result there.
@@ -1179,7 +1201,7 @@ class StrokePanel(BrushPanel):
         show_stroke_jitter = mode != 'SCULPT' or brush.sculpt_capabilities.has_jitter
 
         # Per-stamp randomization. The Curve Patch stroke draws these same properties in its own
-        # panel above (as Random Size / Random Strength), so they are hidden here to avoid two
+        # Random sub-panel above (as Size / Strength), so they are hidden here to avoid two
         # sliders for one field.
         if brush.stroke_method != 'CURVE_PATCH':
             if show_stroke_jitter:
@@ -3039,7 +3061,8 @@ def _draw_material_paint_source_texture(panel, context, channel, *, enabled=True
 
 def _draw_material_paint_shared_mapping(layout, material_paint, *,
                                         show_map_mode=True):
-    """Mapping shared by every channel's source texture: Mapping mode, Size (X/Y only), Angle.
+    """Mapping shared by every channel's source texture: Mapping mode, Size (X/Y only), Angle,
+    Flip (static and per-stamp random).
 
     Drawn once, in the Image Transform Settings panel above the channel toggles, instead of once per
     channel.
@@ -3051,7 +3074,8 @@ def _draw_material_paint_shared_mapping(layout, material_paint, *,
 
     \a show_map_mode is false for the Shape tools: their Mask Source texture is placed in the
     shape's own frame, where Area/View projection has no meaning. Size, Angle and the random
-    controls still apply.
+    controls still apply; the shared flip is hidden because those tools sample through their own
+    UV frame.
     """
     slot = material_paint.shared_texture_slot
     col = layout.column(align=True)
@@ -3067,6 +3091,14 @@ def _draw_material_paint_shared_mapping(layout, material_paint, *,
             col.prop(slot, "use_random", text="Random")
             if slot.use_random:
                 col.prop(slot, "random_angle", text="Random Angle")
+    # Object-space (3D) placement takes no flip, and the Shape tools sample through their own UV
+    # frame, so the handles would do nothing there.
+    if show_map_mode and slot.map_mode != '3D':
+        sub = col.column(heading="Flip", align=True)
+        sub.prop(slot, "use_flip_x", text="X")
+        sub.prop(slot, "use_flip_y", text="Y")
+        sub.prop(slot, "use_random_flip_x", text="Random X")
+        sub.prop(slot, "use_random_flip_y", text="Random Y")
 
 
 def material_paint_visible_channels_owner(context):
@@ -4759,6 +4791,19 @@ def brush_texture_settings(layout, brush, sculpt, tex_slot=None):
 
     if brush.texture and brush.texture.type == 'IMAGE' and tex_slot.map_mode not in {'STENCIL', '3D'}:
         layout.prop(tex_slot, "use_preserve_aspect")
+
+    # Flip and invert the stamp content (Invert Alpha style controls). The random flips draw per
+    # stamp, so they have no effect without a texture either. The '3D' mapping samples the texture
+    # in object space and takes no flip, so the handles would do nothing; the invert still applies
+    # to the sampled value there.
+    if tex_slot.texture is not None:
+        if tex_slot.map_mode != '3D':
+            col = layout.column(heading="Flip", align=True)
+            col.prop(tex_slot, "use_flip_x", text="X")
+            col.prop(tex_slot, "use_flip_y", text="Y")
+            col.prop(tex_slot, "use_random_flip_x", text="Random X")
+            col.prop(tex_slot, "use_random_flip_y", text="Random Y")
+        layout.prop(brush, "use_texture_invert", text="Invert")
 
     if sculpt:
         # texture_sample_bias

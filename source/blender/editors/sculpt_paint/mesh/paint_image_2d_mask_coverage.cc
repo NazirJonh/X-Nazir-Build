@@ -77,9 +77,13 @@ float mask_coverage_sample_2d(const MaskCoverageSample2D &params,
     }
     const bke::PaintRuntime *paint_runtime =
         params.paint != nullptr ? params.paint->runtime : nullptr;
+    /* The PBR Mask Source through the texture engine: the direct path (#sample_direct_layout)
+     * applies the shared source flip, so the fallback samples with the
+     * #eBrushTextureSlot::ChannelSource contract and both paths read the same. */
     intensity = BKE_brush_sample_tex_3d(params.paint,
                                         params.brush,
                                         params.mtex,
+                                        eBrushTextureSlot::ChannelSource,
                                         texco,
                                         rgba,
                                         thread,
@@ -139,8 +143,16 @@ float mask_coverage_sample_area_2d(const MaskCoverageSampleArea2D &params,
   }
   float3 point = position;
   mul_m4_v3(local_mat.ptr(), point);
-  const float tex_x = point.x * mtex->size[0] + mtex->ofs[0];
-  const float tex_y = point.y * mtex->size[1] + mtex->ofs[1];
+  float tex_x = point.x * mtex->size[0] + mtex->ofs[0];
+  float tex_y = point.y * mtex->size[1] + mtex->ofs[1];
+  /* The shared source mapping mirrors every channel's source, so the Mask Source read follows the
+   * same flip as the color channels. Applied before both the cached and the live sample. */
+  const SourceFlip flip = params.brush != nullptr ?
+                              material_source_flip(*params.brush,
+                                                   params.paint != nullptr ? params.paint->runtime :
+                                                                             nullptr) :
+                              SourceFlip{};
+  material_source_flip_coords(flip, tex_x, tex_y);
 
   float value = 0.0f;
   float4 rgba;
@@ -176,7 +188,10 @@ float mask_coverage_sample_area_2d(const MaskCoverageSampleArea2D &params,
   if (source.kind != ChannelSourceKind::Mtex) {
     return finish_area(0.0f);
   }
-  /* Procedural or otherwise engine-sampled texture: the one branch the cache cannot cover. */
+  /* Procedural or otherwise engine-sampled texture: the one branch the cache cannot cover. The
+   * coordinates above already carry the shared source flip, and a #eBrushTextureSlot::ChannelSource
+   * sample takes neither a flip nor an invert of its own, so the bare sampler reads exactly the
+   * point the direct path would. */
   const bke::PaintRuntime *paint_runtime = params.paint != nullptr ? params.paint->runtime : nullptr;
   const bool decoded_by_engine = paint_runtime != nullptr && paint_runtime->do_linear_conversion;
   paint_get_tex_pixel(mtex, tex_x, tex_y, params.pool, thread, &value, rgba);

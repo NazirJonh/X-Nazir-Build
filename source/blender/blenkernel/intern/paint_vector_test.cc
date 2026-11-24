@@ -357,6 +357,9 @@ static bke::CurvePatchParams make_curve_patch_params()
   params.stamp_use_random_angle = true;
   params.stamp_size_random = 0.2f;
   params.stamp_strength_random = 0.3f;
+  params.stamp_spacing_random = 0.4f;
+  params.stamp_flip_x_random = 0.6f;
+  params.stamp_flip_y_random = 0.1f;
   params.stamp_seed = 42;
   params.spacing_frac = 0.15f;
   params.jitter_amount = 0.05f;

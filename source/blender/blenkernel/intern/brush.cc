@@ -2036,9 +2036,118 @@ void BKE_brush_tex_aspect_correction_update(const Paint &paint, const Brush &bru
                                                                              nullptr);
 }
 
+/** This dab's random flip of \a slot on one axis; false for slots without stroke-lifetime state. */
+static bool brush_tex_flip_random(const Paint *paint, const eBrushTextureSlot slot, const bool x)
+{
+  if (paint == nullptr || paint->runtime == nullptr) {
+    return false;
+  }
+  const bke::BrushTexFlipState &state = paint->runtime->tex_flip;
+  switch (slot) {
+    case eBrushTextureSlot::Brush:
+      return x ? state.brush_x : state.brush_y;
+    case eBrushTextureSlot::Mask:
+      return x ? state.mask_x : state.mask_y;
+    case eBrushTextureSlot::ChannelSource:
+      return x ? state.channel_x : state.channel_y;
+    case eBrushTextureSlot::FaceSetColor:
+      return false;
+  }
+  return false;
+}
+
+constexpr int mtex_flip_random_bits()
+{
+  return MTEX_MAPPING_FLIP_X_RANDOM | MTEX_MAPPING_FLIP_Y_RANDOM;
+}
+
+bool BKE_brush_mtex_flip_random_eligible(const MTex &mtex)
+{
+  return mtex.tex != nullptr && mtex.brush_map_mode != MTEX_MAP_MODE_3D &&
+         (mtex.mapping_flags & mtex_flip_random_bits()) != 0;
+}
+
+bool BKE_brush_material_source_flip_random_eligible(const BrushMaterialPaint *material_paint)
+{
+  if (material_paint == nullptr) {
+    return false;
+  }
+  const MTex &mapping = material_paint->shared_source_mapping;
+  return mapping.brush_map_mode != MTEX_MAP_MODE_3D &&
+         (int(mapping.mapping_flags) & mtex_flip_random_bits()) != 0;
+}
+
+/** Shared body of #BKE_brush_mtex_flip_x / _y: one axis, static bit XOR random draw. */
+static bool brush_mtex_flip_axis(const Paint *paint,
+                                 const MTex &mtex,
+                                 const eBrushTextureSlot slot,
+                                 const bool x)
+{
+  /* Object space samples the texture at a 3D point, so there is no 2D coordinate to mirror and
+   * every sampler skips the flip in that mode. Enforcing it here keeps the stroke paths and the
+   * previews (which read the same helper) from disagreeing on a #MTEX_MAP_MODE_3D slot. */
+  if (mtex.brush_map_mode == MTEX_MAP_MODE_3D) {
+    return false;
+  }
+  const eMTex_BrushMappingFlags static_bit = x ? MTEX_MAPPING_FLIP_X : MTEX_MAPPING_FLIP_Y;
+  const eMTex_BrushMappingFlags random_bit = x ? MTEX_MAPPING_FLIP_X_RANDOM :
+                                                MTEX_MAPPING_FLIP_Y_RANDOM;
+  bool flip = (mtex.mapping_flags & static_bit) != 0;
+  if ((mtex.mapping_flags & random_bit) != 0) {
+    flip = flip != brush_tex_flip_random(paint, slot, x);
+  }
+  return flip;
+}
+
+bool BKE_brush_mtex_flip_x(const Paint *paint, const MTex &mtex, const eBrushTextureSlot slot)
+{
+  return brush_mtex_flip_axis(paint, mtex, slot, true);
+}
+
+bool BKE_brush_mtex_flip_y(const Paint *paint, const MTex &mtex, const eBrushTextureSlot slot)
+{
+  return brush_mtex_flip_axis(paint, mtex, slot, false);
+}
+
+/** Mirrors the sampled coordinates of an already resolved flip pair. Shared by every sampler. */
+static void mtex_flip_coords(const bool flip_x, const bool flip_y, float &x, float &y)
+{
+  if (flip_x) {
+    x = -x;
+  }
+  if (flip_y) {
+    y = -y;
+  }
+}
+
+void BKE_brush_texture_invert_value(const bool has_rgb, float *r_intensity, float r_rgba[4])
+{
+  if (has_rgb) {
+    r_rgba[3] = 1.0f - r_rgba[3];
+    *r_intensity = 1.0f - *r_intensity;
+  }
+  else {
+    *r_intensity = 1.0f - *r_intensity;
+    r_rgba[0] = r_rgba[1] = r_rgba[2] = *r_intensity;
+  }
+}
+
+void BKE_brush_texture_invert_apply(const eBrushTextureSlot slot,
+                                    const Brush &brush,
+                                    const bool has_rgb,
+                                    float *r_intensity,
+                                    float r_rgba[4])
+{
+  if (slot != eBrushTextureSlot::Brush || (brush.flag2 & BRUSH_TEXTURE_INVERT) == 0) {
+    return;
+  }
+  BKE_brush_texture_invert_value(has_rgb, r_intensity, r_rgba);
+}
+
 float BKE_brush_sample_tex_3d(const Paint *paint,
                               const Brush *br,
                               const MTex *mtex,
+                              const eBrushTextureSlot slot,
                               const float3 &point,
                               float4 &rgba,
                               const int thread,
@@ -2079,6 +2188,13 @@ float BKE_brush_sample_tex_3d(const Paint *paint,
     }
     x /= (br->stencil_dimension[0]);
     y /= (br->stencil_dimension[1]);
+
+    /* The slot's flip contract: static bits XOR this dab's random draw, resolved once per sample.
+     * The helpers read a 3D slot as unflipped, but this branch is stencil-mapped by definition. */
+    mtex_flip_coords(BKE_brush_mtex_flip_x(paint, *mtex, slot),
+                     BKE_brush_mtex_flip_y(paint, *mtex, slot),
+                     x,
+                     y);
 
     float3 co(x, y, 0.0f);
     hasrgb = RE_texture_evaluate(mtex, co, thread, pool, false, false, &intensity, rgba);
@@ -2152,9 +2268,22 @@ float BKE_brush_sample_tex_3d(const Paint *paint,
     x *= paint_runtime->tex_aspect_correction[0];
     y *= paint_runtime->tex_aspect_correction[1];
 
+    mtex_flip_coords(BKE_brush_mtex_flip_x(paint, *mtex, slot),
+                     BKE_brush_mtex_flip_y(paint, *mtex, slot),
+                     x,
+                     y);
+
     float3 co(x, y, 0.0f);
 
     hasrgb = RE_texture_evaluate(mtex, co, thread, pool, false, false, &intensity, rgba);
+  }
+
+  /* Invert contract: part of the raw sample, before the bias and before any colorspace decode the
+   * caller applies (see #BKE_brush_texture_invert_apply). A brush without a texture samples as
+   * 1.0 (no clipping), so it must not be inverted either: a leftover #BRUSH_TEXTURE_INVERT would
+   * otherwise turn "no texture" into "paint nothing". */
+  if (mtex != nullptr && mtex->tex != nullptr) {
+    BKE_brush_texture_invert_apply(slot, *br, hasrgb, &intensity, rgba);
   }
 
   intensity += br->texture_sample_bias;
@@ -2188,6 +2317,9 @@ float BKE_brush_sample_masktex(
 {
   const bke::PaintRuntime *paint_runtime = paint->runtime;
   MTex *mtex = &br->mask_mtex;
+  /* The Mask slot's flip contract resolves once per sample (see #BKE_brush_mtex_flip_x). */
+  const bool flip_x = BKE_brush_mtex_flip_x(paint, *mtex, eBrushTextureSlot::Mask);
+  const bool flip_y = BKE_brush_mtex_flip_y(paint, *mtex, eBrushTextureSlot::Mask);
   float intensity;
   float4 dummy_rgba;
 
@@ -2217,6 +2349,8 @@ float BKE_brush_sample_masktex(
     }
     x /= (br->mask_stencil_dimension[0]);
     y /= (br->mask_stencil_dimension[1]);
+
+    mtex_flip_coords(flip_x, flip_y, x, y);
 
     co[0] = x;
     co[1] = y;
@@ -2287,6 +2421,8 @@ float BKE_brush_sample_masktex(
 
     x *= paint_runtime->mask_tex_aspect_correction[0];
     y *= paint_runtime->mask_tex_aspect_correction[1];
+
+    mtex_flip_coords(flip_x, flip_y, x, y);
 
     co[0] = x;
     co[1] = y;
@@ -2528,6 +2664,15 @@ float BKE_brush_mask_tex_area_coverage(const Brush &brush,
 
   x *= aspect_correction.x;
   y *= aspect_correction.y;
+
+  /* The Mask slot's flip contract: mirrors the query point the same way #BKE_brush_sample_masktex
+   * does (after the aspect correction, before the evaluation). The LUT caches values in
+   * mask-texture space, so the flip is a transform of the request, not of the cache, and the same
+   * table serves flipped and unflipped queries. */
+  mtex_flip_coords(BKE_brush_mtex_flip_x(paint, mask_mtex, eBrushTextureSlot::Mask),
+                   BKE_brush_mtex_flip_y(paint, mask_mtex, eBrushTextureSlot::Mask),
+                   x,
+                   y);
 
   float value = 1.0f;
   if (lut == nullptr || !lut->sample(brush, aspect_correction, x, y, thread, pool, value)) {
@@ -3124,6 +3269,34 @@ static bool brush_gen_texture(const Brush *br,
   const MTex *mask_mtex = brush_radial_stroke_mask_mtex(br, use_secondary, mtex);
   const bool is_color_preview = use_material_source ||
                                 (mtex != &br->mtex && mtex != &br->mask_mtex);
+  /* Which slot is previewed, so the flip and invert contract below matches what the stroke does:
+   * the brush texture takes both, the Mask slot takes its own flip only, a PBR channel source
+   * reads the shared source mapping's flip and never the brush texture's invert. */
+  eBrushTextureSlot preview_slot = eBrushTextureSlot::ChannelSource;
+  if (mtex == &br->mask_mtex) {
+    preview_slot = eBrushTextureSlot::Mask;
+  }
+  else if (mtex == &br->mtex) {
+    preview_slot = eBrushTextureSlot::Brush;
+  }
+  /* The slot's static flip resolves once for the whole preview; the per-dab random flip is stroke
+   * state the preview cannot see (no #Paint here, see #BKE_brush_mtex_flip_x). */
+  bool preview_flip_x = false;
+  bool preview_flip_y = false;
+  if (preview_slot == eBrushTextureSlot::ChannelSource) {
+    if (br->material_paint != nullptr &&
+        br->material_paint->shared_source_mapping.brush_map_mode != MTEX_MAP_MODE_3D)
+    {
+      const eMTex_BrushMappingFlags flags =
+          br->material_paint->shared_source_mapping.mapping_flags;
+      preview_flip_x = (flags & MTEX_MAPPING_FLIP_X) != 0;
+      preview_flip_y = (flags & MTEX_MAPPING_FLIP_Y) != 0;
+    }
+  }
+  else {
+    preview_flip_x = BKE_brush_mtex_flip_x(nullptr, *mtex, preview_slot);
+    preview_flip_y = BKE_brush_mtex_flip_y(nullptr, *mtex, preview_slot);
+  }
   if (r_is_color != nullptr) {
     *r_is_color = is_color_preview;
   }
@@ -3188,7 +3361,13 @@ static bool brush_gen_texture(const Brush *br,
         has_rgb = true;
       }
       else {
-        has_rgb = RE_texture_evaluate(mtex, co, 0, pool, false, false, &intensity, rgba);
+        /* Preview the slot's flip; #preview_slot gates the invert to the brush texture only, the
+         * same rule the stroke's samplers follow. Applied before any bias-like step, matching the
+         * invert contract (#BKE_brush_texture_invert_apply). */
+        float co_flipped[3] = {co[0], co[1], co[2]};
+        mtex_flip_coords(preview_flip_x, preview_flip_y, co_flipped[0], co_flipped[1]);
+        has_rgb = RE_texture_evaluate(mtex, co_flipped, 0, pool, false, false, &intensity, rgba);
+        BKE_brush_texture_invert_apply(preview_slot, *br, has_rgb, &intensity, rgba);
       }
       float *px = &rect[(iy * side + ix) * 4];
       if (has_rgb && is_color_preview) {

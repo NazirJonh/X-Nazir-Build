@@ -640,6 +640,9 @@ static void paint_2d_source_mtex_2d_update(BrushPainter *painter)
     MTex &mtex_2d = painter->source_mtex_2d[channel];
     mtex_2d = dna::shallow_copy(*painter->channel_sources->source(channel).mtex);
     mtex_2d.brush_map_mode = map_mode;
+    /* The shared mapping owns the channel flip; the texture-engine fallback samples this copy and
+     * must see the same static bits the direct layout resolves. */
+    ed::sculpt_paint::material::material_source_mtex_apply_flip(*painter->brush, mtex_2d);
 
     /* Plan the direct sample against the remapped #MTex, not the stored one, so the layout uses
      * the 2D mapping mode. Area Plane never reaches this sampler, hence the null local matrix. */
@@ -841,7 +844,10 @@ static float paint_2d_sample_channel_source(const BrushPainter *painter,
   const bke::PaintRuntime *paint_runtime = painter->paint->runtime;
   float intensity;
   /* True when #BKE_brush_sample_tex_3d already ran its own decode below, which rules out the
-   * source-level decode that follows. The direct sampler never decodes. */
+   * source-level decode that follows. The direct sampler never decodes. The fallback samples with
+   * the #eBrushTextureSlot::ChannelSource contract, so like the direct path (#sample_direct_layout)
+   * it applies the shared source flip but never #Brush.mtex's own flip or invert: one PBR channel
+   * reads the same on both paths. */
   bool decoded_by_engine = false;
 
   const ed::sculpt_paint::material::DirectSampleLayout &layout = painter->source_layouts[channel];
@@ -859,8 +865,14 @@ static float paint_2d_sample_channel_source(const BrushPainter *painter,
       return 0.0f;
     }
     const MTex &mtex_2d = painter->source_mtex_2d[channel];
-    intensity = BKE_brush_sample_tex_3d(
-        painter->paint, painter->brush, &mtex_2d, texco, r_rgba, thread, pool);
+    intensity = BKE_brush_sample_tex_3d(painter->paint,
+                                        painter->brush,
+                                        &mtex_2d,
+                                        eBrushTextureSlot::ChannelSource,
+                                        texco,
+                                        r_rgba,
+                                        thread,
+                                        pool);
     decoded_by_engine = paint_runtime != nullptr && paint_runtime->do_linear_conversion;
   }
 
@@ -971,8 +983,15 @@ static float paint_2d_view_dab_brush_coverage(const BrushPainter *painter,
   }
   float3 texco;
   brush_imbuf_tex_co(*tex_mapping, x, y, texco);
-  BKE_brush_sample_tex_3d(
-      painter->paint, painter->brush, mtex, texco, r_brush_rgba, thread, pool);
+  /* The caller hands in #Brush.mtex: the brush texture slot, whose alpha is the dab coverage. */
+  BKE_brush_sample_tex_3d(painter->paint,
+                          painter->brush,
+                          mtex,
+                          eBrushTextureSlot::Brush,
+                          texco,
+                          r_brush_rgba,
+                          thread,
+                          pool);
   return r_brush_rgba[3];
 }
 
@@ -1438,7 +1457,8 @@ static void brush_painter_imbuf_fill(BrushPainter *painter,
         if (is_texbrush) {
           brush_imbuf_tex_co(tex_mapping, x, y, texco);
           const MTex *mtex = &brush->mtex;
-          BKE_brush_sample_tex_3d(painter->paint, brush, mtex, texco, rgba, thread, pool);
+          BKE_brush_sample_tex_3d(
+              painter->paint, brush, mtex, eBrushTextureSlot::Brush, texco, rgba, thread, pool);
           if (!paint_2d_material_channel_replaces_rgb(painter)) {
             if (cache->is_srgb) {
               IMB_colormanagement_scene_linear_to_srgb_v3(rgba, rgba);
@@ -1590,7 +1610,14 @@ static void brush_painter_imbuf_update(BrushPainter *painter,
             if (!use_texture_old) {
               if (is_texbrush) {
                 brush_imbuf_tex_co(tex_mapping, x, y, texco);
-                BKE_brush_sample_tex_3d(painter->paint, brush, mtex, texco, rgba, thread, pool);
+                BKE_brush_sample_tex_3d(painter->paint,
+                                        brush,
+                                        mtex,
+                                        eBrushTextureSlot::Brush,
+                                        texco,
+                                        rgba,
+                                        thread,
+                                        pool);
                 if (!paint_2d_material_channel_replaces_rgb(painter)) {
                   if (cache->is_srgb) {
                     IMB_colormanagement_scene_linear_to_srgb_v3(rgba, rgba);
@@ -2901,11 +2928,17 @@ static void paint_2d_sample_area_mtex(
     }
     return;
   }
+  /* The shared source mapping mirrors every channel's source the same way, so the flip resolves
+   * once for both branches below and is applied to the placement before either sampler reads it. */
+  const ed::sculpt_paint::material::SourceFlip source_flip =
+      ed::sculpt_paint::material::material_source_flip(
+          *painter->brush, painter->paint ? painter->paint->runtime : nullptr);
   if (source.kind == ed::sculpt_paint::material::ChannelSourceKind::Baked) {
     float3 point = position;
     mul_m4_v3(local_mat.ptr(), point);
-    const float tex_x = point.x * source.mtex->size[0] + source.mtex->ofs[0];
-    const float tex_y = point.y * source.mtex->size[1] + source.mtex->ofs[1];
+    float tex_x = point.x * source.mtex->size[0] + source.mtex->ofs[0];
+    float tex_y = point.y * source.mtex->size[1] + source.mtex->ofs[1];
+    ed::sculpt_paint::material::material_source_flip_coords(source_flip, tex_x, tex_y);
     const bool ok = painter->channel_sources->sample_image_direct(
         source, tex_x, tex_y, r_value, r_rgba);
     if (!ok) {
@@ -2919,8 +2952,9 @@ static void paint_2d_sample_area_mtex(
   float3 point = position;
   mul_m4_v3(local_mat.ptr(), point);
   const MTex *mtex = source.mtex;
-  const float tex_x = point.x * mtex->size[0] + mtex->ofs[0];
-  const float tex_y = point.y * mtex->size[1] + mtex->ofs[1];
+  float tex_x = point.x * mtex->size[0] + mtex->ofs[0];
+  float tex_y = point.y * mtex->size[1] + mtex->ofs[1];
+  ed::sculpt_paint::material::material_source_flip_coords(source_flip, tex_x, tex_y);
   if (!painter->channel_sources->sample_image_direct(source, tex_x, tex_y, r_value, r_rgba)) {
     if (source.kind == ed::sculpt_paint::material::ChannelSourceKind::Image) {
       /* No #Tex to hand to the texture engine; see #sample_channel_source_with_layout. */
@@ -2931,6 +2965,9 @@ static void paint_2d_sample_area_mtex(
       return;
     }
     float value_unused;
+    /* The coordinates already carry the shared flip, and a #eBrushTextureSlot::ChannelSource
+     * sample has neither a flip nor an invert of its own, so the bare sampler reads the same
+     * point instead of mirroring it a second time. */
     paint_get_tex_pixel(
         mtex, tex_x, tex_y, pool, thread, r_value != nullptr ? r_value : &value_unused, r_rgba);
   }
@@ -3150,13 +3187,19 @@ static float paint_2d_area_sample_erase_strength(const BrushPainter *painter,
   const float3 point = math::transform_point(erase_local_mat, position);
   float value = 1.0f;
   float4 sampled;
-  paint_get_tex_pixel(mtex,
-                      point.x * mtex->size[0] + mtex->ofs[0],
-                      point.y * mtex->size[1] + mtex->ofs[1],
-                      pool,
-                      thread,
-                      &value,
-                      sampled);
+  /* Erase strength samples the brush texture as a strength mask, so it takes the texture's flip
+   * and invert (#paint_get_brush_tex_pixel). The invert runs before the bias threshold below, the
+   * same order the cursor's erase-strength overlay uses. */
+  paint_get_brush_tex_pixel(painter->paint,
+                            *painter->brush,
+                            mtex,
+                            eBrushTextureSlot::Brush,
+                            point.x * mtex->size[0] + mtex->ofs[0],
+                            point.y * mtex->size[1] + mtex->ofs[1],
+                            pool,
+                            thread,
+                            &value,
+                            sampled);
   return math::clamp(value - painter->brush->texture_sample_bias, 0.0f, 1.0f);
 }
 

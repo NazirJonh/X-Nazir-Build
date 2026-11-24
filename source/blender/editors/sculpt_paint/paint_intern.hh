@@ -19,6 +19,7 @@
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 
+#include "BKE_brush.hh"
 #include "BKE_curve_patch.hh"
 #include "BKE_customdata.hh"
 
@@ -969,6 +970,14 @@ bool paint_supports_stroke_randomness(const Brush &br, PaintMode mode);
  * change the fixed simulation update rate.
  */
 bool paint_supports_spacing_randomness(const Brush &br, PaintMode mode);
+/**
+ * Whether the stroke will actually sample a texture slot that has a random flip enabled
+ * (#MTEX_MAPPING_FLIP_X_RANDOM / #MTEX_MAPPING_FLIP_Y_RANDOM). One gate for initializing the
+ * stroke RNG and for drawing the flips: like the other randoms it needs the stroke kinds that
+ * really re-evaluate texture coordinates, and a slot without a texture draws nothing, so
+ * grab/anchored/cloth-like strokes spend no RNG draws on flips.
+ */
+bool paint_supports_flip_randomness(const Brush &br, PaintMode mode);
 bool paint_supports_smooth_stroke(const Brush &brush,
                                   PaintMode mode,
                                   BrushSwitchMode brush_switch_mode);
@@ -1780,6 +1789,28 @@ bool paint_get_tex_pixel(const MTex *mtex,
                          int thread,
                          float *r_intensity,
                          float r_rgba[4]);
+
+/**
+ * #paint_get_tex_pixel for a brush texture slot: mirrors the sampled coordinates on X/Y
+ * (#MTEX_MAPPING_FLIP_X / _Y static bits + the stroke's per-stroke-step random flips) and — for
+ * the brush texture slot only — inverts the sampled value (#BRUSH_TEXTURE_INVERT), so the sculpt
+ * sample paths match what #BKE_brush_sample_tex_3d does for its own callers. \a slot states what
+ * \a mtex is (see #eBrushTextureSlot): it selects the flip state and gates the invert; there is no
+ * way to apply or skip either per call.
+ *
+ * Invert contract order: this runs before the caller's bias/colorspace steps (see
+ * #BKE_brush_texture_invert_apply).
+ */
+bool paint_get_brush_tex_pixel(const Paint *paint,
+                               const Brush &brush,
+                               const MTex *mtex,
+                               eBrushTextureSlot slot,
+                               float u,
+                               float v,
+                               ImagePool *pool,
+                               int thread,
+                               float *r_intensity,
+                               float r_rgba[4]);
 
 void paint_stroke_operator_properties(wmOperatorType *ot);
 

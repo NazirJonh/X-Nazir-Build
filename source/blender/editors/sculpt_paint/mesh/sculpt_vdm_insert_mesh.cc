@@ -600,7 +600,21 @@ static float3 stamp_displacement(const VDMStampData &stamp,
 
   float value;
   float4 rgba;
-  paint_get_tex_pixel(mtex, x, y, tex_pool, thread_id, &value, rgba);
+  /* The stamp has no #Paint context, so the slot-aware helper sees only the slot's static flip --
+   * the per-dab random flip is stroke state a baked stamp cannot read, the same the radial-control
+   * preview shows. \a mtex is the brush's sculpt-mode texture (#Brush.mtex): the #Brush slot, so
+   * its invert (#BRUSH_TEXTURE_INVERT) runs here, before the bias steps below, like in the live
+   * stroke. */
+  paint_get_brush_tex_pixel(nullptr,
+                            brush,
+                            mtex,
+                            eBrushTextureSlot::Brush,
+                            x,
+                            y,
+                            tex_pool,
+                            thread_id,
+                            &value,
+                            rgba);
 
   float3 disp;
   if (use_vector_displacement) {

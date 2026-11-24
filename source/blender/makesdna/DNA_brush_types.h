@@ -599,8 +599,17 @@ struct BrushCurvePatchSettings {
   /** Deprecated: STAMPS mode per-stamp strength randomization, moved to #Brush::strength_random,
    * see #stamp_size_random. */
   char stamp_strength_random = 0;
-  /* Absorbs the deprecated stamp randoms above; keeps `tex_start` on its 8-byte boundary. */
-  char _pad1[4] = {};
+  /** STAMPS FILL layout: per-stamp spacing randomization as a percentage (RNA-clamped 0..100).
+   * Each stamp's position shifts along the curve by up to +-Spacing Random of the stamp step, on
+   * top of the world-space Jitter scatter. */
+  char stamp_spacing_random = 0;
+  /** STAMPS mode: chance in percent that a stamp's texture mirrors horizontally (per stamp, a
+   * hash draw; random flip). */
+  char stamp_flip_x_random = 0;
+  /** STAMPS mode: chance in percent that a stamp's texture mirrors vertically. */
+  char stamp_flip_y_random = 0;
+  /* Keeps `tex_start` on its 8-byte boundary. */
+  char _pad1[1] = {};
   /** Whether the whole ribbon carries the brush's own texture or splits into the Start / Middle /
    * End textures below. See #eBrushCurvePatchTexSource. */
   char ribbon_texture_source = BRUSH_CURVE_PATCH_TEX_SINGLE;

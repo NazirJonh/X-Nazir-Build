@@ -373,7 +373,8 @@ TEST_F(paint_curve_patch_stamps, spacing_controls_count_and_positions)
   spline.build_from_positions(Span(points, 2));
 
   Vector<CurvePatchStamp> stamps;
-  curve_patch_stamps_build(spline, 1.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1u, {}, stamps);
+  curve_patch_stamps_build(
+      spline, 1.0f, 0.5f, 0.0f, CurvePatchStampRandom{}, 0.0f, 0.0f, 1u, {}, stamps);
 
   EXPECT_EQ(stamps.size(), 11);
   EXPECT_NEAR(stamps[0].center_v, 0.0f, 1e-5f);
@@ -395,9 +396,10 @@ TEST_F(paint_curve_patch_stamps, same_seed_is_reproducible_different_seed_is_not
   spline.build_from_positions(Span(points, 2));
 
   Vector<CurvePatchStamp> a, b, c;
-  curve_patch_stamps_build(spline, 1.0f, 0.5f, 0.5f, 0.5f, 0.5f, 0.0f, 1.0f, 7u, {}, a);
-  curve_patch_stamps_build(spline, 1.0f, 0.5f, 0.5f, 0.5f, 0.5f, 0.0f, 1.0f, 7u, {}, b);
-  curve_patch_stamps_build(spline, 1.0f, 0.5f, 0.5f, 0.5f, 0.5f, 0.0f, 1.0f, 8u, {}, c);
+  const CurvePatchStampRandom random{.size = 0.5f, .strength = 0.5f};
+  curve_patch_stamps_build(spline, 1.0f, 0.5f, 0.5f, random, 0.0f, 1.0f, 7u, {}, a);
+  curve_patch_stamps_build(spline, 1.0f, 0.5f, 0.5f, random, 0.0f, 1.0f, 7u, {}, b);
+  curve_patch_stamps_build(spline, 1.0f, 0.5f, 0.5f, random, 0.0f, 1.0f, 8u, {}, c);
 
   ASSERT_EQ(a.size(), b.size());
   ASSERT_EQ(a.size(), c.size());
@@ -413,6 +415,63 @@ TEST_F(paint_curve_patch_stamps, same_seed_is_reproducible_different_seed_is_not
   EXPECT_TRUE(c_differs);
 }
 
+/* Random Spacing shifts each stamp along the curve but never changes how many are laid out. */
+TEST_F(paint_curve_patch_stamps, spacing_random_shifts_positions_without_changing_count)
+{
+  CurvePatchSpline spline;
+  const float3 points[2] = {float3(0.0f, 0.0f, 0.0f), float3(10.0f, 0.0f, 0.0f)};
+  spline.build_from_positions(Span(points, 2));
+
+  Vector<CurvePatchStamp> plain, shifted;
+  curve_patch_stamps_build(
+      spline, 1.0f, 0.5f, 0.0f, CurvePatchStampRandom{}, 0.0f, 0.0f, 5u, {}, plain);
+  curve_patch_stamps_build(spline,
+                           1.0f,
+                           0.5f,
+                           0.0f,
+                           CurvePatchStampRandom{.spacing = 0.5f},
+                           0.0f,
+                           0.0f,
+                           5u,
+                           {},
+                           shifted);
+
+  ASSERT_EQ(plain.size(), shifted.size());
+  bool moved = false;
+  for (const int i : plain.index_range()) {
+    /* A shift is at most half a stamp step (the step is 1 world unit here). */
+    const float shift = std::abs(shifted[i].center_v - plain[i].center_v);
+    EXPECT_LE(shift, 0.5f + 1e-5f);
+    moved |= shift > 1e-4f;
+  }
+  EXPECT_TRUE(moved);
+}
+
+/* A 100% Random Flip chance mirrors every stamp; the draw is per stamp and reproducible by seed. */
+TEST_F(paint_curve_patch_stamps, flip_random_chance_mirrors_stamps)
+{
+  CurvePatchSpline spline;
+  const float3 points[2] = {float3(0.0f, 0.0f, 0.0f), float3(10.0f, 0.0f, 0.0f)};
+  spline.build_from_positions(Span(points, 2));
+
+  const CurvePatchStampRandom mirrored{.flip_u = 1.0f, .flip_v = 1.0f};
+  Vector<CurvePatchStamp> unflipped, flipped, flipped_again;
+  curve_patch_stamps_build(
+      spline, 1.0f, 0.5f, 0.0f, CurvePatchStampRandom{}, 0.0f, 0.0f, 3u, {}, unflipped);
+  curve_patch_stamps_build(spline, 1.0f, 0.5f, 0.0f, mirrored, 0.0f, 0.0f, 3u, {}, flipped);
+  curve_patch_stamps_build(spline, 1.0f, 0.5f, 0.0f, mirrored, 0.0f, 0.0f, 3u, {}, flipped_again);
+
+  ASSERT_EQ(unflipped.size(), flipped.size());
+  ASSERT_EQ(flipped.size(), flipped_again.size());
+  for (const int i : unflipped.index_range()) {
+    EXPECT_EQ(unflipped[i].flip, CurvePatchStampFlip_None);
+    EXPECT_TRUE(flipped[i].flip & CurvePatchStampFlip_U);
+    EXPECT_TRUE(flipped[i].flip & CurvePatchStampFlip_V);
+    /* The layout is recomputed on every event, so the same seed must give the same mirror. */
+    EXPECT_EQ(flipped[i].flip, flipped_again[i].flip);
+  }
+}
+
 /* Randomization only ever reduces: a stamp never exceeds the brush radius or full strength, and
  * never drops to zero or below. Jitter stays inside the requested amount. */
 TEST_F(paint_curve_patch_stamps, randomization_stays_in_range)
@@ -423,8 +482,16 @@ TEST_F(paint_curve_patch_stamps, randomization_stays_in_range)
 
   for (const uint32_t seed : {1u, 42u, 12345u}) {
     Vector<CurvePatchStamp> stamps;
-    curve_patch_stamps_build(
-        spline, 2.0f, 0.25f, 0.75f, 1.0f, 1.0f, 0.0f, float(M_PI), seed, {}, stamps);
+    curve_patch_stamps_build(spline,
+                             2.0f,
+                             0.25f,
+                             0.75f,
+                             CurvePatchStampRandom{.size = 1.0f, .strength = 1.0f},
+                             0.0f,
+                             float(M_PI),
+                             seed,
+                             {},
+                             stamps);
     ASSERT_FALSE(stamps.is_empty());
     for (const CurvePatchStamp &stamp : stamps) {
       EXPECT_GT(stamp.half_extent, 0.0f);
@@ -445,7 +512,8 @@ TEST_F(paint_curve_patch_stamps, sorted_by_arc_length_after_jitter)
   spline.build_from_positions(Span(points, 2));
 
   Vector<CurvePatchStamp> stamps;
-  curve_patch_stamps_build(spline, 2.0f, 0.25f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 3u, {}, stamps);
+  curve_patch_stamps_build(
+      spline, 2.0f, 0.25f, 2.0f, CurvePatchStampRandom{}, 0.0f, 0.0f, 3u, {}, stamps);
   for (const int i : IndexRange(1, stamps.size() - 1)) {
     EXPECT_GE(stamps[i].center_v, stamps[i - 1].center_v);
   }
@@ -467,7 +535,8 @@ TEST_F(paint_curve_patch_stamps, cyclic_holds_a_whole_number_of_stamps)
   Vector<CurvePatchStamp> stamps;
   /* Requested step 2.5 does not divide 12; it is snapped to 2.4 (5 stamps) so the last stamp does
    * not land on top of the first. */
-  curve_patch_stamps_build(spline, 1.0f, 1.25f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1u, {}, stamps);
+  curve_patch_stamps_build(
+      spline, 1.0f, 1.25f, 0.0f, CurvePatchStampRandom{}, 0.0f, 0.0f, 1u, {}, stamps);
   EXPECT_EQ(stamps.size(), 5);
   EXPECT_NEAR(stamps[0].center_v, 0.0f, 1e-5f);
   EXPECT_NEAR(stamps.last().center_v, 9.6f, 1e-5f);
@@ -551,7 +620,16 @@ TEST_F(paint_curve_patch_stamps, cyclic_wrap_keeps_the_list_sorted)
   spline.build_from_positions(Span(points, 4), {}, true);
 
   Vector<CurvePatchStamp> stamps;
-  curve_patch_stamps_build(spline, 1.0f, 0.5f, 0.3f, 0.5f, 0.5f, 0.0f, 1.0f, 11u, {}, stamps);
+  curve_patch_stamps_build(spline,
+                           1.0f,
+                           0.5f,
+                           0.3f,
+                           CurvePatchStampRandom{.size = 0.5f, .strength = 0.5f},
+                           0.0f,
+                           1.0f,
+                           11u,
+                           {},
+                           stamps);
   const int real_num = stamps.size();
   ASSERT_GT(real_num, 2);
 
@@ -923,8 +1001,7 @@ TEST_F(paint_curve_patch_stamps, stamps_build_without_cdf_uses_brush_texture)
                            /*radius=*/1.0f,
                            /*spacing_frac=*/0.5f,
                            /*jitter_amount=*/0.0f,
-                           /*size_random=*/0.0f,
-                           /*strength_random=*/0.0f,
+                           /*random=*/CurvePatchStampRandom{},
                            /*base_angle=*/0.0f,
                            /*random_angle=*/0.0f,
                            /*seed=*/1234u,
@@ -949,8 +1026,7 @@ TEST_F(paint_curve_patch_stamps, stamps_build_texture_index_is_deterministic)
                            /*radius=*/1.0f,
                            /*spacing_frac=*/0.5f,
                            /*jitter_amount=*/0.0f,
-                           /*size_random=*/0.0f,
-                           /*strength_random=*/0.0f,
+                           /*random=*/CurvePatchStampRandom{},
                            /*base_angle=*/0.0f,
                            /*random_angle=*/0.0f,
                            /*seed=*/7u,
@@ -960,8 +1036,7 @@ TEST_F(paint_curve_patch_stamps, stamps_build_texture_index_is_deterministic)
                            /*radius=*/1.0f,
                            /*spacing_frac=*/0.5f,
                            /*jitter_amount=*/0.0f,
-                           /*size_random=*/0.0f,
-                           /*strength_random=*/0.0f,
+                           /*random=*/CurvePatchStampRandom{},
                            /*base_angle=*/0.0f,
                            /*random_angle=*/0.0f,
                            /*seed=*/7u,
@@ -971,8 +1046,7 @@ TEST_F(paint_curve_patch_stamps, stamps_build_texture_index_is_deterministic)
                            /*radius=*/1.0f,
                            /*spacing_frac=*/0.5f,
                            /*jitter_amount=*/0.0f,
-                           /*size_random=*/0.0f,
-                           /*strength_random=*/0.0f,
+                           /*random=*/CurvePatchStampRandom{},
                            /*base_angle=*/0.0f,
                            /*random_angle=*/0.0f,
                            /*seed=*/99u,
@@ -1013,8 +1087,7 @@ TEST_F(paint_curve_patch_stamps, cyclic_wrap_ghosts_inherit_texture_index)
                            /*radius=*/0.5f,
                            /*spacing_frac=*/0.5f,
                            /*jitter_amount=*/0.0f,
-                           /*size_random=*/0.0f,
-                           /*strength_random=*/0.0f,
+                           /*random=*/CurvePatchStampRandom{},
                            /*base_angle=*/0.0f,
                            /*random_angle=*/0.0f,
                            /*seed=*/3u,

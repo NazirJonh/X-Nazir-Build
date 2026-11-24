@@ -134,6 +134,13 @@ struct DirectSampleLayout {
   float stencil_dim_y = 1.0f;
   float sample_bias = 0.0f;
   bool rotate = false;
+  /**
+   * Mirror the sampled coordinates on X/Y, resolved for this dab from the shared source mapping
+   * (static bits and, in a live stroke, the per-dab random draw). Applied after the placement math
+   * in #sample_direct_layout, so it mirrors the same point the texture engine would.
+   */
+  bool flip_x = false;
+  bool flip_y = false;
   /** Pinned source image, filled once per chunk when #kind is not Disabled. */
   const float *float_pixels = nullptr;
   const uchar *byte_pixels = nullptr;
@@ -1049,6 +1056,35 @@ DirectSampleLayout make_direct_sample_layout(const ChannelSourceSet::ChannelSour
                                              const bke::PaintRuntime *paint_runtime,
                                              const Brush &brush,
                                              const float4x4 *area_local_mat);
+
+/**
+ * Flip state of the PBR channel sources for the current dab: the shared source mapping's static
+ * X/Y bits XOR-ed with the stroke's random draw (#bke::BrushTexFlipState::channel_x/_y). Pass a
+ * null \a runtime outside a stroke to read the static bits only (previews).
+ *
+ * Applies to the 2D/UV sampling paths; object-space (3D) sampling takes no flip, exactly like the
+ * brush texture slots (see #BKE_brush_mtex_flip_x), so a preview of a 3D-mapped source has to
+ * skip it itself.
+ *
+ * The same state feeds every channel because #BrushMaterialPaint::shared_source_mapping is one
+ * mapping, so a multi-channel pattern stays mirrored as a unit.
+ */
+struct SourceFlip {
+  bool x = false;
+  bool y = false;
+};
+SourceFlip material_source_flip(const Brush &brush, const bke::PaintRuntime *runtime);
+
+/** Mirror \a x / \a y according to \a flip, in the coordinate space the sampler expects. */
+void material_source_flip_coords(const SourceFlip &flip, float &x, float &y);
+
+/**
+ * OR the shared mapping's static flip bits into a channel #MTex, so the texture-engine sampler
+ * (#BKE_brush_sample_tex_3d / #paint_get_brush_tex_pixel with #eBrushTextureSlot::ChannelSource)
+ * applies the same static flip as the direct path. The random part comes from the stroke state,
+ * which those samplers already read; invert is never taken by a channel source.
+ */
+void material_source_mtex_apply_flip(const Brush &brush, MTex &mtex);
 
 /**
  * Sample \a layout at a point in the space its #DirectSampleLayout.kind expects: region

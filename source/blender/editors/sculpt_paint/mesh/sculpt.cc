@@ -3178,6 +3178,7 @@ static SculptBrushTexSampleCoords sculpt_brush_texture_sample_coords_get_screen(
 static void sculpt_sample_brush_mtex_at_screen(const SculptSession &ss,
                                                const Brush &brush,
                                                const MTex *mtex,
+                                               eBrushTextureSlot slot,
                                                const MTex *coord_mtex,
                                                const float2 screen_co,
                                                const int thread_id,
@@ -3198,21 +3199,39 @@ static void sculpt_sample_brush_mtex_at_screen(const SculptSession &ss,
     return;
   }
 
-  paint_get_tex_pixel(mtex, coords.x, coords.y, ss.tex_pool(), thread_id, r_value, &r_rgba[0]);
+  /* Flip the coordinates once so the image fallback below samples the same texels. */
+  float tex_u = coords.x;
+  float tex_v = coords.y;
+  if (BKE_brush_mtex_flip_x(cache.paint, *mtex, slot)) {
+    tex_u = -tex_u;
+  }
+  if (BKE_brush_mtex_flip_y(cache.paint, *mtex, slot)) {
+    tex_v = -tex_v;
+  }
+
+  const bool has_rgb = paint_get_tex_pixel(
+      mtex, tex_u, tex_v, ss.tex_pool(), thread_id, r_value, &r_rgba[0]);
+  /* The fallback below is for a texture the engine could not evaluate, so its test runs on the raw
+   * sample: the invert turns a bright sample dark and must not be mistaken for that case. */
+  const bool raw_is_black = sculpt_brush_mtex_sample_is_black(*r_value, r_rgba);
+
+  /* #BRUSH_TEXTURE_INVERT is part of the raw sample, so it runs before the bias, the same order
+   * #BKE_brush_sample_tex_3d keeps; the slot gate lives in #BKE_brush_texture_invert_apply. */
+  BKE_brush_texture_invert_apply(slot, brush, has_rgb, r_value, &r_rgba[0]);
   sculpt_sample_brush_mtex_apply_bias(brush, apply_texture_bias, r_value, r_rgba);
 
   /* Fallback: if paint_get_tex_pixel returns black (e.g., when Tex nodetree reads mesh UV),
    * try sampling image directly using brush texture coordinates. */
-  if (use_image_fallback && sculpt_brush_mtex_sample_is_black(*r_value, r_rgba) &&
-      mtex->tex != nullptr)
-  {
+  if (use_image_fallback && raw_is_black && mtex->tex != nullptr) {
     float image_rgb[3];
     if (sculpt_sample_color_image_at_brush_tex_coords(
-            *mtex->tex, coords.x, coords.y, ss.tex_pool(), image_rgb))
+            *mtex->tex, tex_u, tex_v, ss.tex_pool(), image_rgb))
     {
       copy_v3_v3(&r_rgba[0], image_rgb);
       r_rgba[3] = 1.0f;
       *r_value = max_ff(max_ff(image_rgb[0], image_rgb[1]), image_rgb[2]);
+      /* The substituted value replaces the raw sample, so it takes the same invert. */
+      BKE_brush_texture_invert_apply(slot, brush, has_rgb, r_value, &r_rgba[0]);
     }
   }
 
@@ -3417,10 +3436,12 @@ static float2 sculpt_roll_texture_coord(const StrokeCache &cache,
  * read mesh UVs, which sculpt cannot provide. It is opt-in because it is expensive (it acquires an
  * #ImBuf per sample) and because it would otherwise change the result of legitimately black
  * texture samples for every existing sculpt brush.
+ * \param slot: What \a mtex represents to the flip/invert contract — see #eBrushTextureSlot.
  */
 static void sculpt_sample_brush_mtex(const SculptSession &ss,
                                      const Brush &brush,
                                      const MTex *mtex,
+                                     eBrushTextureSlot slot,
                                      const float brush_point[3],
                                      const int thread_id,
                                      float *r_value,
@@ -3441,7 +3462,7 @@ static void sculpt_sample_brush_mtex(const SculptSession &ss,
      * matrix is identity in single-object mode. */
     const float3 point_3d = math::transform_point(cache.texture_sample_from_object, float3(point));
     *r_value = BKE_brush_sample_tex_3d(
-        cache.paint, &brush, mtex, point_3d, r_rgba, thread_id, ss.tex_pool());
+        cache.paint, &brush, mtex, slot, point_3d, r_rgba, thread_id, ss.tex_pool());
     return;
   }
 
@@ -3450,7 +3471,16 @@ static void sculpt_sample_brush_mtex(const SculptSession &ss,
      * work for the classic brush texture (Mask/alpha slot) as well -- notably for Stroke Method:
      * Curve, whose dabs feed the roll spline just like the Roll stroke method does. */
     const float2 final_pt = sculpt_roll_texture_coord(cache, brush, *mtex, float3(point));
-    paint_get_tex_pixel(mtex, final_pt[0], -final_pt[1], ss.tex_pool(), thread_id, r_value, &r_rgba[0]);
+    paint_get_brush_tex_pixel(cache.paint,
+                              brush,
+                              mtex,
+                              slot,
+                              final_pt[0],
+                              -final_pt[1],
+                              ss.tex_pool(),
+                              thread_id,
+                              r_value,
+                              &r_rgba[0]);
     sculpt_sample_brush_mtex_apply_bias(brush, apply_texture_bias, r_value, r_rgba);
     return;
   }
@@ -3467,26 +3497,49 @@ static void sculpt_sample_brush_mtex(const SculptSession &ss,
       return;
     }
 
-    paint_get_tex_pixel(mtex, coords.x, coords.y, ss.tex_pool(), thread_id, r_value, &r_rgba[0]);
+    /* Flip the coordinates once so the direct image fallback below samples the same texels as the
+     * texture; the invert runs on the value after it, before the bias (see
+     * #BKE_brush_texture_invert_apply). */
+    const bool flip_u = BKE_brush_mtex_flip_x(cache.paint, *mtex, slot);
+    const bool flip_v = BKE_brush_mtex_flip_y(cache.paint, *mtex, slot);
+    float tex_u = coords.x;
+    float tex_v = coords.y;
+    if (flip_u) {
+      tex_u = -tex_u;
+    }
+    if (flip_v) {
+      tex_v = -tex_v;
+    }
+
+    const bool has_rgb = paint_get_tex_pixel(
+        mtex, tex_u, tex_v, ss.tex_pool(), thread_id, r_value, &r_rgba[0]);
+    /* The fallback is for a texture the engine could not evaluate: test the raw sample, before the
+     * invert can turn a bright value dark. */
+    const bool raw_is_black = sculpt_brush_mtex_sample_is_black(*r_value, r_rgba);
+    /* Invert contract: part of the raw sample, so before the bias (see
+     * #BKE_brush_texture_invert_apply). */
+    BKE_brush_texture_invert_apply(slot, brush, has_rgb, r_value, &r_rgba[0]);
     sculpt_sample_brush_mtex_apply_bias(brush, apply_texture_bias, r_value, r_rgba);
 
-    if (use_image_fallback && sculpt_brush_mtex_sample_is_black(*r_value, r_rgba) &&
-        mtex->tex != nullptr)
-    {
+    if (use_image_fallback && raw_is_black && mtex->tex != nullptr) {
       float image_rgb[3];
       if (sculpt_sample_color_image_at_brush_tex_coords(
-              *mtex->tex, coords.x, coords.y, ss.tex_pool(), image_rgb))
+              *mtex->tex, tex_u, tex_v, ss.tex_pool(), image_rgb))
       {
         copy_v3_v3(&r_rgba[0], image_rgb);
         r_rgba[3] = 1.0f;
         *r_value = max_ff(max_ff(image_rgb[0], image_rgb[1]), image_rgb[2]);
+        /* The substituted value replaces the raw sample, so it takes the same invert. */
+        BKE_brush_texture_invert_apply(slot, brush, has_rgb, r_value, &r_rgba[0]);
       }
       else {
         const float2 point_2d = ED_view3d_project_float_v2_m4(
             cache.vc->region, symm_point, cache.projection_mat);
+        /* The screen sampler applies the same invert contract itself, so its result is final. */
         sculpt_sample_brush_mtex_at_screen(ss,
                                            brush,
                                            mtex,
+                                           slot,
                                            coord_mtex,
                                            point_2d,
                                            thread_id,
@@ -3509,12 +3562,22 @@ static void sculpt_sample_brush_mtex(const SculptSession &ss,
             vx = flen * cosf(angle);
             vy = flen * sinf(angle);
           }
+          /* The same flip as the sample coordinates above; without it the fallback would sample
+           * unmirrored texels. */
+          if (flip_u) {
+            vx = -vx;
+          }
+          if (flip_v) {
+            vy = -vy;
+          }
           if (sculpt_sample_color_image_at_brush_tex_coords(
                   *mtex->tex, vx, vy, ss.tex_pool(), image_rgb))
           {
             copy_v3_v3(&r_rgba[0], image_rgb);
             r_rgba[3] = 1.0f;
             *r_value = max_ff(max_ff(image_rgb[0], image_rgb[1]), image_rgb[2]);
+            /* Same as the first fallback: the substituted value takes the raw sample's invert. */
+            BKE_brush_texture_invert_apply(slot, brush, has_rgb, r_value, &r_rgba[0]);
           }
         }
       }
@@ -3531,16 +3594,35 @@ static void sculpt_sample_brush_mtex(const SculptSession &ss,
      * have no brush-relative coordinates to test against; there the rectangular boundary comes
      * from the brush falloff instead. */
     const bool apply_texture_clip = brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE;
-    *r_value = BKE_brush_sample_tex_3d(
-        cache.paint, &brush, mtex, point_3d, r_rgba, thread_id, ss.tex_pool(), apply_texture_clip);
+    *r_value = BKE_brush_sample_tex_3d(cache.paint,
+                                       &brush,
+                                       mtex,
+                                       slot,
+                                       point_3d,
+                                       r_rgba,
+                                       thread_id,
+                                       ss.tex_pool(),
+                                       apply_texture_clip);
     if (use_image_fallback && sculpt_brush_mtex_sample_is_black(*r_value, r_rgba) &&
         mtex->tex != nullptr)
     {
       float image_rgb[3];
       const SculptBrushTexSampleCoords coords = sculpt_brush_texture_sample_coords_get(
           ss, brush, coord_mtex, brush_point);
+      /* The primary sample above flips its coordinates inside #BKE_brush_sample_tex_3d; mirror the
+       * fallback's query the same way, or it reads unmirrored texels where the texture did not. */
+      float tex_u = coords.x;
+      float tex_v = coords.y;
+      if (coords.valid) {
+        if (BKE_brush_mtex_flip_x(cache.paint, *mtex, slot)) {
+          tex_u = -tex_u;
+        }
+        if (BKE_brush_mtex_flip_y(cache.paint, *mtex, slot)) {
+          tex_v = -tex_v;
+        }
+      }
       if (coords.valid && sculpt_sample_color_image_at_brush_tex_coords(
-                              *mtex->tex, coords.x, coords.y, ss.tex_pool(), image_rgb))
+                              *mtex->tex, tex_u, tex_v, ss.tex_pool(), image_rgb))
       {
         copy_v3_v3(&r_rgba[0], image_rgb);
         r_rgba[3] = 1.0f;
@@ -3554,6 +3636,7 @@ static void sculpt_sample_brush_mtex(const SculptSession &ss,
   sculpt_sample_brush_mtex_at_screen(ss,
                                      brush,
                                      mtex,
+                                     slot,
                                      coord_mtex,
                                      point_2d,
                                      thread_id,
@@ -3591,6 +3674,7 @@ TexelSampleContext sculpt_texel_sample_context(const SculptSession &ss, const fl
 void sculpt_apply_texture(const SculptSession &ss,
                           const Brush &brush,
                           const MTex &mtex,
+                          eBrushTextureSlot slot,
                           const material::TexelSampleContext &ctx,
                           const int thread_id,
                           float *r_value,
@@ -3609,7 +3693,7 @@ void sculpt_apply_texture(const SculptSession &ss,
   if (mtex.brush_map_mode == MTEX_MAP_MODE_3D) {
     /* Get strength by feeding the vertex location directly into a texture. */
     *r_value = BKE_brush_sample_tex_3d(
-        cache.paint, &brush, &mtex, ctx.point, r_rgba, thread_id, pool);
+        cache.paint, &brush, &mtex, slot, ctx.point, r_rgba, thread_id, pool);
   }
   else if (mtex.brush_map_mode == MTEX_MAP_MODE_AREA) {
     /* Similar to fixed mode, but projects from brush angle
@@ -3627,7 +3711,8 @@ void sculpt_apply_texture(const SculptSession &ss,
     x += mtex.ofs[0];
     y += mtex.ofs[1];
 
-    paint_get_tex_pixel(&mtex, x, y, pool, thread_id, r_value, r_rgba);
+    paint_get_brush_tex_pixel(
+        cache.paint, brush, &mtex, slot, x, y, pool, thread_id, r_value, r_rgba);
 
     add_v3_fl(r_rgba, brush.texture_sample_bias);  // v3 -> Ignore alpha
     *r_value -= brush.texture_sample_bias;
@@ -3636,7 +3721,16 @@ void sculpt_apply_texture(const SculptSession &ss,
     /* #TexelSampleContext does not keep the pre-mirror position; #TexelSampleContext::point is
      * already tile-offset-corrected, so the Roll coordinate is recomputed from it. */
     const float2 final_pt = sculpt_roll_texture_coord(cache, brush, mtex, ctx.point);
-    paint_get_tex_pixel(&mtex, final_pt[0], -final_pt[1], pool, thread_id, r_value, r_rgba);
+    paint_get_brush_tex_pixel(cache.paint,
+                              brush,
+                              &mtex,
+                              slot,
+                              final_pt[0],
+                              -final_pt[1],
+                              pool,
+                              thread_id,
+                              r_value,
+                              r_rgba);
     *r_value += brush.texture_sample_bias;
   }
   else {
@@ -3644,13 +3738,14 @@ void sculpt_apply_texture(const SculptSession &ss,
      * Sculpt does it DIY. */
     const float point_3d[3] = {ctx.view_point_2d[0], ctx.view_point_2d[1], 0.0f};
     *r_value = BKE_brush_sample_tex_3d(
-        cache.paint, &brush, &mtex, point_3d, r_rgba, thread_id, pool);
+        cache.paint, &brush, &mtex, slot, point_3d, r_rgba, thread_id, pool);
   }
 }
 
 void sculpt_apply_texture(const SculptSession &ss,
                           const Brush &brush,
                           const MTex &mtex,
+                          eBrushTextureSlot slot,
                           const float brush_point[3],
                           const int thread_id,
                           float *r_value,
@@ -3668,6 +3763,7 @@ void sculpt_apply_texture(const SculptSession &ss,
   sculpt_apply_texture(ss,
                        brush,
                        mtex,
+                       slot,
                        material::sculpt_texel_sample_context(ss, brush_point),
                        thread_id,
                        r_value,
@@ -3691,7 +3787,10 @@ void sculpt_apply_texture(const SculptSession &ss,
     return;
   }
 
-  sculpt_sample_brush_mtex(ss, brush, mtex, brush_point, thread_id, r_value, r_rgba);
+  /* The legacy sculpt mask hands out #Brush.mtex (see #BKE_brush_mask_texture_get), so this
+   * samples the brush texture slot: both its flip and its invert apply. */
+  sculpt_sample_brush_mtex(
+      ss, brush, mtex, eBrushTextureSlot::Brush, brush_point, thread_id, r_value, r_rgba);
 }
 
 bool sculpt_sample_face_set_color_texture(const SculptSession &ss,
@@ -3715,6 +3814,7 @@ bool sculpt_sample_face_set_color_texture(const SculptSession &ss,
   sculpt_sample_brush_mtex(ss,
                            brush,
                            mtex,
+                           eBrushTextureSlot::FaceSetColor,
                            brush_point,
                            thread_id,
                            &texture_value,

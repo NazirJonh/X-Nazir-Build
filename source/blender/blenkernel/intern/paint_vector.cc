@@ -740,6 +740,9 @@ bke::CurvePatchParams BKE_paint_vector_curve_params_decode(const PaintVectorCurv
   out.stamp_use_random_angle = (p.stamp_use_random_angle != 0);
   out.stamp_size_random = p.stamp_size_random;
   out.stamp_strength_random = p.stamp_strength_random;
+  out.stamp_spacing_random = p.stamp_spacing_random;
+  out.stamp_flip_x_random = p.stamp_flip_x_random;
+  out.stamp_flip_y_random = p.stamp_flip_y_random;
   out.stamp_seed = uint32_t(p.stamp_seed);
   out.spacing_frac = p.spacing_frac;
   out.jitter_amount = p.jitter_amount;
@@ -777,6 +780,9 @@ PaintVectorCurveParams BKE_paint_vector_curve_params_encode(const bke::CurvePatc
   out.stamp_use_random_angle = p.stamp_use_random_angle ? 1 : 0;
   out.stamp_size_random = p.stamp_size_random;
   out.stamp_strength_random = p.stamp_strength_random;
+  out.stamp_spacing_random = p.stamp_spacing_random;
+  out.stamp_flip_x_random = p.stamp_flip_x_random;
+  out.stamp_flip_y_random = p.stamp_flip_y_random;
   out.stamp_seed = int(p.stamp_seed);
   out.spacing_frac = p.spacing_frac;
   out.jitter_amount = p.jitter_amount;

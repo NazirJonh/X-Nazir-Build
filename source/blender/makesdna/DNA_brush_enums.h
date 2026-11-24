@@ -460,6 +460,14 @@ enum eBrushFlags2 : int {
    * of the Mask Source's invert and of the channels' Source Invert; read wherever the Mask slot
    * modulates stroke coverage. Lives in a previously unused bit, so old files read it as off. */
   BRUSH_MASK_TEXTURE_INVERT = (1 << 17),
+  /** Invert the brush texture sample (#Brush.mtex, the "Invert Alpha" of the paint apps this
+   * feature mirrors): the grayscale value and the alpha of every sampled texel are flipped, so a
+   * stamp paints where the texture is dark/transparent instead. Independent of
+   * #BRUSH_TEXTURE_INVERT_ALPHA (which only flips the alpha channel in texture-as-data mode) and
+   * of #BRUSH_MASK_TEXTURE_INVERT. Areas outside the texture bounds (the clip paths) are never
+   * inverted, so the stamp cannot grow a full-strength halo. Lives in a previously unused bit, so
+   * old files read it as off. */
+  BRUSH_TEXTURE_INVERT = (1 << 18),
 };
 ENUM_OPERATORS(eBrushFlags2)
 

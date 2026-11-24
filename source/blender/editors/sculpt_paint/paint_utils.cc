@@ -138,6 +138,40 @@ bool paint_get_tex_pixel(const MTex *mtex,
   return has_rgb;
 }
 
+bool paint_get_brush_tex_pixel(const Paint *paint,
+                               const Brush &brush,
+                               const MTex *mtex,
+                               const eBrushTextureSlot slot,
+                               float u,
+                               float v,
+                               ImagePool *pool,
+                               int thread,
+                               /* Return arguments. */
+                               float *r_intensity,
+                               float r_rgba[4])
+{
+  /* The flip contract keys off the slot, like #BKE_brush_sample_tex_3d; a slot without a texture
+   * has no texels to mirror and no value to invert. */
+  const bool has_texture = mtex != nullptr && mtex->tex != nullptr;
+  if (has_texture) {
+    if (BKE_brush_mtex_flip_x(paint, *mtex, slot)) {
+      u = -u;
+    }
+    if (BKE_brush_mtex_flip_y(paint, *mtex, slot)) {
+      v = -v;
+    }
+  }
+
+  const bool has_rgb = paint_get_tex_pixel(mtex, u, v, pool, thread, r_intensity, r_rgba);
+
+  /* Invert contract: part of the raw sample, before the caller's bias/colorspace steps. */
+  if (has_texture) {
+    BKE_brush_texture_invert_apply(slot, brush, has_rgb, r_intensity, r_rgba);
+  }
+
+  return has_rgb;
+}
+
 void paint_stroke_operator_properties(wmOperatorType *ot)
 {
   static const EnumPropertyItem stroke_mode_items[] = {

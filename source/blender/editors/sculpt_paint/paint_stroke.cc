@@ -461,6 +461,12 @@ bool PaintStroke::update(bContext *C,
                                   paint_supports_stroke_randomness(brush, mode);
   const bool do_spacing_random = brush.spacing_random > 0.0f &&
                                  paint_supports_spacing_randomness(brush, mode);
+  /* Random texture flips (#MTEX_MAPPING_FLIP_X_RANDOM / _Y_RANDOM): a 50/50 draw per enabled
+   * axis, XOR-ed with the slot's static flip by the sampling helpers. Brush, Mask and the PBR
+   * shared source mapping have their own fields in #bke::BrushTexFlipState.
+   * #paint_supports_flip_randomness is the single gate shared by the RNG initialization below and
+   * this draw. */
+  const bool do_flip_random = paint_supports_flip_randomness(brush, mode);
   *r_location_is_set = false;
   /* XXX: Use pressure value from first brush step for brushes which don't
    *      support strokes (grab, thumb). They depends on initial state and
@@ -635,7 +641,7 @@ bool PaintStroke::update(bContext *C,
   }
 
   if ((do_random || do_random_mask || do_pbr_random_angle || do_mask_influence_random ||
-       do_size_random || do_strength_random || do_spacing_random) &&
+       do_size_random || do_strength_random || do_spacing_random || do_flip_random) &&
       !rng_)
   {
     /* Lazy initialization. */
@@ -714,6 +720,48 @@ bool PaintStroke::update(bContext *C,
   }
   else {
     paint_runtime.spacing_random_value = 1.0f;
+  }
+
+  if (do_flip_random) {
+    /* Drawn last so enabling flips cannot shift the other random sequences. Each enabled axis is
+     * a separate 50/50 draw; axes without the random bit keep their previous value, which the
+     * sampling helpers ignore (they only read the runtime state when the random bit is set).
+     * The eligibility predicates are the same ones #paint_supports_flip_randomness uses, so a slot
+     * that cannot flip (no texture, or #MTEX_MAP_MODE_3D) never gets here. */
+    if (BKE_brush_mtex_flip_random_eligible(brush.mtex) &&
+        (brush.mtex.mapping_flags & MTEX_MAPPING_FLIP_X_RANDOM))
+    {
+      paint_runtime.tex_flip.brush_x = rng_->get_float() < 0.5f;
+    }
+    if (BKE_brush_mtex_flip_random_eligible(brush.mtex) &&
+        (brush.mtex.mapping_flags & MTEX_MAPPING_FLIP_Y_RANDOM))
+    {
+      paint_runtime.tex_flip.brush_y = rng_->get_float() < 0.5f;
+    }
+    if (BKE_brush_mtex_flip_random_eligible(brush.mask_mtex) &&
+        (brush.mask_mtex.mapping_flags & MTEX_MAPPING_FLIP_X_RANDOM))
+    {
+      paint_runtime.tex_flip.mask_x = rng_->get_float() < 0.5f;
+    }
+    if (BKE_brush_mtex_flip_random_eligible(brush.mask_mtex) &&
+        (brush.mask_mtex.mapping_flags & MTEX_MAPPING_FLIP_Y_RANDOM))
+    {
+      paint_runtime.tex_flip.mask_y = rng_->get_float() < 0.5f;
+    }
+    /* PBR channels share one mapping, so one pair of draws serves every channel of the dab. The
+     * predicate is shared with #paint_supports_flip_randomness: this branch can also be reached
+     * because a brush or Mask texture asked for random flips, while the PBR mapping itself is
+     * object-space. Such a mapping takes no flip (see #BKE_brush_mtex_flip_x), so it must not
+     * spend an RNG draw or change the runtime flip state here either. */
+    if (BKE_brush_material_source_flip_random_eligible(material_paint)) {
+      const int channel_flags = int(material_paint->shared_source_mapping.mapping_flags);
+      if (channel_flags & MTEX_MAPPING_FLIP_X_RANDOM) {
+        paint_runtime.tex_flip.channel_x = rng_->get_float() < 0.5f;
+      }
+      if (channel_flags & MTEX_MAPPING_FLIP_Y_RANDOM) {
+        paint_runtime.tex_flip.channel_y = rng_->get_float() < 0.5f;
+      }
+    }
   }
 
   if (!location_sampled) {
@@ -1487,6 +1535,7 @@ void PaintStroke::done(bContext *C, const bool is_cancel)
   paint_runtime->strength_random_value = 1.0f;
   paint_runtime->mask_influence_random_value = 1.0f;
   paint_runtime->spacing_random_value = 1.0f;
+  paint_runtime->tex_flip = bke::BrushTexFlipState{};
 
   /* Still has the live stroke caches/undo data needed to raycast the end point. */
   if (!is_cancel) {
@@ -1791,6 +1840,24 @@ bool paint_supports_stroke_randomness(const Brush &br, const PaintMode mode)
 bool paint_supports_spacing_randomness(const Brush &br, const PaintMode mode)
 {
   return paint_supports_stroke_randomness(br, mode) && !cloth::is_cloth_deform_brush(br);
+}
+
+bool paint_supports_flip_randomness(const Brush &br, const PaintMode mode)
+{
+  /* The same gate as the other stroke randoms, minus the kinds that never re-sample a texture: an
+   * anchored or grab-like stroke keeps its texture coordinates fixed, Drag Dot places a single dab,
+   * Curve Patch paints its stamps from its own sampler, and cloth does not read the brush texture
+   * at all. A slot without a texture draws nothing, so it must not consume RNG either. */
+  if (!paint_supports_stroke_randomness(br, mode) || cloth::is_cloth_deform_brush(br)) {
+    return false;
+  }
+  /* The per-slot rules live in BKE next to the sampling helpers, so this gate and the draws in
+   * #PaintStroke::update cannot drift apart: an ineligible slot (no texture, or a #MTEX_MAP_MODE_3D
+   * mapping that takes no flip) must not enable the RNG, and the draws skip it for the same
+   * reason. PBR channel sources are placed by the shared mapping, not by a slot texture. */
+  return BKE_brush_mtex_flip_random_eligible(br.mtex) ||
+         BKE_brush_mtex_flip_random_eligible(br.mask_mtex) ||
+         BKE_brush_material_source_flip_random_eligible(br.material_paint);
 }
 
 enum {

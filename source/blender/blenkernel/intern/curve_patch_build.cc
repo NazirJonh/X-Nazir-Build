@@ -57,6 +57,18 @@ static float curve_patch_smooth_length(const CurvePatchParams &params)
   return params.radius * (params.final_quality ? 0.5f : 0.8f);
 }
 
+/* The per-stamp randomization amplitudes of \a params, in the form both stamp layouts take. */
+static CurvePatchStampRandom stamp_random_from_params(const CurvePatchParams &params)
+{
+  CurvePatchStampRandom random;
+  random.size = params.stamp_size_random;
+  random.strength = params.stamp_strength_random;
+  random.spacing = params.stamp_spacing_random;
+  random.flip_u = params.stamp_flip_x_random;
+  random.flip_v = params.stamp_flip_y_random;
+  return random;
+}
+
 /* Lay the stamps out and resolve the three bounds every consumer of them shares. Ribbon mode
  * leaves the list empty and all three bounds at zero, which is what makes it bit-for-bit what it
  * was before Stamps mode existed.
@@ -85,8 +97,7 @@ static void curve_patch_build_stamps(const CurvePatchParams &params,
     curve_patch_stamps_build_points(spline,
                                    point_overrides,
                                    params.jitter_amount,
-                                   params.stamp_size_random,
-                                   params.stamp_strength_random,
+                                   stamp_random_from_params(params),
                                    params.base_angle,
                                    params.stamp_use_random_angle,
                                    params.random_angle,
@@ -105,8 +116,7 @@ static void curve_patch_build_stamps(const CurvePatchParams &params,
                              params.radius,
                              params.spacing_frac,
                              params.jitter_amount,
-                             params.stamp_size_random,
-                             params.stamp_strength_random,
+                             stamp_random_from_params(params),
                              params.base_angle,
                              params.random_angle,
                              params.stamp_seed,

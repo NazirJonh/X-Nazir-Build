@@ -1471,10 +1471,15 @@ void cube_tip_init(const Sculpt &sd, const Object &ob, const Brush &brush, float
  * sampling a texture other than the brush's own (e.g. a material paint channel's source, whose
  * rotation may differ from the brush's) must pass their own matrix from
  * #material::calc_area_local_mat; null reuses the brush's matrix as before.
+ *
+ * \a slot: What \a mtex represents to the flip/invert contract — see #eBrushTextureSlot. The PBR
+ * channel sources pass #eBrushTextureSlot::ChannelSource and take neither the brush texture's
+ * flip nor its invert.
  */
 void sculpt_apply_texture(const SculptSession &ss,
                           const Brush &brush,
                           const MTex &mtex,
+                          eBrushTextureSlot slot,
                           const float brush_point[3],
                           int thread_id,
                           float *r_value,
@@ -1515,6 +1520,7 @@ float4x4 calc_area_local_mat(const Object &ob, float rotation, const float3 &pla
 void sculpt_apply_texture(const SculptSession &ss,
                           const Brush &brush,
                           const MTex &mtex,
+                          eBrushTextureSlot slot,
                           const material::TexelSampleContext &ctx,
                           int thread_id,
                           float *r_value,

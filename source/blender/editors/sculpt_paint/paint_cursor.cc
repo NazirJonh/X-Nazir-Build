@@ -440,6 +440,13 @@ static void load_tex_task_cb_ex(void *__restrict userdata,
   const ViewContext *vc = data->vc;
 
   const MTex *mtex = data->mtex;
+  /* Which brush texture slot the previewed #MTex stands in: the brush texture preview is the
+   * #Brush slot (its flip plus the brush texture's invert), the Mask preview is the #Mask slot
+   * (its own flip only), and a material or channel source is a #ChannelSource -- neither, since
+   * #paint_sample_material_source draws it as-is. */
+  const eBrushTextureSlot preview_slot = (mtex == &br->mask_mtex) ? eBrushTextureSlot::Mask :
+                                         (mtex == &br->mtex)     ? eBrushTextureSlot::Brush :
+                                                                  eBrushTextureSlot::ChannelSource;
   uchar *buffer = data->buffer;
   const bool col = data->col;
 
@@ -510,17 +517,51 @@ static void load_tex_task_cb_ex(void *__restrict userdata,
       x *= data->aspect_correction[0];
       y *= data->aspect_correction[1];
 
+      /* The slot's static flip only: the per-dab random flip is stroke state that a preview must
+       * not show, so the helpers are called without a #Paint (the random draw reads as off). A
+       * #ChannelSource preview reads the shared PBR source mapping instead of a brush slot; a
+       * #MTEX_MAP_MODE_3D source takes no flip at all, which the slot helpers already know but the
+       * shared mapping does not. */
+      bool flip_x = false;
+      bool flip_y = false;
+      if (preview_slot == eBrushTextureSlot::ChannelSource) {
+        if (br->material_paint != nullptr &&
+            br->material_paint->shared_source_mapping.brush_map_mode != MTEX_MAP_MODE_3D)
+        {
+          const material::SourceFlip flip = material::material_source_flip(*br, nullptr);
+          flip_x = flip.x;
+          flip_y = flip.y;
+        }
+      }
+      else {
+        flip_x = BKE_brush_mtex_flip_x(nullptr, *mtex, preview_slot);
+        flip_y = BKE_brush_mtex_flip_y(nullptr, *mtex, preview_slot);
+      }
+      if (flip_x) {
+        x = -x;
+      }
+      if (flip_y) {
+        y = -y;
+      }
+
       float avg;
       float rgba[4];
       if (data->material_source != nullptr) {
         paint_sample_material_source(*data->material_source, *mtex, x, y, avg, rgba);
       }
       else {
-        paint_get_tex_pixel(mtex, x, y, pool, thread_id, &avg, rgba);
+        const bool has_rgb = paint_get_tex_pixel(mtex, x, y, pool, thread_id, &avg, rgba);
+        /* The slot gate keeps the invert to the brush texture preview: a Mask or material-source
+         * preview never takes it. It runs before the bias-like steps below, the same order the
+         * stroke keeps. */
+        BKE_brush_texture_invert_apply(preview_slot, *br, has_rgb, &avg, rgba);
       }
 
       if (data->texel_mode.kind == OverlayTexelMode::Kind::MaskCoverage) {
-        /* The overlay shows the scalar a Mask stroke writes, not the source's colors. */
+        /* The overlay shows the scalar a Mask stroke writes, not the source's colors. The sample
+         * above is slot-aware: for a texture-as-alpha source the alpha already carries the brush
+         * texture's invert, like the stroke reads it; for a luminance source rgb is untouched by
+         * that invert, matching the stroke's PBR paths. */
         float4 linear_rgba(rgba[0], rgba[1], rgba[2], rgba[3]);
         const bool is_data = colorspace != nullptr &&
                              IMB_colormanagement_space_is_data(colorspace);
@@ -557,7 +598,9 @@ static void load_tex_task_cb_ex(void *__restrict userdata,
       }
       else if (col && data->texel_mode.kind == OverlayTexelMode::Kind::EraseStrength) {
         /* The erase texture is a strength mask: white shows opaque white, black is invisible,
-         * grey is proportional. Premultiplied, so rgb carries the same factor as alpha. */
+         * grey is proportional. Premultiplied, so rgb carries the same factor as alpha. `avg`
+         * already carries the brush texture's flip and invert, the same the 2D erase-strength
+         * sampler (#paint_2d_area_sample_erase_strength) applies before its bias. */
         const float mask = clamp_f(avg - br->texture_sample_bias, 0.0f, 1.0f) *
                            (data->mask_mtex != nullptr ?
                                 load_tex_mask_coverage(*data, mask_x, mask_y, pool, thread_id) :
@@ -572,6 +615,8 @@ static void load_tex_task_cb_ex(void *__restrict userdata,
         buffer[index * 4 + 3] = value;
       }
       else if (col) {
+        /* The invert above leaves rgb untouched and flips alpha only: the same the 2D stamp
+         * shows, where the texture's alpha is the mask. */
         const bool is_data = colorspace != nullptr &&
                              IMB_colormanagement_space_is_data(colorspace);
         if (convert_to_linear && !is_data) {

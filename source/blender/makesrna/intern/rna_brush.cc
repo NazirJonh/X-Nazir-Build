@@ -3433,6 +3433,34 @@ static void rna_def_brush_curve_patch_settings(BlenderRNA *brna)
       prop, "Swap Axis", "Run the texture's U axis along the control curve's length instead of V");
   RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
 
+  prop = RNA_def_property(srna, "stamp_spacing_random", PROP_INT, PROP_PERCENTAGE);
+  RNA_def_property_int_sdna(prop, nullptr, "stamp_spacing_random");
+  RNA_def_property_range(prop, 0, 100);
+  RNA_def_property_ui_range(prop, 0, 100, 1, -1);
+  RNA_def_property_ui_text(prop,
+                           "Random Spacing",
+                           "Randomly shift each stamp along the curve by up to this fraction of "
+                           "the stamp spacing (Fill layout only)");
+  RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
+
+  prop = RNA_def_property(srna, "stamp_flip_x_random", PROP_INT, PROP_PERCENTAGE);
+  RNA_def_property_int_sdna(prop, nullptr, "stamp_flip_x_random");
+  RNA_def_property_range(prop, 0, 100);
+  RNA_def_property_ui_range(prop, 0, 100, 1, -1);
+  RNA_def_property_ui_text(prop,
+                           "Random Flip X",
+                           "Chance in percent that a stamp's texture mirrors horizontally");
+  RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
+
+  prop = RNA_def_property(srna, "stamp_flip_y_random", PROP_INT, PROP_PERCENTAGE);
+  RNA_def_property_int_sdna(prop, nullptr, "stamp_flip_y_random");
+  RNA_def_property_range(prop, 0, 100);
+  RNA_def_property_ui_range(prop, 0, 100, 1, -1);
+  RNA_def_property_ui_text(prop,
+                           "Random Flip Y",
+                           "Chance in percent that a stamp's texture mirrors vertically");
+  RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
+
   prop = RNA_def_property(srna, "stamp_projection", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "stamp_projection");
   RNA_def_property_enum_items(prop, rna_enum_brush_curve_patch_stamp_projection_items);
@@ -3691,6 +3719,34 @@ static void rna_def_brush_texture_slot(BlenderRNA *brna)
                            "Preserve Aspect",
                            "Preserve image aspect ratio for image textures "
                            "in non-stencil mapping modes");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
+
+  prop = RNA_def_property(srna, "use_flip_x", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "mapping_flags", MTEX_MAPPING_FLIP_X);
+  RNA_def_property_ui_text(prop, "Flip X", "Mirror the texture horizontally on every stamp");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
+
+  prop = RNA_def_property(srna, "use_flip_y", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "mapping_flags", MTEX_MAPPING_FLIP_Y);
+  RNA_def_property_ui_text(prop, "Flip Y", "Mirror the texture vertically on every stamp");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
+
+  prop = RNA_def_property(srna, "use_random_flip_x", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "mapping_flags", MTEX_MAPPING_FLIP_X_RANDOM);
+  RNA_def_property_ui_text(prop,
+                           "Random Flip X",
+                           "Randomly mirror the texture horizontally per stamp, 50% chance");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
+
+  prop = RNA_def_property(srna, "use_random_flip_y", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "mapping_flags", MTEX_MAPPING_FLIP_Y_RANDOM);
+  RNA_def_property_ui_text(prop,
+                           "Random Flip Y",
+                           "Randomly mirror the texture vertically per stamp, 50% chance");
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
   RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
 
@@ -7418,6 +7474,17 @@ static void rna_def_brush(BlenderRNA *brna)
       "Invert Mask Texture",
       "Invert the Mask Texture coverage (1 - c) after clamping, independent of Mask Source invert");
   RNA_def_property_update(prop, 0, "rna_Brush_mask_texture_invert_update");
+
+  prop = RNA_def_property(srna, "use_texture_invert", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag2", BRUSH_TEXTURE_INVERT);
+  RNA_def_property_ui_text(
+      prop,
+      "Invert Texture",
+      "Invert the brush texture sample: the grayscale value and alpha of every texel are flipped "
+      "(1 - v). With a fully opaque RGB texture this leaves an empty stamp, because the invert "
+      "acts on the alpha channel; areas outside the texture keep their footprint. The effect "
+      "applies once a texture is assigned to the brush");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
 
   prop = RNA_def_property(srna, "mask_texture_strength_random", PROP_FLOAT, PROP_FACTOR);
   RNA_def_property_float_sdna(prop, nullptr, "mask_texture_strength_random");

@@ -31,6 +31,9 @@ enum {
   STAMP_HASH_JITTER_U = 4,
   STAMP_HASH_TEX = 5,
   STAMP_HASH_DEPTH = 6,
+  STAMP_HASH_SPACING = 7,
+  STAMP_HASH_FLIP_U = 8,
+  STAMP_HASH_FLIP_V = 9,
 };
 
 static float stamp_random(const int index, const uint32_t seed, const int channel)
@@ -104,14 +107,13 @@ static void stamp_frame_resolve(const CurvePatchSpline &spline, CurvePatchStamp 
   stamp.axis_u = -tangent_in_plane * sin_a + side * cos_a;
 }
 
-/* Shared per-stamp random tail: size / angle / strength / texture / depth from one hash channel
- * each. Kept in one place so FILL and POINTS stay on the same randomization semantics. */
+/* Shared per-stamp random tail: size / angle / strength / texture / depth / flips from one hash
+ * channel each. Kept in one place so FILL and POINTS stay on the same randomization semantics. */
 static void stamp_randomize(CurvePatchStamp &stamp,
                             const int index,
                             const uint32_t seed,
                             const float radius,
-                            const float size_random,
-                            const float strength_random,
+                            const CurvePatchStampRandom &random,
                             const float base_angle,
                             const bool use_random_angle,
                             const float random_angle,
@@ -120,19 +122,28 @@ static void stamp_randomize(CurvePatchStamp &stamp,
   /* Shrink only. Growing past the brush radius would make the visible patch wider than the brush
    * cursor promises and would force the ribbon to widen for the size setting too. The 0.05 floor
    * keeps a fully-randomized stamp from collapsing to nothing. */
-  const float size_factor = 1.0f - size_random * stamp_random(index, seed, STAMP_HASH_SIZE);
+  const float size_factor = 1.0f - random.size * stamp_random(index, seed, STAMP_HASH_SIZE);
   stamp.half_extent = radius * std::max(size_factor, 0.05f);
   stamp.angle = use_random_angle ?
                     base_angle + random_angle * stamp_random(index, seed, STAMP_HASH_ANGLE) :
                     base_angle;
   const float strength_factor = 1.0f -
-                                strength_random * stamp_random(index, seed, STAMP_HASH_STRENGTH);
+                                random.strength * stamp_random(index, seed, STAMP_HASH_STRENGTH);
   stamp.strength = std::max(strength_factor, 0.05f);
   stamp.tex_index = curve_patch_stamp_pick_texture(texture_weights_cdf,
                                                    stamp_random(index, seed, STAMP_HASH_TEX));
   /* Its own channel, so the stacking order stays independent of every other per-stamp draw --
    * see #CurvePatchStamp::depth for why it must not follow the layout order. */
   stamp.depth = stamp_random(index, seed, STAMP_HASH_DEPTH);
+  /* Per-stamp texture flips (Substance Painter-like random flip): a hash draw below the chance
+   * mirrors the stamp's texture on that axis. Each axis gets its own channel, so enabling one
+   * cannot shift the other's sequence. */
+  if (random.flip_u > 0.0f && stamp_random(index, seed, STAMP_HASH_FLIP_U) < random.flip_u) {
+    stamp.flip = CurvePatchStampFlip_U;
+  }
+  if (random.flip_v > 0.0f && stamp_random(index, seed, STAMP_HASH_FLIP_V) < random.flip_v) {
+    stamp.flip |= CurvePatchStampFlip_V;
+  }
 }
 
 /* Sort after building: jitter along the curve can reorder neighbours, and the relief
@@ -149,8 +160,7 @@ void curve_patch_stamps_build(const CurvePatchSpline &spline,
                               const float radius,
                               const float spacing_frac,
                               const float jitter_amount,
-                              const float size_random,
-                              const float strength_random,
+                              const CurvePatchStampRandom &random,
                               const float base_angle,
                               const float random_angle,
                               const uint32_t seed,
@@ -194,15 +204,21 @@ void curve_patch_stamps_build(const CurvePatchSpline &spline,
   for (const int i : IndexRange(stamp_num)) {
     CurvePatchStamp stamp;
     const float s = float(i) * used_step;
-    stamp.center_v = s +
+    /* Random Spacing: shift this stamp along the curve by up to +-Spacing Random of the stamp
+     * step, in addition to the world-space Jitter scatter. Scaling by the step (not world units)
+     * keeps the scatter proportional to how dense the row is. */
+    const float spacing_offset =
+        random.spacing > 0.0f ?
+            used_step * random.spacing * (2.0f * stamp_random(i, seed, STAMP_HASH_SPACING) - 1.0f) :
+            0.0f;
+    stamp.center_v = s + spacing_offset +
                      jitter_amount * (2.0f * stamp_random(i, seed, STAMP_HASH_JITTER_V) - 1.0f);
     stamp.center_u = jitter_amount * (2.0f * stamp_random(i, seed, STAMP_HASH_JITTER_U) - 1.0f);
     stamp_randomize(stamp,
                     i,
                     seed,
                     radius,
-                    size_random,
-                    strength_random,
+                    random,
                     base_angle,
                     /*use_random_angle=*/true,
                     random_angle,
@@ -219,8 +235,7 @@ void curve_patch_stamps_build(const CurvePatchSpline &spline,
 void curve_patch_stamps_build_points(const CurvePatchSpline &spline,
                                      const CurvePatchStampPointOverrides &point_overrides,
                                      const float jitter_amount,
-                                     const float size_random,
-                                     const float strength_random,
+                                     const CurvePatchStampRandom &random,
                                      const float base_angle,
                                      const bool use_random_angle,
                                      const float random_angle,
@@ -279,8 +294,7 @@ void curve_patch_stamps_build_points(const CurvePatchSpline &spline,
                     hash_index,
                     seed,
                     radius,
-                    size_random,
-                    strength_random,
+                    random,
                     base_angle,
                     use_random_angle,
                     random_angle,

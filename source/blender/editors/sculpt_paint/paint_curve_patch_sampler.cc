@@ -620,6 +620,15 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
         if (item.params.swap_axis) {
           std::swap(stamp_u, stamp_v);
         }
+        /* The stamp's own random flip (#CurvePatchStamp::flip, a hash draw below
+         * #CurvePatchParams::stamp_flip_x_random / stamp_flip_y_random): mirror the stamp's
+         * texture on one axis, the way the brush texture's flip bits mirror a plain dab's. */
+        if (it->flip & CurvePatchStampFlip_U) {
+          stamp_u = -stamp_u;
+        }
+        if (it->flip & CurvePatchStampFlip_V) {
+          stamp_v = -stamp_v;
+        }
         /* Kept before the Size / Offset transform below: consumers that sample a texture of
          * their own in this frame apply their own mapping. */
         const float2 stamp_patch_uv(stamp_u, stamp_v);
@@ -636,10 +645,10 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
         stamp_v = stamp_v * mtex_size.y + mtex_ofs.y;
 
         /* A LIST-mode stamp samples its own variant; SINGLE keeps the brush's texture. */
-        const MTex &stamp_mtex = it->tex_index >= 0 &&
-                                         it->tex_index < texture.stamp_texture_variants.size() ?
-                                     texture.stamp_texture_variants[it->tex_index] :
-                                     *mtex;
+        const bool has_variant = it->tex_index >= 0 &&
+                                 it->tex_index < texture.stamp_texture_variants.size();
+        const MTex &stamp_mtex = has_variant ? texture.stamp_texture_variants[it->tex_index] :
+                                               *mtex;
         /* An empty slot in the LIST is an unconfigured slot, not a request to sculpt flat -- skip
          * the stamp entirely BEFORE it can win the merge below with the default `sample` of 1.0.
          * SINGLE mode deliberately keeps the old behavior, where a brush with no texture sculpts
@@ -660,8 +669,26 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
 #if CURVE_PATCH_PROFILING
           dbg_tex_evals_++;
 #endif
-          paint_get_tex_pixel(
-              &stamp_mtex, stamp_u, stamp_v, &tex_pool_, thread_id, &sample, sample_rgba);
+          /* SINGLE samples the brush's own texture: let the slot-aware helper apply its static
+           * flip and invert. The per-stamp random flip is already folded into `stamp_u/v` above,
+           * so the two combine by XOR and are never applied twice. A LIST variant is a slot
+           * texture, not #Brush.mtex: it keeps its own placement and takes no brush invert. */
+          if (!has_variant) {
+            paint_get_brush_tex_pixel(nullptr,
+                                      brush,
+                                      &stamp_mtex,
+                                      eBrushTextureSlot::Brush,
+                                      stamp_u,
+                                      stamp_v,
+                                      &tex_pool_,
+                                      thread_id,
+                                      &sample,
+                                      sample_rgba);
+          }
+          else {
+            paint_get_tex_pixel(
+                &stamp_mtex, stamp_u, stamp_v, &tex_pool_, thread_id, &sample, sample_rgba);
+          }
         }
         else if (pbr_mask != nullptr) {
           /* The mask follows the stamp's own frame -- the raw `stamp_patch_uv` the effects sample
@@ -865,6 +892,9 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
 #if CURVE_PATCH_PROFILING
         dbg_tex_evals_++;
 #endif
+        /* A zone texture (Ribbon mode) is placed by its own mapping: the per-stamp flip is a
+         * Stamps-mode concept, and the brush texture's invert belongs to #Brush.mtex, not to a
+         * start/middle/end zone slot. */
         paint_get_tex_pixel(&zone_mtex, tex_u, tex_v, &tex_pool_, thread_id, &tex_value, tex_rgba);
         tex_valid = true;
       }

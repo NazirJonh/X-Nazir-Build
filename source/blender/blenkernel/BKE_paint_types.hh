@@ -66,6 +66,30 @@ inline float random_size_factor(const float amount, const float random)
   return 1.0f + amount * (random - 0.5f);
 }
 
+/**
+ * Per-dab random flips of the brush's texture slots, drawn as 50/50 coin tosses by the stroke
+ * step (#MTEX_MAPPING_FLIP_X_RANDOM / #MTEX_MAPPING_FLIP_Y_RANDOM) and XOR-ed with the slot's
+ * static flip bits by the sampling helpers (#BKE_brush_mtex_flip_x/_y). The `mask_*` variant is
+ * drawn separately so enabling one cannot shift the other's sequence. Grouped in one struct so a
+ * future slot kind (PBR channel sources, Curve Patch stamps) adds a field here instead of a new
+ * PaintRuntime member and its own draw/reset lines. Cleared in #PaintStroke::done — the single
+ * reset point, run for finished and cancelled strokes alike.
+ */
+struct BrushTexFlipState {
+  /** Random flip of the brush texture slot (#Brush.mtex) on X. */
+  bool brush_x = false;
+  /** Random flip of the brush texture slot (#Brush.mtex) on Y. */
+  bool brush_y = false;
+  /** Random flip of the mask texture slot (#Brush.mask_mtex) on X. */
+  bool mask_x = false;
+  /** Random flip of the mask texture slot (#Brush.mask_mtex) on Y. */
+  bool mask_y = false;
+  /** Random flip of the PBR channel sources (#BrushMaterialPaint::shared_source_mapping) on X. */
+  bool channel_x = false;
+  /** Random flip of the PBR channel sources (#BrushMaterialPaint::shared_source_mapping) on Y. */
+  bool channel_y = false;
+};
+
 struct PaintRuntime : NonCopyable, NonMovable {
   bool initialized = false;
   uint16_t ob_mode = 0;
@@ -191,6 +215,11 @@ struct PaintRuntime : NonCopyable, NonMovable {
    * other per-dab randoms — the single reset point, run for finished and cancelled strokes alike.
    */
   float spacing_random_value = 1.0f;
+
+  /**
+   * Transient per-dab random flips of the brush texture slots, see #BrushTexFlipState.
+   */
+  BrushTexFlipState tex_flip;
 
   /**
    * Transient per-dab factor of #Brush::mask_texture_strength_random: the Mask texture's coverage

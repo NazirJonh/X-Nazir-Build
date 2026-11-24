@@ -87,6 +87,9 @@ void revision_hash_params(uint64_t &hash, const CurvePatchParams &params)
                stamp_use_random_angle,
                stamp_size_random,
                stamp_strength_random,
+               stamp_spacing_random,
+               stamp_flip_x_random,
+               stamp_flip_y_random,
                stamp_projection,
                stamp_seed,
                spacing_frac,
@@ -114,6 +117,9 @@ void revision_hash_params(uint64_t &hash, const CurvePatchParams &params)
   revision_hash_value(hash, stamp_use_random_angle);
   revision_hash_value(hash, stamp_size_random);
   revision_hash_value(hash, stamp_strength_random);
+  revision_hash_value(hash, stamp_spacing_random);
+  revision_hash_value(hash, stamp_flip_x_random);
+  revision_hash_value(hash, stamp_flip_y_random);
   revision_hash_value(hash, stamp_projection);
   revision_hash_value(hash, stamp_seed);
   revision_hash_value(hash, spacing_frac);

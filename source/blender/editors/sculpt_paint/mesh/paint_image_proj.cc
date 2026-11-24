@@ -5647,8 +5647,16 @@ static void do_projectpaint_thread(TaskPool *__restrict /*pool*/, void *ph_v)
 
               /* NOTE: for clone and smear,
                * we only use the alpha, could be a special function */
-              BKE_brush_sample_tex_3d(
-                  ps->paint, brush, mtex, samplecos, texrgba, thread_index, pool);
+              /* The color texture is #Brush.mtex: the brush texture slot, whose alpha is the
+               * stamp's mask. */
+              BKE_brush_sample_tex_3d(ps->paint,
+                                      brush,
+                                      mtex,
+                                      eBrushTextureSlot::Brush,
+                                      samplecos,
+                                      texrgba,
+                                      thread_index,
+                                      pool);
 
               copy_v3_v3(texrgb, texrgba);
               custom_mask *= texrgba[3];

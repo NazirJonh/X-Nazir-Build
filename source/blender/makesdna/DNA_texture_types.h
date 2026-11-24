@@ -308,8 +308,21 @@ ENUM_OPERATORS(eMTex_VDM_Flag)
 enum eMTex_BrushMappingFlags : char {
   /** Preserve image aspect ratio in non-stencil mapping modes. */
   MTEX_MAPPING_PRESERVE_ASPECT = (1 << 0),
+  /** Mirror the sampled brush texture coordinates on X (Invert Alpha flip, see
+   * #BKE_brush_mtex_flip_x). */
+  MTEX_MAPPING_FLIP_X = (1 << 1),
+  /** Mirror the sampled brush texture coordinates on Y. */
+  MTEX_MAPPING_FLIP_Y = (1 << 2),
+  /** Flip X randomly per stamp step (a 50/50 draw by the stroke step). */
+  MTEX_MAPPING_FLIP_X_RANDOM = (1 << 3),
+  /** Flip Y randomly per stamp step (a 50/50 draw by the stroke step). */
+  MTEX_MAPPING_FLIP_Y_RANDOM = (1 << 4),
 };
 ENUM_OPERATORS(eMTex_BrushMappingFlags)
+/* The flip/invert contract of these bits is slot-aware (#eBrushTextureSlot): the Brush and Mask
+ * slots read them from their own #MTex, the PBR channel sources from
+ * #BrushMaterialPaint::shared_source_mapping (the image-transform MTex shared by every channel).
+ * A channel's flip therefore never leaks into the brush texture or the Mask slot. */
 /* The Curve Patch enumerations describe #BrushCurvePatchSettings and live in
  * `DNA_brush_enums.h` alongside the struct they belong to. */
 

@@ -195,6 +195,9 @@ bke::CurvePatchParams curve_patch_params_from_brush(const Brush &brush,
    * bounds. */
   params.stamp_size_random = brush.size_random;
   params.stamp_strength_random = brush.strength_random;
+  params.stamp_spacing_random = float(settings.stamp_spacing_random) / 100.0f;
+  params.stamp_flip_x_random = float(settings.stamp_flip_x_random) / 100.0f;
+  params.stamp_flip_y_random = float(settings.stamp_flip_y_random) / 100.0f;
 
   /* Blender stores Spacing as a percentage of the brush DIAMETER, the same convention a normal dab
    * stroke uses, so the stamps land at the same density a freehand stroke of this brush would

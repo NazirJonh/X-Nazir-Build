@@ -205,6 +205,14 @@ struct CurvePatchParams {
    * #Brush::strength_random and mirrored 1:1 into the DNA #PaintVectorCurveParams. */
   float stamp_size_random = 0.0f;
   float stamp_strength_random = 0.0f;
+  /** FILL layout: per-stamp position shift along the curve, as a fraction of the stamp step in
+   * [0, 1] (the DNA field is a percentage). Symmetric +-draw on top of the world-space
+   * #jitter_amount scatter. */
+  float stamp_spacing_random = 0.0f;
+  /** Per-stamp texture flip chances, as fractions in [0, 1] (the DNA fields are percentages): a
+   * hash draw below the chance mirrors the stamp's texture on one axis. */
+  float stamp_flip_x_random = 0.0f;
+  float stamp_flip_y_random = 0.0f;
   CurvePatchStampProjection stamp_projection = CurvePatchStampProjection::Curve;
   /** Rolled once per patch; re-rolled only by the explicit Reseed action. */
   uint32_t stamp_seed = 0;
@@ -585,6 +593,14 @@ CurvePatchTextureZoneSample curve_patch_texture_zone_at(float s,
 /** \name Stamp Layout
  * \{ */
 
+/** #CurvePatchStamp::flip bits: mirror the stamp's texture on one axis (random flip, drawn per
+ * stamp from #CurvePatchParams::stamp_flip_x_random / stamp_flip_y_random). */
+enum CurvePatchStampFlip : char {
+  CurvePatchStampFlip_None = 0,
+  CurvePatchStampFlip_U = (1 << 0),
+  CurvePatchStampFlip_V = (1 << 1),
+};
+
 /** One texture stamp placed along the control curve in the ribbon's UV space, where `v` is arc
  * length along the curve and `u` is the signed lateral offset from it (both in world units). Used
  * by the Curve Patch Stamps mode (#CurvePatchStampMode::Stamps) in place of the single stretched
@@ -604,6 +620,10 @@ struct CurvePatchStamp {
   float angle = 0.0f;
   /** Per-stamp relief strength multiplier in `(0, 1]`. */
   float strength = 1.0f;
+  /** Per-stamp texture mirror (#CurvePatchStampFlip). Ghost copies made by
+   * #curve_patch_stamps_add_cyclic_wrap inherit it by whole-struct copy, so a seam stamp shows
+   * the same mirrored texture on both sides of the join. */
+  char flip = CurvePatchStampFlip_None;
   /** Random stacking order in `[0, 1)`: where overlapping stamps composite, the larger `depth`
    * goes ON TOP. Drawn from its own hash channel rather than derived from the layout, so it is
    * independent of the arc-length order the list is sorted by -- stacking that followed the curve
@@ -633,6 +653,27 @@ struct CurvePatchStamp {
 };
 
 /**
+ * Per-stamp randomization amplitudes shared by both stamp layouts, all fractions in [0, 1].
+ *
+ * Grouped in one struct because both builders would otherwise take five consecutive floats of the
+ * same type: a call with two of them swapped still compiles and would silently randomize the wrong
+ * quantity. `spacing` reaches the FILL layout only (POINTS centers one stamp on every control
+ * point); `flip_u` / `flip_v` are the per-stamp mirror chances of both layouts.
+ */
+struct CurvePatchStampRandom {
+  /** Shrink-only size amplitude (#Brush::size_random). */
+  float size = 0.0f;
+  /** Shrink-only relief strength amplitude (#Brush::strength_random). */
+  float strength = 0.0f;
+  /** FILL layout: shift along the curve, as a fraction of the stamp step. */
+  float spacing = 0.0f;
+  /** Chance that a stamp's texture mirrors on U (#CurvePatchStampFlip_U). */
+  float flip_u = 0.0f;
+  /** Chance that a stamp's texture mirrors on V (#CurvePatchStampFlip_V). */
+  float flip_v = 0.0f;
+};
+
+/**
  * Lay stamps out along `spline`, one every `spacing_frac * 2 * radius` of arc length, and derive
  * each stamp's jittered position, size, rotation and strength.
  *
@@ -642,9 +683,9 @@ struct CurvePatchStamp {
  * re-stamps and race across threads.
  *
  * `spacing_frac` is the brush's Spacing as a fraction (Blender's percent / 100), floored so a
- * degenerate value cannot produce an unbounded stamp count. `jitter_amount`, `size_random` and
- * `strength_random` are all fractions; size and strength randomization only ever REDUCE, which is
- * what lets the caller widen the ribbon for jitter alone.
+ * degenerate value cannot produce an unbounded stamp count. `jitter_amount` is a fraction of the
+ * brush radius and the randomization amplitudes live in #CurvePatchStampRandom; size and strength
+ * randomization only ever REDUCE, which is what lets the caller widen the ribbon for jitter alone.
  *
  * With `spline.cyclic`, the step is snapped so a whole number of stamps fits the loop and the
  * final stamp does not land on top of the first at the seam.
@@ -660,8 +701,7 @@ void curve_patch_stamps_build(const CurvePatchSpline &spline,
                               float radius,
                               float spacing_frac,
                               float jitter_amount,
-                              float size_random,
-                              float strength_random,
+                              const CurvePatchStampRandom &random,
                               float base_angle,
                               float random_angle,
                               uint32_t seed,
@@ -705,8 +745,7 @@ struct CurvePatchStampPointOverrides {
 void curve_patch_stamps_build_points(const CurvePatchSpline &spline,
                                      const CurvePatchStampPointOverrides &point_overrides,
                                      float jitter_amount,
-                                     float size_random,
-                                     float strength_random,
+                                     const CurvePatchStampRandom &random,
                                      float base_angle,
                                      bool use_random_angle,
                                      float random_angle,

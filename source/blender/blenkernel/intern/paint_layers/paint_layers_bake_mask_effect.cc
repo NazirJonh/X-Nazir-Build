@@ -6,10 +6,11 @@
  * \ingroup bke
  *
  * The bake side of a CPU-computed mask effect: what the planner in `paint_layers_bake.cc` runs for
- * a mask item that bakes a grey of its own. The item's grey is one map written whole -- no
- * coverage, no regions -- so its input collection, its stroke deferral and its render live here
- * beside the effect itself (`paint_layers_mask_effect.cc`), and the planner keeps only the
- * one-line branches that route to them.
+ * a mask item that bakes a grey of its own. The item's grey is one map -- no coverage -- written
+ * whole on a fresh map and over the band the item's subscription reports when only pixel edits are
+ * pending (see #bake_mask_effect_region_resolve), so its input collection, its stroke deferral and
+ * its render live here beside the effect itself (`paint_layers_mask_effect.cc`), and the planner
+ * keeps only the one-line branches that route to them.
  *
  * The same file holds the bake side of a CPU-computed *content* effect that owns its result
  * (#paint_layer_effect_owns_result): one map per channel the effect filters, written from the
@@ -167,23 +168,47 @@ int bake_mask_effect_size_for(const Material &ma, const MaterialPaintLayer &row)
 }
 
 /**
+ * The map rectangle the band \a valid of a \a width x \a height result lands in on a \a size-square
+ * map: a map texel x samples result texel min(x * width / size, width - 1), the writes' own
+ * resample, so the result columns [xmin, xmax) are read by the map columns [xmin * size / width,
+ * xmax * size / width) rounded up. Rounding either end down (or out) would leave a map column
+ * sampling a texel the result left as it was, over a map texel that already holds that stale value.
+ * Both writers -- the mask's grey and an owned effect's channel -- derive the same numbers here.
+ */
+static void bake_valid_to_map_rect(const rcti &valid,
+                                   const int size,
+                                   const int width,
+                                   const int height,
+                                   int r_rect[4])
+{
+  r_rect[0] = clamp_i(int((int64_t(valid.xmin) * size + width - 1) / width), 0, size);
+  r_rect[1] = clamp_i(int((int64_t(valid.ymin) * size + height - 1) / height), 0, size);
+  r_rect[2] = clamp_i(int((int64_t(valid.xmax) * size + width - 1) / width), 0, size);
+  r_rect[3] = clamp_i(int((int64_t(valid.ymax) * size + height - 1) / height), 0, size);
+}
+
+/**
  * Write \a grey into \a tile_number of \a image: the nearest sample of the grey, each axis
  * independently, straight into the map's own buffer. The row scratch in #bake_write_image_rows is
  * all the extra memory, so the peak holds the grey and the map, never a third copy of the picture
  * between them. The stretch is the one a row's bake lays its source canvas by (see
  * #bake_mask_effect_size_for for the side).
+ *
+ * \param rect: the map rectangle to write, or null for the whole map. A regional write lays the
+ *        band the grey answers for; every pixel outside it is the previous result, untouched.
  */
 static void bake_mask_effect_grey_write(Image &image,
                                         const bool is_color,
                                         const ImBuf &grey,
                                         const int size,
-                                        const int tile_number)
+                                        const int tile_number,
+                                        const int *rect)
 {
   const int width = grey.x;
   const int height = grey.y;
   const float *src = grey.float_data();
   bake_write_image_rows(
-      image, is_color, nullptr, tile_number,
+      image, is_color, rect, tile_number,
       [&](const int y, const int map_width, float *r_row) {
         const int src_y = paint_layer_nearest_resample_texel(y, size, height);
         const float *src_row = src + int64_t(src_y) * width * 4;
@@ -200,27 +225,29 @@ static void bake_mask_effect_grey_write(Image &image,
 
 /**
  * Render the CPU-computed mask effect's grey of \a layer (a mask item) into its own bake: the grey
- * the mask effect cache holds, resampled from the row's canvas to the \a size-square map, written
- * whole. The item's bake holds the grey in its Base Color map and no coverage -- the grey is read
- * like a painted mask item's map, and the validity is the hash's and the subscription's, which a
- * coverage map plays no part in. True when the map was written.
+ * the mask effect cache holds, resampled from the row's canvas to the \a size-square map. The
+ * item's bake holds the grey in its Base Color map and no coverage -- the grey is read like a
+ * painted mask item's map, and the validity is the hash's and the subscription's, which a coverage
+ * map plays no part in. True when the map was written.
  *
  * With \a objects (a grey that reads the surface, #paint_layers_bake_node_reads_surface) the grey is
  * one render per object and UV tile of its block, each into its own tile of one tiled map, and the
  * bake keeps the tile records and identities a row's per-object bake does. Without them it is the one
  * shared map it always was.
  *
- * There is no region path here, unlike #bake_effect_row_write: the grey is written whole because the
- * mask effect cache behind it computes whole -- it has no regional update, so the cache cannot
- * answer with a region of the grey that is current with the inputs. A stroke defers the grey until
- * it ends (#BKE_paint_layers_bake_row_is_deferred), so the whole-canvas write lands once, after the
- * stroke. Giving the cache a changed region is phase E.
+ * \param changed_region: the rectangle whose inputs changed since the grey map was last written, or
+ *        null for the whole canvas (see #bake_mask_effect_region_resolve). Only the shared map takes
+ *        it: the cache answers with the band grown by the kernel's halo, and the map keeps every
+ *        texel outside it. The per-object path always writes whole -- a tiled map holds one result
+ *        per object and tile, and no single band names all of them. A fresh or replaced map also
+ *        writes whole, since it holds no previous result outside the band.
  */
 bool bake_mask_effect_row_write(Main &bmain,
                                 Material &ma,
                                 MaterialPaintLayer &layer,
                                 const int size,
-                                const Span<PaintLayersBakeTarget> objects)
+                                const Span<PaintLayersBakeTarget> objects,
+                                const rcti *changed_region)
 {
   const MaterialPaintLayer *owner = BKE_paint_layers_mask_item_owner(ma, layer);
   if (owner == nullptr) {
@@ -239,8 +266,31 @@ bool bake_mask_effect_row_write(Main &bmain,
   const bool floatbuf = bake_channel_needs_float(layer, *base_info);
 
   if (objects.is_empty()) {
+    /* Only a map that already stood may take a band: an image created just now holds no previous
+     * result outside the write to keep, so such a bake is written whole whatever the caller asked.
+     * The identity is what tells a reuse from a replacement below (#bake_service_image may make a
+     * fresh map of another size or format), the same check the owned effect's writer makes. */
+    Image *slot_before = layer.bake != nullptr ?
+                             layer.bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR] :
+                             nullptr;
+    const Image *map_before = (slot_before != nullptr &&
+                               bake_service_image_is_live(bmain, slot_before)) ?
+                                  slot_before :
+                                  nullptr;
+    const bool has_map = map_before != nullptr;
+    const uint32_t map_uid_before = has_map ? map_before->id.session_uid : 0;
+    rcti valid_region;
+    BLI_rcti_init(&valid_region, 0, 0, 0, 0);
     std::shared_ptr<ImBuf> grey = paint_layer_mask_effect_buffer_get(
-        ma, *owner, layer, /*describe_only=*/false, nullptr, PAINT_TILE_NUMBER_BASE);
+        ma,
+        *owner,
+        layer,
+        /*describe_only=*/false,
+        nullptr,
+        PAINT_TILE_NUMBER_BASE,
+        nullptr,
+        (changed_region != nullptr && has_map) ? changed_region : nullptr,
+        &valid_region);
     if (grey == nullptr || grey->float_data() == nullptr) {
       return false;
     }
@@ -256,14 +306,35 @@ bool bake_mask_effect_row_write(Main &bmain,
     if (image == nullptr) {
       return false;
     }
-    bake_mask_effect_grey_write(*image, base_info->is_color, *grey, size, 0);
+    /* An empty valid region says the current inputs move no texel of the grey: the map already is
+     * the picture the bake owes, and only the subscription is left holding the edits that turned out
+     * not to move it. Nothing is written; the finalize below re-creates the subscription with a
+     * drain, which is what lets the row stop being stale. */
+    if (changed_region != nullptr && BLI_rcti_is_empty(&valid_region)) {
+      BKE_paint_layers_bake_finalize(ma, layer);
+      return false;
+    }
+    int map_rect[4] = {0, 0, 0, 0};
+    const int *rect = nullptr;
+    if (changed_region != nullptr && has_map && image->id.session_uid == map_uid_before) {
+      /* The region the grey answers for, clamped to its own texels first: the answer's band is in
+       * its grid, the map's rectangle derived from it below. A map the write would replace (it did
+       * not stand before this bake) leaves `changed_region` out of the ask above, so its band is the
+       * whole canvas and the write is whole. */
+      valid_region.xmin = clamp_i(valid_region.xmin, 0, grey->x);
+      valid_region.ymin = clamp_i(valid_region.ymin, 0, grey->y);
+      valid_region.xmax = clamp_i(valid_region.xmax, 0, grey->x);
+      valid_region.ymax = clamp_i(valid_region.ymax, 0, grey->y);
+      bake_valid_to_map_rect(valid_region, size, grey->x, grey->y, map_rect);
+      rect = map_rect;
+    }
+    bake_mask_effect_grey_write(*image, base_info->is_color, *grey, size, 0, rect);
     bake_stale_channel_maps_release(
         bmain, layer, Vector<int>({PAINT_MATERIAL_CHANNEL_BASE_COLOR}));
     BKE_paint_layers_bake_finalize(ma, layer);
-    /* The bake holds the grey now: the cache entry is a copy kept for nothing while the bake
-     * stands, and the composite and the graph read the bake. The cache computes the grey back when
-     * the bake goes stale -- an edit or a stroke -- exactly as it did before the first bake. */
-    paint_layer_mask_effect_cache_drop(ma, *owner, layer);
+    /* The cache entry the write went through stays: the live grey is the base the next regional
+     * patch builds on, and dropping it would turn every bake into a full recompute again. The LRU
+     * budget, not the bake, decides how long it stands -- the same rule the owned effects keep. */
     return true;
   }
 
@@ -293,9 +364,11 @@ bool bake_mask_effect_row_write(Main &bmain,
       if (image == nullptr) {
         return false;
       }
-      bake_mask_effect_grey_write(*image, base_info->is_color, *grey, size, pair.image_tile);
+      bake_mask_effect_grey_write(
+          *image, base_info->is_color, *grey, size, pair.image_tile, nullptr);
       grey.reset();
-      paint_layer_mask_effect_cache_drop(ma, *owner, layer, pair.uv_tile, painted_object);
+      /* The tile's cache entry stays, as on the shared map above: the live grey is the base the next
+       * patch builds on, and only the LRU budget retires it. */
     }
     MaterialPaintLayerBakeTile *tile = bake_tile_ensure(
         *bake, target.object_uid, target.block_origin[0], target.block_origin[1]);
@@ -434,12 +507,8 @@ bool bake_effect_row_write(Main &bmain,
     const bool keeps_alpha = paint_layer_kind_result_has_alpha(effect);
     const float *src = result->float_data();
     /* The map rectangle the valid region of the result lands in, or whole when no region was asked
-     * or the map cannot take one. A map texel x samples result texel min(x * width / size,
-     * width - 1) -- the fill lambda below, the same numbers the full write reads the result by --
-     * so the result columns [xmin, xmax) are read by the map columns [xmin * size / width, xmax *
-     * size / width) rounded up: a map column below the ceil still samples a texel the compute left
-     * as it was, stale in the result, over a map texel that already holds that stale value, and
-     * rounding either end down (or out) would write it.
+     * or the map cannot take one -- #bake_valid_to_map_rect derives the numbers from the resample
+     * both writers share (see #bake_mask_effect_grey_write).
      *
      * Only a partial write into the map that was already there is safe. A map #bake_service_image
      * replaced (its size or format moved) is written whole: the cache answers for the whole
@@ -452,10 +521,7 @@ bool bake_effect_row_write(Main &bmain,
     int map_rect[4] = {0, 0, 0, 0};
     const int *rect = nullptr;
     if (regional) {
-      map_rect[0] = clamp_i(int((int64_t(valid_region.xmin) * size + width - 1) / width), 0, size);
-      map_rect[1] = clamp_i(int((int64_t(valid_region.ymin) * size + height - 1) / height), 0, size);
-      map_rect[2] = clamp_i(int((int64_t(valid_region.xmax) * size + width - 1) / width), 0, size);
-      map_rect[3] = clamp_i(int((int64_t(valid_region.ymax) * size + height - 1) / height), 0, size);
+      bake_valid_to_map_rect(valid_region, size, width, height, map_rect);
       rect = map_rect;
     }
     bake_write_image_rows(

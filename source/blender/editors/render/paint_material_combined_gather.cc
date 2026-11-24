@@ -1141,7 +1141,10 @@ CombinedGpuFrame::~CombinedGpuFrame()
 
 std::shared_ptr<ImBuf> CombinedGpuFrame::read_back(gpu::Texture *texture) const
 {
-  GPU_finish();
+  /* No GPU_finish before the read: both backends already synchronise inside it -- GL blocks in
+   * glGetTextureImage, Vulkan waits on its staging fence. An extra finish would only stall the
+   * whole pipeline for a wait the read is about to do anyway, so do not put one back "to be safe".
+   */
   float *pixels = static_cast<float *>(GPU_texture_read(texture, GPU_DATA_FLOAT, 0));
   if (pixels == nullptr) {
     return nullptr;

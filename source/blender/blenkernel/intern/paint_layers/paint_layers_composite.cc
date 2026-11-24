@@ -3242,7 +3242,7 @@ static bool paint_layer_effect_compute(const Material &ma,
  * axes, the halo grows the region past it, and the region path refuses itself below -- the full
  * compute is the same work without the clone.
  */
-static bool paint_layer_effect_region_update_supported(const MaterialPaintLayer &effect)
+bool paint_layer_effect_region_update_supported(const MaterialPaintLayer &effect)
 {
   if (!paint_layer_effect_region_exact(effect)) {
     return false;

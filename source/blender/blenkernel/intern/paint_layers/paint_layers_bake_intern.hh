@@ -199,19 +199,24 @@ void bake_write_image_rows(
 
 /**
  * Render the CPU-computed mask effect's grey of \a layer (a mask item) into its own bake: the grey
- * the mask effect cache holds, resampled from the row's canvas to the \a size-square map, written
- * whole. True when the map was written.
+ * the mask effect cache holds, resampled from the row's canvas to the \a size-square map. True when
+ * the map was written.
  *
  * \param objects: the objects of a grey that reads the surface
  *                 (#paint_layers_bake_node_reads_surface); the grey is then rendered per object and
  *                 UV tile into one tiled map, as a row's per-object bake is. Empty writes the one
  *                 map shared by every object.
+ * \param changed_region: the rectangle whose inputs changed since the grey map was last written, or
+ *        null for the whole canvas. Only the shared map takes it -- the per-object path writes every
+ *        tile whole, since no single band names all of them. A fresh or replaced map writes whole
+ *        too, having no previous result outside the band to keep.
  */
 bool bake_mask_effect_row_write(Main &bmain,
                                 Material &ma,
                                 MaterialPaintLayer &layer,
                                 int size,
-                                Span<PaintLayersBakeTarget> objects = {});
+                                Span<PaintLayersBakeTarget> objects = {},
+                                const rcti *changed_region = nullptr);
 
 /**
  * The side the result of \a effect (which owns it, #paint_layer_effect_owns_result) lays on: its
@@ -252,6 +257,18 @@ bool bake_effect_row_write(Main &bmain,
 const rcti *bake_effect_region_resolve(const Material &ma,
                                        const MaterialPaintLayer &effect,
                                        rcti &r_region);
+
+/**
+ * The rectangle of a mask item's grey whose inputs changed since its map was last written, or null
+ * when the whole canvas has to be written. The trust rules are the owned effects'
+ * (#bake_effect_region_resolve), except that a mask item has no chain of its own effects and so no
+ * content footprint: the band the subscription reports is taken as it is. A grey that reads an
+ * Anchor Point's slice, a transform item, a surface path and a step of the owner row that moves
+ * texels (a Decal, a folded projection, a remapping, a transform effect) all write whole.
+ */
+const rcti *bake_mask_effect_region_resolve(const Material &ma,
+                                            const MaterialPaintLayer &layer,
+                                            rcti &r_region);
 
 /**
  * Whether the effect \a effect that owns its result has none current and nothing keeps it from
@@ -546,18 +563,13 @@ void bake_drag_forget_material(uint32_t material_uid);
  * \{ */
 
 /**
- * The GPU-computed result of one owned effect's channel, produced by the provider
- * (see #BKE_paint_layers_owned_effect_gpu_provider_get) on the main thread at the job's creation.
- * Held by the job until the worker's effect stage takes it and folds it into the map's own format;
- * a channel with no entry in the job's store is computed on the CPU as before.
+ * The byte budget a job's creation may spend precomputing GPU results on the main thread, and its
+ * setter (tests drive the fallback with a spent budget). One 4K channel in float is 256 MiB, so the
+ * default keeps the peak, and the main-thread freeze it costs, within a couple of channels; channels
+ * past it stay on the worker's CPU path as a refused one does.
  */
-struct PrecomputedChannelResult {
-  /** The effect the result belongs to, the marker the job's effect queue names it by. */
-  bUUID effect_marker = {};
-  int channel = 0;
-  /** Premultiplied float RGBA at the effect input's own size, as the provider produced it. */
-  std::shared_ptr<ImBuf> result = nullptr;
-};
+size_t paint_layers_bake_gpu_precompute_budget();
+void paint_layers_bake_gpu_precompute_budget_set(size_t bytes);
 
 /** \} */
 

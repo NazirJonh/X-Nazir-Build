@@ -2045,6 +2045,14 @@ void paint_layer_branch_duplicate(Main &bmain,
 /** A private copy of \a source, for an update of a buffer someone else still reads. */
 std::shared_ptr<ImBuf> paint_layer_anchor_slice_buffer_clone(const ImBuf &source);
 
+/**
+ * Whether the kernel of \a effect is a local function of the input's neighbourhood, so the effect
+ * cache may patch a region instead of recomputing the canvas (see
+ * `paint_layer_effect_region_compute` in `paint_layers_composite.cc`). The mask effect cache asks
+ * the same question before it patches an item's grey: both caches must refuse the same kinds.
+ */
+bool paint_layer_effect_region_update_supported(const MaterialPaintLayer &effect);
+
 /** The scene-linear luminance of each texel of \a buffer written to all three colour channels. The
  * mask effects whose kernels can leave the grey colored (a Noise off its monochrome mode, a Glow,
  * a Color Match) bring their result back through it, so the item lays one grey. */
@@ -2217,6 +2225,18 @@ uint64_t paint_layer_owned_effect_input_hash(const Material &ma,
  * \param painted_object: the surface a projected item before \a effect is read through. Without
  *        one such an item reads as nothing, which is all a caller with no surface (a shared bake)
  *        can have; the entry is then keyed apart from the one computed over a surface.
+ * \param changed_region: the rectangle a caller (a bake that knows the stroke's region) offers for
+ *        the regional update; null keeps the old terms, where any map change recomputes the whole
+ *        buffer. The rectangle actually patched is the one the entry's own staleness names, which
+ *        the cache reads from the maps themselves; the offered band decides what the caller learns
+ *        about the answer, not what is patched.
+ * \param r_valid_region: the rectangle of the answer a map-writing caller can lay from it. The
+ *        answer is current as a whole whichever way the cycle answered, so an offered band comes
+ *        back grown by the halo and clamped to the canvas -- the band the caller's map is missing,
+ *        plus what the kernel reads past it. The whole canvas when no band was offered, when the
+ *        band cannot be narrowed (the maps reach the canvas through a remapping or the item reads
+ *        an Anchor Point's slice), or after a full compute. Empty when the offered band was empty
+ *        or the compute failed.
  * \return null when the input could not be rendered or \a describe_only was asked.
  */
 std::shared_ptr<ImBuf> paint_layer_mask_effect_buffer_get(
@@ -2226,7 +2246,9 @@ std::shared_ptr<ImBuf> paint_layer_mask_effect_buffer_get(
     const bool describe_only,
     blender::Vector<Image *> *r_images,
     int tile_number,
-    PaintLayerSurfaceRef painted_object = nullptr);
+    PaintLayerSurfaceRef painted_object = nullptr,
+    const rcti *changed_region = nullptr,
+    rcti *r_valid_region = nullptr);
 
 /**
  * Fingerprint of the projected items of \a row's mask before \a stop, as \a painted_object sees
@@ -2260,9 +2282,10 @@ bool paint_layer_mask_transform_step_get(const MaterialPaintLayer &item,
                                          PaintMaterialCompositeMapping &r_step);
 
 /**
- * Drop the cache's entry of the mask effect \a effect: its bake holds the grey now, and the entry
- * is a copy kept for nothing while the bake stands. The cache computes the grey back when the bake
- * goes stale -- an edit or a stroke -- exactly as it did before the first bake.
+ * Drop the cache's entry of the mask effect \a effect: for an explicit reset of the item (it was
+ * removed, or its grey is being recomputed from scratch). A bake write no longer drops it -- the
+ * live grey is the base the next regional patch builds on, and only the cache's LRU budget retires
+ * it (see #bake_mask_effect_row_write).
  *
  * \param tile_number: the tile and \param painted_object the surface the entry was computed for
  *        (see #paint_layer_mask_effect_buffer_get): the key has to be the one the compute used, or

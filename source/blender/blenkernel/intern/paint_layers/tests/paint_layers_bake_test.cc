@@ -2886,7 +2886,7 @@ TEST_F(PaintLayersBakeTest, a_stroke_into_the_rows_colour_leaves_the_mask_effect
   BKE_paint_layers_bake_stroke_active_set(false);
 }
 
-TEST_F(PaintLayersBakeTest, a_mask_effects_bake_frees_its_cache_entry)
+TEST_F(PaintLayersBakeTest, a_mask_effects_bake_keeps_its_cache_entry)
 {
   MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));
   ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *row, *bake_test_add_ramp_image(*bmain, "Mask")),
@@ -2907,12 +2907,13 @@ TEST_F(PaintLayersBakeTest, a_mask_effects_bake_frees_its_cache_entry)
   ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   ASSERT_NE(blur->bake, nullptr);
   ASSERT_NE(blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], nullptr);
-  /* The bake holds the grey now: the entry was a copy kept for nothing while the bake stands, and
-   * the describe reads the bake's map instead of it. */
-  EXPECT_EQ(paint_layer_mask_effect_cache_entry_count(), 0);
+  /* The entry the write went through stays: the live grey is the base the next regional patch
+   * builds on, and dropping it would turn every bake into a full recompute again. The cache's LRU
+   * budget, not the bake, retires it -- the rule the owned effects keep (#bake_mask_effect_row_write). */
+  EXPECT_EQ(paint_layer_mask_effect_cache_entry_count(), 1);
 
-  /* An edit that stales the bake hands the grey back to the cache: the preview does not wait for
-   * the bake to catch up, and it is the same grey the old entry held. */
+  /* An edit that stales the bake has the grey already in the cache: the preview does not wait for
+   * the bake to catch up, and the recompute replaces the entry in place. */
   ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 2));
   Vector<PaintMaterialCompositeImageLayer> moved_layers;
   ASSERT_TRUE(BKE_paint_layers_composite_image_layers(

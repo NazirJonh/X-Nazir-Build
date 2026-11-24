@@ -1870,6 +1870,7 @@ class PaintLayersOwnedEffectTest : public PaintLayersMaterialBakeTest {
     wmWindowManager *wm = BKE_id_new<wmWindowManager>(bmain, "WMdummy");
     wm->runtime = MEM_new<bke::WindowManagerRuntime>(__func__);
     BKE_paint_layers_effect_cache_free_all();
+    BKE_paint_layers_mask_effect_cache_free_all();
   }
 
   void TearDown() override
@@ -1878,6 +1879,9 @@ class PaintLayersOwnedEffectTest : public PaintLayersMaterialBakeTest {
     BKE_paint_layers_owned_effect_gpu_provider_set(nullptr);
     owned_effect_gpu_test::g_provider_had_region = false;
     BKE_paint_layers_effect_cache_free_all();
+    /* The mask effect cache is a module static the mask-grey tests fill: left uncleared it holds a
+     * Vector past the leak check, the way the effect cache above would. */
+    BKE_paint_layers_mask_effect_cache_free_all();
     BKE_paint_layers_bake_stroke_active_set(false);
     BKE_paint_layers_bake_drag_clear_all();
     PaintLayersMaterialBakeTest::TearDown();
@@ -2822,6 +2826,105 @@ TEST_F(PaintLayersOwnedEffectTest, a_refusing_gpu_provider_leaves_the_cpu_result
       << "a provider that refuses leaves the CPU compute exactly as it was";
 }
 
+namespace owned_effect_gpu_test {
+
+/** How many channels the provider below was asked for. */
+int g_provider_calls = 0;
+
+/** A provider answering every channel with a flat 8-square read-back of white, opaque. White is
+ * the one grey that lands at 255 in a byte map whatever the colour management does to it. */
+static std::shared_ptr<ImBuf> owned_effect_gpu_provider_flat(const Material & /*ma*/,
+                                                             const MaterialPaintLayer & /*row*/,
+                                                             const MaterialPaintLayer & /*effect*/,
+                                                             const int /*channel*/,
+                                                             const int /*tile_number*/,
+                                                             const rcti * /*changed_region*/)
+{
+  g_provider_calls++;
+  ImBuf *buffer = IMB_allocImBuf(8, 8, ImBufFlags::FloatData);
+  if (buffer == nullptr) {
+    return {};
+  }
+  float *pixels = buffer->float_data_for_write();
+  for (const int i : IndexRange(8 * 8)) {
+    pixels[i * 4 + 0] = 1.0f;
+    pixels[i * 4 + 1] = 1.0f;
+    pixels[i * 4 + 2] = 1.0f;
+    pixels[i * 4 + 3] = 1.0f;
+  }
+  return std::shared_ptr<ImBuf>(buffer, [](ImBuf *ibuf) { IMB_freeImBuf(ibuf); });
+}
+
+}  // namespace owned_effect_gpu_test
+
+TEST_F(PaintLayersOwnedEffectTest, the_creation_converts_the_gpu_result_before_the_worker)
+{
+  /* A float RGBA of the whole canvas is 256 MiB at 4K per channel; the job has to hold the map's own
+   * format from the moment the provider answers, not that read-back through the worker's stage. */
+  owned_effect_gpu_test::g_provider_calls = 0;
+  BKE_paint_layers_owned_effect_gpu_provider_set(
+      &owned_effect_gpu_test::owned_effect_gpu_provider_flat);
+  MaterialPaintLayer *blur = nullptr;
+  MaterialPaintLayer *row = add_row_with_blur(&blur, 512, 512);
+  ASSERT_NE(blur, nullptr);
+  ASSERT_NE(row, nullptr);
+
+  PaintLayersBakeJob *job = BKE_paint_layers_bake_job_create(*bmain, *ma);
+  ASSERT_NE(job, nullptr);
+  EXPECT_GT(owned_effect_gpu_test::g_provider_calls, 0)
+      << "the creation asks the provider for every GPU-computed channel";
+  /* The store holds converted channel maps: at most one 512-square RGBA per channel the effect
+   * filters, in the widest format a map can take (float). The bound is a ceiling, not an exact
+   * number: the map is byte or float depending on #bake_channel_needs_float. */
+  ASSERT_GT(blur->channels_num, 0);
+  const int64_t ceiling = int64_t(blur->channels_num) * 512 * 512 * 4 * int64_t(sizeof(float));
+  EXPECT_GT(BKE_paint_layers_bake_job_retained_bytes(*job), 0);
+  EXPECT_LE(BKE_paint_layers_bake_job_retained_bytes(*job), ceiling);
+
+  BKE_paint_layers_bake_job_compute(*job, {}, {});
+  EXPECT_TRUE(BKE_paint_layers_bake_job_commit(*job));
+  BKE_paint_layers_bake_job_free(*job);
+
+  Image *effect_map = blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(effect_map, nullptr);
+  const Vector<uchar> pixels = read_map(*effect_map);
+  ASSERT_FALSE(pixels.is_empty());
+  EXPECT_NEAR(map_byte_at(pixels, 512, 256, 256), 255, 1)
+      << "the converted GPU answer is the map the commit lays";
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_precompute_over_the_budget_falls_back_to_the_cpu)
+{
+  /* A spent budget means the creation dispatches nothing: every channel falls back to the CPU
+   * path, the result a refusing provider gives. The budget rules the creation alone; the compute
+   * below runs on the main thread in this harness, where the CPU path's own GPU gate may still ask
+   * the provider (a real job's worker cannot), so the call count is read before `compute`. */
+  owned_effect_gpu_test::g_provider_calls = 0;
+  BKE_paint_layers_owned_effect_gpu_provider_set(
+      &owned_effect_gpu_test::owned_effect_gpu_provider_flat);
+  MaterialPaintLayer *blur = nullptr;
+  MaterialPaintLayer *row = add_row_with_blur(&blur, 512, 512);
+  ASSERT_NE(blur, nullptr);
+  ASSERT_NE(row, nullptr);
+
+  /* The default is read before the budget is spent, so the test never hard-codes it twice. */
+  const size_t default_budget = paint_layers_bake_gpu_precompute_budget();
+  paint_layers_bake_gpu_precompute_budget_set(0);
+  PaintLayersBakeJob *job = BKE_paint_layers_bake_job_create(*bmain, *ma);
+  ASSERT_NE(job, nullptr);
+  EXPECT_EQ(owned_effect_gpu_test::g_provider_calls, 0)
+      << "a zero budget leaves every channel to the CPU path at creation";
+
+  BKE_paint_layers_bake_job_compute(*job, {}, {});
+  const bool landed = BKE_paint_layers_bake_job_commit(*job);
+  BKE_paint_layers_bake_job_free(*job);
+  paint_layers_bake_gpu_precompute_budget_set(default_budget);
+
+  EXPECT_TRUE(landed);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur))
+      << "the CPU fallback still bakes the effect";
+}
+
 TEST_F(PaintLayersOwnedEffectTest, a_valid_region_is_the_offered_band_grown_and_clipped)
 {
   MaterialPaintLayer *blur = nullptr;
@@ -3170,7 +3273,7 @@ TEST_F(PaintLayersOwnedEffectTest, a_whole_map_chain_keeps_the_whole_canvas)
 TEST_F(PaintLayersOwnedEffectTest, a_freed_bake_map_is_replaced_not_dereferenced)
 {
   MaterialPaintLayer *blur = nullptr;
-  MaterialPaintLayer *row = add_row_with_blur(&blur);
+  ASSERT_NE(add_row_with_blur(&blur), nullptr);
   ASSERT_NE(blur, nullptr);
   ASSERT_TRUE(bake_effect_row_write(*bmain, *ma, *blur));
   Image *map = blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
@@ -4060,6 +4163,308 @@ TEST_F(PaintLayersMaterialBakeTest, a_batched_byte_row_is_the_per_pixel_encoding
       EXPECT_EQ(in_place_bytes[i], per_pixel[i]) << "in-place byte " << i << " of the row";
     }
   }
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Mask effect: a regional grey patch and a regional map write
+ *
+ * The mask cache patches a region of its grey exactly the way the row's effect cache does, and the
+ * bake writes only the band the patch names. These tests drive the two directly, over a mask built
+ * from one painted map so that a pixel edit is a rectangle the subscription reports.
+ * \{ */
+
+/** A blank \a size-square generated image, the mask base the tests paint into. */
+static Image *add_square_image(Main *bmain, const int size, const char *name)
+{
+  const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  return BKE_image_add_generated(
+      bmain, size, size, name, 32, false, IMA_GENTYPE_BLANK, black, false, false, false);
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_mask_grey_patch_matches_the_full_compute)
+{
+  /* The regional patch and the full compute must land the same texels: the patch re-renders the
+   * band grown by the halo, runs the whole kernel over that small buffer and copies the interior
+   * into a clone of the cached grey. The mask's map and the row's canvas share the size here, so
+   * the subscription's band is the canvas band the patch names. */
+  MaterialPaintLayer *row = add_material_row(*source);
+  ASSERT_NE(row, nullptr);
+  uint32_t hash[2], source_hash[2];
+  start_render(*row, Span<const int>(base_color_roughness, 2), hash, source_hash, 512, 512);
+  ASSERT_TRUE(BKE_paint_layers_material_bake_land(*ma, row->marker, hash, source_hash, true));
+
+  MaterialPaintLayer *mask = BKE_paint_layers_mask_add(*ma, row, 1.0f);
+  ASSERT_NE(mask, nullptr);
+  Image *mask_map = add_square_image(bmain, 512, "MaskGrey");
+  ASSERT_NE(mask_map, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, mask_map));
+  MaterialPaintLayer *blur = BKE_paint_layers_mask_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_BLUR, nullptr);
+  ASSERT_NE(blur, nullptr);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 1));
+
+  /* A flat grey the blur keeps flat, so the patch's interior is known: 120 everywhere. */
+  const rcti whole{0, 512, 0, 512};
+  write_map_rect(*mask_map, whole, 120);
+  mark_map_rect(*mask_map, whole);
+  BKE_paint_layers_bake_notice_changes(*ma);
+
+  std::shared_ptr<ImBuf> full = paint_layer_mask_effect_buffer_get(
+      *ma, *row, *blur, /*describe_only=*/false, nullptr, PAINT_TILE_NUMBER_BASE);
+  ASSERT_NE(full, nullptr);
+
+  /* A band the mask's own map changed in: the cache sees it as a region and patches it. */
+  const rcti dirty{100, 140, 100, 140};
+  edit_map_rect(*mask_map, dirty, 220);
+  BKE_paint_layers_bake_notice_changes(*ma);
+
+  rcti valid;
+  BLI_rcti_init(&valid, 0, 0, 0, 0);
+  std::shared_ptr<ImBuf> patched = paint_layer_mask_effect_buffer_get(*ma,
+                                                                      *row,
+                                                                      *blur,
+                                                                      /*describe_only=*/false,
+                                                                      nullptr,
+                                                                      PAINT_TILE_NUMBER_BASE,
+                                                                      nullptr,
+                                                                      &dirty,
+                                                                      &valid);
+  ASSERT_NE(patched, nullptr);
+  EXPECT_FALSE(BLI_rcti_is_empty(&valid)) << "the patch names the band it made correct";
+
+  /* The next full compute from the edited map is the reference the patch has to match. */
+  BKE_paint_layers_mask_effect_cache_free_all();
+  std::shared_ptr<ImBuf> recomputed = paint_layer_mask_effect_buffer_get(
+      *ma, *row, *blur, /*describe_only=*/false, nullptr, PAINT_TILE_NUMBER_BASE);
+  ASSERT_NE(recomputed, nullptr);
+
+  ASSERT_EQ(patched->x, recomputed->x);
+  ASSERT_EQ(patched->y, recomputed->y);
+  for (const int64_t i : IndexRange(int64_t(patched->x) * patched->y)) {
+    EXPECT_NEAR(patched->float_data()[i * 4],
+                recomputed->float_data()[i * 4],
+                1e-5f)
+        << "the patch and the full compute disagree at texel " << i;
+  }
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_mask_grey_with_an_anchor_slice_refuses_the_patch)
+{
+  /* A grey that reads an Anchor Point's slice is another row's canvas: a rectangle of this item's
+   * maps says nothing about it, and the cache has to answer with the whole canvas. */
+  /* A row that reads a material takes no channel record of its own: #BKE_paint_layers_channel_add
+   * refuses one a kind never reads, so the Normal it lays has to come from the source's graph. A
+   * Bump on the Principled makes the row take part in the channel, and the render's own Normal map
+   * below is the one the point reads. */
+  bump_normal_link(*source);
+  MaterialPaintLayer *source_row = add_material_row(*source);
+  ASSERT_NE(source_row, nullptr);
+  uint32_t hash[2], source_hash[2];
+  start_render(*source_row,
+               Span<const int>(base_color_roughness_normal, 3),
+               hash,
+               source_hash,
+               512,
+               512);
+  ASSERT_TRUE(
+      BKE_paint_layers_material_bake_land(*ma, source_row->marker, hash, source_hash, true));
+  ASSERT_NE(source_row->bake, nullptr);
+  Image *normal_map = source_row->bake->images[PAINT_MATERIAL_CHANNEL_NORMAL];
+  ASSERT_NE(normal_map, nullptr);
+
+  MaterialPaintLayer *owner = add_material_row(*source);
+  ASSERT_NE(owner, nullptr);
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, owner, 1.0f), nullptr);
+  MaterialPaintLayer *item = BKE_paint_layers_normal_to_mask_add(*ma, owner, source_row);
+  ASSERT_NE(item, nullptr);
+  ASSERT_TRUE(paint_layer_kind_reads_anchor_point(*item));
+
+  std::shared_ptr<ImBuf> grey = paint_layer_mask_effect_buffer_get(
+      *ma, *owner, *item, /*describe_only=*/false, nullptr, PAINT_TILE_NUMBER_BASE);
+  ASSERT_NE(grey, nullptr);
+
+  /* An edit of the referenced normal is a rectangle in its own grid; the grey is this canvas's, and
+   * no band of it can be named from that rectangle. */
+  const rcti dirty{100, 140, 100, 140};
+  edit_map_rect(*normal_map, dirty, 220);
+  BKE_paint_layers_bake_notice_changes(*ma);
+
+  rcti valid;
+  BLI_rcti_init(&valid, 0, 0, 0, 0);
+  std::shared_ptr<ImBuf> answer = paint_layer_mask_effect_buffer_get(*ma,
+                                                                     *owner,
+                                                                     *item,
+                                                                     /*describe_only=*/false,
+                                                                     nullptr,
+                                                                     PAINT_TILE_NUMBER_BASE,
+                                                                     nullptr,
+                                                                     &dirty,
+                                                                     &valid);
+  ASSERT_NE(answer, nullptr);
+  EXPECT_TRUE(valid.xmin == 0 && valid.ymin == 0 && valid.xmax >= answer->x &&
+              valid.ymax >= answer->y)
+      << "an anchor-slice grey cannot narrow the written band";
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_regional_mask_write_leaves_the_rest_of_the_grey_map)
+{
+  /* The mirror of the owned effect's regional write, for a mask item: a band of the mask's map
+   * changes, the plan resolves that band and the grey map outside it keeps its pixels. */
+  MaterialPaintLayer *row = add_material_row(*source);
+  ASSERT_NE(row, nullptr);
+  uint32_t hash[2], source_hash[2];
+  start_render(*row, Span<const int>(base_color_roughness, 2), hash, source_hash, 512, 512);
+  ASSERT_TRUE(BKE_paint_layers_material_bake_land(*ma, row->marker, hash, source_hash, true));
+
+  MaterialPaintLayer *mask = BKE_paint_layers_mask_add(*ma, row, 1.0f);
+  ASSERT_NE(mask, nullptr);
+  Image *mask_map = add_square_image(bmain, 512, "MaskWrite");
+  ASSERT_NE(mask_map, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, mask_map));
+  MaterialPaintLayer *item = BKE_paint_layers_mask_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_BLUR, nullptr);
+  ASSERT_NE(item, nullptr);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*item, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*item, PAINT_LAYER_BLUR_RADIUS, 1));
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *item, MA_PAINT_LAYER_BAKE_ALWAYS));
+
+  const rcti whole{0, 512, 0, 512};
+  write_map_rect(*mask_map, whole, 120);
+  mark_map_rect(*mask_map, whole);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  ASSERT_TRUE(run_plan());
+  Image *grey_map = item->bake != nullptr ? item->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR] :
+                                            nullptr;
+  ASSERT_NE(grey_map, nullptr);
+  int flat_value = 0;
+  {
+    const Vector<uchar> flat = read_map(*grey_map);
+    ASSERT_FALSE(flat.is_empty());
+    flat_value = int(map_byte_at(flat, 512, 256, 256));
+    EXPECT_GT(flat_value, 0) << "the flat mask laid a grey";
+  }
+  /* A canary far from the edit: a regional write leaves it, a whole one overwrites it. */
+  const int canary_x = 511;
+  const int canary_y = 511;
+  write_map_rect(*grey_map, rcti{canary_x, canary_x + 1, canary_y, canary_y + 1}, 17);
+
+  const rcti dirty{5, 7, 3, 5};
+  edit_map_rect(*mask_map, dirty, 220);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  rcti resolved;
+  ASSERT_NE(bake_mask_effect_region_resolve(*ma, *item, resolved), nullptr)
+      << "the edit reached the item's subscription as a rectangle";
+
+  ASSERT_TRUE(run_plan());
+  const Vector<uchar> regional = read_map(*grey_map);
+  ASSERT_FALSE(regional.is_empty());
+  EXPECT_EQ(map_byte_at(regional, 512, canary_x, canary_y), 17)
+      << "the plan wrote the band only, as the canary expects";
+  const int band_value = int(map_byte_at(regional,
+                                         512,
+                                         (dirty.xmin + dirty.xmax) / 2,
+                                         (dirty.ymin + dirty.ymax) / 2));
+  EXPECT_GT(std::abs(band_value - flat_value), 20)
+      << "the edit's band was laid, the flat grey of it replaced";
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_mask_item_with_a_transform_is_written_whole)
+{
+  /* A transform item moves the grey instead of correcting it: no rectangle of the input names a
+   * band of the result, so the plan refuses the region and writes whole. */
+  MaterialPaintLayer *row = add_material_row(*source);
+  ASSERT_NE(row, nullptr);
+  uint32_t hash[2], source_hash[2];
+  start_render(*row, Span<const int>(base_color_roughness, 2), hash, source_hash, 512, 512);
+  ASSERT_TRUE(BKE_paint_layers_material_bake_land(*ma, row->marker, hash, source_hash, true));
+
+  MaterialPaintLayer *mask = BKE_paint_layers_mask_add(*ma, row, 1.0f);
+  ASSERT_NE(mask, nullptr);
+  Image *mask_map = add_square_image(bmain, 512, "MaskTransform");
+  ASSERT_NE(mask_map, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, mask_map));
+  MaterialPaintLayer *item = BKE_paint_layers_mask_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_TRANSFORM, nullptr);
+  ASSERT_NE(item, nullptr);
+  const float scale[2] = {2.0f, 2.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, item, scale));
+  ASSERT_TRUE(paint_layer_mask_item_is_transform(*item));
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *item, MA_PAINT_LAYER_BAKE_ALWAYS));
+
+  const rcti whole{0, 512, 0, 512};
+  write_map_rect(*mask_map, whole, 120);
+  mark_map_rect(*mask_map, whole);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  ASSERT_TRUE(run_plan());
+  Image *grey_map = item->bake != nullptr ? item->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR] :
+                                            nullptr;
+  ASSERT_NE(grey_map, nullptr);
+
+  const int canary_x = 511;
+  const int canary_y = 511;
+  write_map_rect(*grey_map, rcti{canary_x, canary_x + 1, canary_y, canary_y + 1}, 17);
+
+  const rcti dirty{5, 7, 3, 5};
+  edit_map_rect(*mask_map, dirty, 220);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  rcti resolved;
+  EXPECT_EQ(bake_mask_effect_region_resolve(*ma, *item, resolved), nullptr)
+      << "a transform item has no band in the canvas to write";
+
+  ASSERT_TRUE(run_plan());
+  const Vector<uchar> whole_map = read_map(*grey_map);
+  ASSERT_FALSE(whole_map.is_empty());
+  EXPECT_NE(map_byte_at(whole_map, 512, canary_x, canary_y), 17)
+      << "the whole write recomputed the canary";
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_mask_region_without_a_changed_band_keeps_the_canary)
+{
+  /* Without a band the resolve answers null and nothing is due: the plan leaves the map alone, the
+   * canary included. A whole write would have to be asked for by a reason of its own. */
+  MaterialPaintLayer *row = add_material_row(*source);
+  ASSERT_NE(row, nullptr);
+  uint32_t hash[2], source_hash[2];
+  start_render(*row, Span<const int>(base_color_roughness, 2), hash, source_hash, 512, 512);
+  ASSERT_TRUE(BKE_paint_layers_material_bake_land(*ma, row->marker, hash, source_hash, true));
+
+  MaterialPaintLayer *mask = BKE_paint_layers_mask_add(*ma, row, 1.0f);
+  ASSERT_NE(mask, nullptr);
+  Image *mask_map = add_square_image(bmain, 512, "MaskNoBand");
+  ASSERT_NE(mask_map, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, mask_map));
+  MaterialPaintLayer *item = BKE_paint_layers_mask_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_BLUR, nullptr);
+  ASSERT_NE(item, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *item, MA_PAINT_LAYER_BAKE_ALWAYS));
+
+  const rcti whole{0, 512, 0, 512};
+  write_map_rect(*mask_map, whole, 120);
+  mark_map_rect(*mask_map, whole);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  ASSERT_TRUE(run_plan());
+  Image *grey_map = item->bake != nullptr ? item->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR] :
+                                            nullptr;
+  ASSERT_NE(grey_map, nullptr);
+
+  const int canary_x = 511;
+  const int canary_y = 511;
+  write_map_rect(*grey_map, rcti{canary_x, canary_x + 1, canary_y, canary_y + 1}, 17);
+
+  rcti resolved;
+  EXPECT_EQ(bake_mask_effect_region_resolve(*ma, *item, resolved), nullptr)
+      << "nothing changed, so there is no band to name";
+  EXPECT_FALSE(run_plan()) << "the item is not due";
+  const Vector<uchar> kept = read_map(*grey_map);
+  ASSERT_FALSE(kept.is_empty());
+  EXPECT_EQ(map_byte_at(kept, 512, canary_x, canary_y), 17);
 }
 
 /** \} */

@@ -80,6 +80,17 @@ void paint_layers_source_cache_landing_rearm(Material &ma);
 void paint_layers_bake_undo_callback_init();
 
 /**
+ * Register the Combined preview's GPU providers for owned effects and mask effects with BKE, once.
+ * Everything that computes an effect on the main thread asks them before the CPU path -- the sync
+ * bake's writer, a mask item's grey in a bake and in the composite, and the heavy job's creation --
+ * and the mask path can run before any bake job exists, so this is called once from the editor's
+ * startup init (#ED_operatortypes_paint) as well as from the job start. It only sets two pointers;
+ * a provider still refuses per effect when it cannot answer, which leaves that effect on the CPU
+ * path.
+ */
+void paint_layers_owned_gpu_provider_ensure();
+
+/**
  * Whether (\a owner, \a job_type) is the exact job named by \a exclude_owner / \a
  * exclude_job_type. Pure -- pointer and integer comparisons only, nothing dereferenced -- since it
  * is the one thing standing between a settle call made from a job's own free callback and

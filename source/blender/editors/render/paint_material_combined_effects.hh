@@ -634,11 +634,13 @@ struct CombinedGpuFrame {
   ~CombinedGpuFrame();
 
   /**
-   * Move \a texture's texels into a float RGBA #ImBuf of the texture's own size: GPU_finish, the
-   * data read, the allocation, the copy, the free. Null when the read or the allocation failed --
-   * the caller refuses with its own stage, the texture's HOST_READ flag is the cache hook's own
-   * contract (#effect_gpu_acquire in #paint_material_combined_effects.cc). The buffer's deleter is
-   * the #ImBuf free, so the caller holds it as long as it reads.
+   * Move \a texture's texels into a float RGBA #ImBuf of the texture's own size: the data read,
+   * the allocation, the copy, the free. The read itself is the synchronisation -- GL and Vulkan
+   * both wait inside the backend call, so no GPU_finish is needed or wanted here. Null when the
+   * read or the allocation failed -- the caller refuses with its own stage, the texture's HOST_READ
+   * flag is the cache hook's own contract (#effect_gpu_acquire in
+   * #paint_material_combined_effects.cc). The buffer's deleter is the #ImBuf free, so the caller
+   * holds it as long as it reads.
    */
   std::shared_ptr<ImBuf> read_back(gpu::Texture *texture) const;
 

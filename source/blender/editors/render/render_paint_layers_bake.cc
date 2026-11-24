@@ -65,6 +65,11 @@ namespace blender::ed::material_bake {
  * the anonymous namespace would name a different, never-defined function. */
 static void paint_layers_bake_hold_timer_arm();
 
+/* The same rule for the GPU provider registration: it is called from the job start inside the
+ * anonymous namespace and from `ED_operatortypes_paint` in another translation unit, so its
+ * definition has to sit at this namespace's own scope (see after the anonymous namespace). */
+void paint_layers_owned_gpu_provider_ensure();
+
 namespace {
 
 /** One in-flight heavy bake. The BKE job owns the localized description and the pixel buffers. */
@@ -231,25 +236,6 @@ void paint_layers_bake_free(void *customdata)
     }
   }
   MEM_delete(job);
-}
-
-/**
- * Register the GPU owned-effect provider of the Combined preview with BKE, once, before the first
- * job that needs it. The heavy bake's worker has no GPU context, so the job's creation asks this
- * provider for the GPU-computed effects' results here on the main thread instead
- * (#BKE_paint_layers_owned_effect_gpu_provider_get); without the registration every one of them
- * falls back to the CPU composite. Registering itself only sets a pointer, so the flag spares the
- * repeat calls rather than any real work; the provider still refuses per channel when it cannot
- * answer, which leaves the channel on the CPU path as before.
- */
-static void paint_layers_owned_gpu_provider_ensure()
-{
-  static bool registered = false;
-  if (registered) {
-    return;
-  }
-  registered = true;
-  ed::material_combined::paint_material_combined_owned_gpu_register();
 }
 
 /**
@@ -833,6 +819,30 @@ wmOperatorStatus paint_layer_row_result_exec(bContext *C, wmOperator *op)
 /** \} */
 
 }  // namespace
+
+/**
+ * Register the GPU owned-effect and mask-effect providers of the Combined preview with BKE, once.
+ * Everything that computes an effect on the main thread asks them before the CPU path: the sync
+ * bake's writer (#bake_effect_row_write), a mask item's grey (#paint_layer_mask_effect_compute) --
+ * in a bake and in the composite alike -- and the heavy job's creation
+ * (#BKE_paint_layers_owned_effect_gpu_provider_get). The mask path can run before any job exists,
+ * so this is called once at editor startup as well as from #paint_layers_bake_job_start; without
+ * it every such effect falls back to the CPU composite. Registering itself only sets pointers, so
+ * the flag spares the repeat calls rather than any real work; a provider still refuses per effect
+ * when it cannot answer, which leaves that effect on the CPU path as before.
+ *
+ * Defined here, outside the anonymous namespace above, because `ED_operatortypes_paint` in another
+ * translation unit calls it: only this scope gives it the external linkage the header declares.
+ */
+void paint_layers_owned_gpu_provider_ensure()
+{
+  static bool registered = false;
+  if (registered) {
+    return;
+  }
+  registered = true;
+  ed::material_combined::paint_material_combined_owned_gpu_register();
+}
 
 /**
  * Start the cache bake of \a ma, or settle a cache the graph can no longer fill. A graph that

@@ -1579,6 +1579,12 @@ void PaintStroke::done(bContext *C, const bool is_cancel)
        * scene update runs. */
       BKE_paint_layers_regenerate_tagged(*bmain);
       ed::material_bake::paint_layers_bake_jobs_ensure(*wm, win, *bmain);
+      /* The inline bakes above (a row's synchronous content effect, every mask effect's grey) run
+       * after the last redraw of the stroke, and a bake writes no event of its own: without a
+       * notifier the preview keeps showing the pre-bake pixels until the user's next input --
+       * switching the active row was the one that made it show up. The heavy rows are a job and
+       * notify from their end callback; this covers the sync half. */
+      WM_main_add_notifier(NC_MATERIAL | ND_SHADING, nullptr);
     }
   }
 

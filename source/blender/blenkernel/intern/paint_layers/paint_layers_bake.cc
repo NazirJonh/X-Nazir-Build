@@ -3750,6 +3750,67 @@ const rcti *bake_effect_region_resolve(const Material &ma,
   return &r_region;
 }
 
+/**
+ * The changed rectangle a mask item's regional grey write may take, in the item's canvas pixels, or
+ * null when the whole canvas has to be written. \a r_region is filled when a rectangle is returned.
+ *
+ * The trust rules are the owned effects' (#bake_effect_region_resolve), minus the content
+ * footprint: a mask item has no chain of its own effects, its grey is the mask built up to it, and
+ * a bounded footprint would describe the owner row instead of the item. A rectangle only describes
+ * pixel edits of the maps the grey reads, so it is trusted when the map stands (a partial write
+ * cannot fill a fresh map -- its untouched region would keep no previous result), the subscription
+ * reports one, and the structural hash still matches the bake; a drag-reduced bake is owed a whole
+ * one. A grey that reads an Anchor Point's slice takes another row's canvas, and a transform item
+ * moves the grey instead of correcting it -- neither has a rectangle in the item's own canvas. The
+ * steps of the owner row that move texels (a Decal frame, a folded projection, a remapping, a
+ * transform effect) send a changed rectangle anywhere in the owner's result, which the grey reads,
+ * so the whole canvas is written again.
+ */
+const rcti *bake_mask_effect_region_resolve(const Material &ma,
+                                            const MaterialPaintLayer &layer,
+                                            rcti &r_region)
+{
+  if (layer.bake == nullptr || !bake_row_has_maps(layer)) {
+    return nullptr;
+  }
+  if (bake_drag_reduced_owes(ma, layer)) {
+    return nullptr;
+  }
+  if (paint_layer_kind_reads_anchor_point(layer)) {
+    return nullptr;
+  }
+  PaintMaterialCompositeMapping transform_step;
+  if (paint_layer_mask_transform_step_get(layer, transform_step)) {
+    return nullptr;
+  }
+  int region[4];
+  if (!BKE_paint_layers_bake_changed_region(ma, layer, region)) {
+    return nullptr;
+  }
+  uint32_t current_hash[2];
+  BKE_paint_layers_bake_hash(ma, layer, current_hash);
+  if (current_hash[0] != layer.bake->hash[0] || current_hash[1] != layer.bake->hash[1] ||
+      (current_hash[0] == 0 && current_hash[1] == 0))
+  {
+    return nullptr;
+  }
+  const MaterialPaintLayer *owner = BKE_paint_layers_mask_item_owner(ma, layer);
+  if (owner == nullptr) {
+    return nullptr;
+  }
+  if (bake_subtree_has_decal_effect(*owner) || bake_subtree_folds_projection(ma, *owner) ||
+      BKE_paint_layers_mapping_remaps(ma, *owner) ||
+      !BKE_paint_layers_active_transform_effects(ma, *owner).is_empty())
+  {
+    return nullptr;
+  }
+  /* The subscription's rectangle is the pixel-edit signal: a band of the maps the grey reads. No
+   * footprint turns it into a canvas rectangle (see the note above), so it is taken as it is -- the
+   * trust rules above are what keeps that safe, the same terms the effect path keeps. */
+  BLI_rcti_init(&r_region, region[0], region[1], region[2], region[3]);
+  return &r_region;
+}
+
 bool BKE_paint_layers_bake_plan_run(Main &bmain,
                                     Material &ma,
                                     bool *r_changed,
@@ -3879,12 +3940,14 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
         bake_drag_reduced_remember(ma, layer, full_size);
       }
       if (mask_effect) {
-        /* The item's grey is one map of its own, written whole: the mask effect cache behind it
-         * computes whole and has no regional update yet (phase E), so there is no region of the
-         * grey the cache could answer for, and a stroke into the mask defers it
-         * (#BKE_paint_layers_bake_row_is_deferred), so the whole write lands once, after the stroke.
-         * A grey that reads the surface is written per object and UV tile, into the tiles the
-         * objects' blocks name, like a row's per-object bake. */
+        /* The item's grey is one map of its own. When the map stands, the subscription reports a
+         * band and the description still agrees with the bake, only that band (grown by the
+         * kernel's halo) is written -- #bake_mask_effect_region_resolve holds the trust rules and
+         * refuses everything it cannot name: a fresh or replaced map, the surface paths, a
+         * transform item, an Anchor Point reader, a drag-reduced bake. A stroke into the mask
+         * defers the whole thing (#BKE_paint_layers_bake_row_is_deferred), so a deferred item
+         * lands once, after the stroke. A grey that reads the surface is written per object and UV
+         * tile, into the tiles the objects' blocks name, like a row's per-object bake. */
         PaintLayersBakeTargets targets;
         if (paint_layers_bake_node_reads_surface(ma, layer)) {
           paint_layers_bake_targets_resolve(ma, layer, view, size, targets);
@@ -3898,7 +3961,11 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
           bake_tile_object_indices_clear(ma, scene, view_layer, &view);
           bake_tile_object_indices_set(ma, targets);
         }
-        if (bake_mask_effect_row_write(bmain, ma, layer, size, targets.objects)) {
+        rcti mask_region;
+        const rcti *mask_region_ptr = bake_mask_effect_region_resolve(ma, layer, mask_region);
+        if (bake_mask_effect_row_write(
+                bmain, ma, layer, size, targets.objects, mask_region_ptr))
+        {
           if (size == full_size) {
             bake_drag_reduced_forget(ma, layer);
           }

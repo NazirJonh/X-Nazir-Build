@@ -16,6 +16,7 @@
  * machinery: the key, the staleness snapshot of the input's maps and the LRU store.
  */
 
+#include <cstring>
 #include <mutex>
 
 #include "BLI_assert.h"
@@ -79,6 +80,77 @@ static std::shared_ptr<ImBuf> mask_effect_buffer_new(const int width, const int 
 }
 
 /**
+ * The input description of \a effect's grey, and the canvas it lays on: the entry the owner row
+ * describes with the mask stopped before the item, or -- for a kind that reads an Anchor Point's
+ * slice -- the empty entry (that grey has no row description at all, the slice's own canvas only)
+ * and the slice's dimensions. #mask_effect_dimensions is the size question alone; the regional
+ * gate additionally needs \a r_entry, which the anchor-slice grey never reaches.
+ */
+static bool mask_effect_input_entry(const Material &ma,
+                                    const MaterialPaintLayer &row,
+                                    const MaterialPaintLayer &effect,
+                                    const int tile_number,
+                                    const PaintLayerSurfaceRef painted_object,
+                                    PaintMaterialCompositeImageLayer &r_entry,
+                                    int &r_width,
+                                    int &r_height)
+{
+  if (paint_layer_kind_reads_anchor_point(effect)) {
+    /* The grey of a kind that reads a slice (a Normal to Mask) is the slice's own canvas: the
+     * owner row's maps say nothing about it, and a mask over a row with no map in the colour
+     * channel would size it to one texel. The entry stays undescribed: the slice is not the row's
+     * input, and the region path refuses this kind before it would read one. */
+    PaintMaterialCompositeImageLayer slice_entry;
+    int slice_width = 0;
+    int slice_height = 0;
+    if (BKE_paint_layers_slice_describe(
+            ma,
+            effect,
+            paint_layer_effect_input_channel(effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            slice_entry,
+            nullptr,
+            /*dimensions_only=*/true,
+            /*allow_empty_mask=*/false,
+            PaintLayerTileContext{.painted_object = painted_object, .tile_number = tile_number}) &&
+        BKE_paint_material_composite_stack_dimensions(
+            Span<PaintMaterialCompositeImageLayer>(&slice_entry, 1), slice_width, slice_height))
+    {
+      r_width = slice_width;
+      r_height = slice_height;
+      return true;
+    }
+    return false;
+  }
+  if (!composite_image_layer_build(ma,
+                                   row,
+                                   PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                   1.0f,
+                                   false,
+                                   true,
+                                   r_entry,
+                                   tile_number,
+                                   &effect.marker,
+                                   nullptr,
+                                   /*dimensions_only=*/true,
+                                   /*describe_only=*/false,
+                                   nullptr,
+                                   nullptr,
+                                   PaintLayerBakeScope::WholeRow,
+                                   painted_object))
+  {
+    return false;
+  }
+  /* A mask with no map of its own and a kind that reads a slot takes the slot's size. */
+  bool from_slot = false;
+  return paint_layer_effect_dimensions_resolve(Span<PaintMaterialCompositeImageLayer>(&r_entry, 1),
+                                               effect,
+                                               tile_number,
+                                               r_width,
+                                               r_height,
+                                               from_slot);
+}
+
+/**
  * The grey canvas the mask effect of \a row lays on: the row's own dimensions on \a tile_number,
  * described with the mask stopped before the effect. The stop is what keeps the walk from
  * re-entering the effect's own describe -- a plain dimensions walk of the row reaches the item and
@@ -94,57 +166,8 @@ static bool mask_effect_dimensions(const Material &ma,
                                    int &r_height)
 {
   PaintMaterialCompositeImageLayer entry;
-  if (paint_layer_kind_reads_anchor_point(effect)) {
-    /* The grey of a kind that reads a slice (a Normal to Mask) is the slice's own canvas: the
-     * owner row's maps say nothing about it, and a mask over a row with no map in the colour
-     * channel would size it to one texel. */
-    int slice_width = 0;
-    int slice_height = 0;
-    if (BKE_paint_layers_slice_describe(
-            ma,
-            effect,
-            paint_layer_effect_input_channel(effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
-            entry,
-            nullptr,
-            /*dimensions_only=*/true,
-            /*allow_empty_mask=*/false,
-            PaintLayerTileContext{.painted_object = painted_object, .tile_number = tile_number}) &&
-        BKE_paint_material_composite_stack_dimensions(
-            Span<PaintMaterialCompositeImageLayer>(&entry, 1), slice_width, slice_height))
-    {
-      r_width = slice_width;
-      r_height = slice_height;
-      return true;
-    }
-    return false;
-  }
-  if (!composite_image_layer_build(ma,
-                                   row,
-                                   PAINT_MATERIAL_CHANNEL_BASE_COLOR,
-                                   1.0f,
-                                   false,
-                                   true,
-                                   entry,
-                                   tile_number,
-                                   &effect.marker,
-                                   nullptr,
-                                   /*dimensions_only=*/true,
-                                   /*describe_only=*/false,
-                                   nullptr,
-                                   nullptr,
-                                   PaintLayerBakeScope::WholeRow,
-                                   painted_object))
-  {
-    return false;
-  }
-  /* A mask with no map of its own and a kind that reads a slot takes the slot's size. */
-  bool from_slot = false;
-  return paint_layer_effect_dimensions_resolve(Span<PaintMaterialCompositeImageLayer>(&entry, 1),
-                                               effect,
-                                               tile_number,
-                                               r_width,
-                                               r_height,
-                                               from_slot);
+  return mask_effect_input_entry(
+      ma, row, effect, tile_number, painted_object, entry, r_width, r_height);
 }
 
 /** The key of \a effect's entry: the effect's own hash and the mask channel marker folded into it,
@@ -386,6 +409,53 @@ static bool mask_effect_anchor_slice_input(const Material &ma,
   return true;
 }
 
+/**
+ * The kernel of the mask item \a effect over the ready grey \a buffer: the GPU provider when it can
+ * serve the kind on this thread and \a allow_gpu, the CPU kernel otherwise, then the grey normalize
+ * (#mask_effect_grey_normalize) for the kinds the kind table flags. Returns "gpu" or "cpu" for the
+ * caller's log -- the full compute and the regional patch share this, so the normalize and the
+ * provider gates are one place.
+ *
+ * \param allow_gpu: false for a cropped buffer (the regional patch). The mask provider builds its
+ *        pass plan at the buffer's own size and some plans -- a flood, a distance field, a
+ *        reduction -- reach by the canvas dimensions, so the full-canvas GPU answer is not the
+ *        cropped one. The CPU kernel is the function the kind table vouches as local
+ *        (#PAINT_LAYER_KIND_EFFECT_REGION_EXACT), and that is what a crop may run.
+ */
+static const char *mask_effect_kernel_apply(ImBuf &buffer,
+                                            const MaterialPaintLayer &effect,
+                                            const int tile_number,
+                                            const bool allow_gpu)
+{
+  /* The GPU provider is asked first, the way a bake asks the owned-effect one: a grey the screen's
+   * pipeline already computes saves the CPU kernel. The gates are the provider's own terms -- it
+   * needs the main thread's GPU context, which a worker thread has not -- and a refusal (no
+   * context, the item's pass failed, a kind it does not serve) falls through to the CPU kernel,
+   * which answers the same grey as before. The normalize runs on either path: the provider lays
+   * the raw kernel result, and the kinds the kind table flags fold back to one grey here. */
+  const PaintLayerMaskEffectGpuProvider provider = BKE_paint_layers_mask_effect_gpu_provider_get();
+  const char *path = "cpu";
+  bool gpu_done = false;
+  if (allow_gpu && provider != nullptr && BKE_paint_layers_effect_is_gpu_computed(effect) &&
+      BLI_thread_is_main())
+  {
+    bke::paint_perf::ScopedTimer perf_gpu("mask_effect.gpu");
+    /* The input and the result are the one buffer: the provider reads the grey whole into a
+     * texture before its dispatches write (see #PaintLayerMaskEffectGpuProvider), so the aliased
+     * run is safe. */
+    gpu_done = provider(effect, buffer, buffer);
+    perf_gpu.note("kind=%d done=%s", int(effect.kind_subtype), gpu_done ? "yes" : "fallback");
+  }
+  if (!gpu_done) {
+    paint_layer_effect_kernel_apply(buffer, effect, /*for_mask=*/true, tile_number);
+  }
+  else {
+    path = "gpu";
+  }
+  mask_effect_grey_normalize(buffer, effect);
+  return path;
+}
+
 /** Render the input of \a effect -- the mask built up to it on \a tile_number -- and apply its
  * kernel. */
 static bool paint_layer_mask_effect_compute(const Material &ma,
@@ -460,32 +530,8 @@ static bool paint_layer_mask_effect_compute(const Material &ma,
     mask_effect_transform_apply(*color, transform_step);
   }
   else {
-    /* The kernel reads the buffer the block above filled and leaves the alpha alone. The GPU
-     * provider is asked first, the way a bake asks the owned-effect one: a grey the screen's
-     * pipeline already computes saves the CPU kernel. The gates are the provider's own terms -- it
-     * needs the main thread's GPU context, which a worker thread has not -- and a refusal (no
-     * context, the item's pass failed, a kind it does not serve) falls through to the CPU kernel,
-     * which answers the same grey as before. The normalize runs on either path: the provider lays
-     * the raw kernel result, and the kinds the kind table flags fold back to one grey here. */
-    const PaintLayerMaskEffectGpuProvider provider = BKE_paint_layers_mask_effect_gpu_provider_get();
-    bool gpu_done = false;
-    if (provider != nullptr && BKE_paint_layers_effect_is_gpu_computed(effect) &&
-        BLI_thread_is_main())
-    {
-      bke::paint_perf::ScopedTimer perf_gpu("mask_effect.gpu");
-      /* The input and the result are the one buffer: the provider reads the grey whole into a
-       * texture before its dispatches write (see #PaintLayerMaskEffectGpuProvider), so the aliased
-       * run is safe. */
-      gpu_done = provider(effect, *color, *color);
-      perf_gpu.note("kind=%d done=%s", int(effect.kind_subtype), gpu_done ? "yes" : "fallback");
-    }
-    if (!gpu_done) {
-      paint_layer_effect_kernel_apply(*color, effect, /*for_mask=*/true, tile_number);
-    }
-    else {
-      compute_path = "gpu";
-    }
-    mask_effect_grey_normalize(*color, effect);
+    compute_path = mask_effect_kernel_apply(
+        *color, effect, tile_number, /*allow_gpu=*/true);
   }
   /* The versions are taken after the render: an edit that landed while it ran is read next time. */
   Vector<Image *> images;
@@ -494,6 +540,141 @@ static bool paint_layer_mask_effect_compute(const Material &ma,
   r_color = std::move(color);
   perf_total.note(
       "kind=%d size=%dx%d path=%s", int(effect.kind_subtype), width, height, compute_path);
+  return true;
+}
+
+/**
+ * The regional update the mask effect cache runs instead of #paint_layer_mask_effect_compute when a
+ * live entry's maps moved by one rectangle: the same structure the row's effect patch
+ * (`paint_layer_effect_region_compute`) uses, so the two caches cannot drift. The grey is sampled
+ * over \a maps_region grown by the halo twice -- the neighbourhood every texel of the interior reads
+ * -- the whole kernel run over that small buffer, and the interior (\a maps_region grown once,
+ * clipped) copied into a private copy of \a cached. \a cached stays untouched: a frame still laying
+ * it keeps its pixels.
+ *
+ * The sampler decodes the stack's maps into its own tile and is not thread safe, so it is acquired
+ * once here, on the calling thread, before the fill reads it -- the order the full compute keeps.
+ * The small buffer holds only the region, so a texel of it samples the canvas texel it stands for.
+ *
+ * False refuses the patch -- a kind the gate names (a whole-canvas or non-local kernel, a transform
+ * item is not a kernel at all), an anchor-slice grey (its input is another layer's slice, not the
+ * row's grey), a remapping between the maps and the canvas, an empty or whole-canvas region -- and
+ * the caller falls back to the full compute. The versions are taken after the small render, the
+ * same rule the full compute stamps by.
+ */
+static bool mask_effect_region_compute(
+    const Material &ma,
+    const MaterialPaintLayer &row,
+    const MaterialPaintLayer &effect,
+    const int tile_number,
+    const PaintLayerSurfaceRef painted_object,
+    const PaintMaterialCompositeImageLayer &input_entry,
+    const Span<Image *> images,
+    const std::shared_ptr<ImBuf> &cached,
+    const rcti &maps_region,
+    std::shared_ptr<ImBuf> &r_patched,
+    Vector<PaintLayerEffectSource> &r_patched_synced,
+    rcti &r_region_valid)
+{
+  bke::paint_perf::ScopedTimer perf_total("mask_effect.cpu.region");
+  const int width = cached->x;
+  const int height = cached->y;
+  if (!paint_layer_effect_region_update_supported(effect) ||
+      paint_layer_kind_reads_anchor_point(effect) ||
+      !BKE_paint_layers_effect_region_is_exact(input_entry, images, width, height))
+  {
+    return false;
+  }
+
+  float params[PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM] = {};
+  paint_layer_effect_filter_params(effect, params);
+  const int halo = BKE_paint_layers_effect_halo(
+      eMaterialPaintLayerFilter(effect.kind_subtype), params, width, height);
+  rcti valid;
+  BKE_paint_layers_effect_region_clip(maps_region, halo, width, height, valid);
+  if (BLI_rcti_is_empty(&valid)) {
+    return false;
+  }
+  if (valid.xmin == 0 && valid.ymin == 0 && valid.xmax >= width && valid.ymax >= height) {
+    /* The halo of a whole-canvas kind grew the region past the canvas: the patch would re-sample
+     * and re-kernel everything, which the full compute does without the clone and the copy. */
+    return false;
+  }
+  /* The small buffer covers the valid region grown by the halo once more: the neighbourhood every
+   * texel of the interior reads stays inside it. */
+  rcti region_small;
+  BKE_paint_layers_effect_region_clip(valid, halo, width, height, region_small);
+  const int region_width = BLI_rcti_size_x(&region_small);
+  const int region_height = BLI_rcti_size_y(&region_small);
+  if (region_width <= 0 || region_height <= 0) {
+    return false;
+  }
+  std::shared_ptr<ImBuf> small = mask_effect_buffer_new(region_width, region_height);
+  if (small == nullptr) {
+    return false;
+  }
+  {
+    bke::paint_perf::ScopedTimer perf_input("mask_effect.cpu.region.input");
+    PaintLayersMaskSampler sampler(ma, row, &effect.marker, false, painted_object);
+    sampler.tile_acquire(tile_number, width, height);
+    float *pixels = small->float_data_for_write();
+    /* #tile_acquire is not thread safe, so the one tile is decoded here before the fill reads it
+     * in parallel -- the order the full compute keeps (#paint_layer_mask_effect_compute). #sample
+     * mutates nothing, so any number of threads may call it at once. */
+    threading::parallel_for(IndexRange(region_height), 64, [&](const IndexRange range) {
+      for (const int y : range) {
+        for (const int x : IndexRange(region_width)) {
+          const float grey = sampler.sample(
+              tile_number, region_small.xmin + x, region_small.ymin + y);
+          const int64_t index = int64_t(y) * region_width + x;
+          pixels[index * 4 + 0] = grey;
+          pixels[index * 4 + 1] = grey;
+          pixels[index * 4 + 2] = grey;
+          pixels[index * 4 + 3] = 1.0f;
+        }
+      }
+    });
+    perf_input.note("kind=%d size=%dx%d region=%d,%d-%d,%d",
+                    int(effect.kind_subtype),
+                    region_width,
+                    region_height,
+                    region_small.xmin,
+                    region_small.ymin,
+                    region_small.xmax,
+                    region_small.ymax);
+  }
+  /* The whole kernel over the whole small buffer: the kind's own reading of the buffer's texel
+   * grid is the local one the gate above vouched for, and the interior it writes is the interior
+   * the copy below takes. The CPU kernel alone -- a cropped buffer has not the canvas the mask GPU
+   * provider builds its plan for (see #mask_effect_kernel_apply). */
+  mask_effect_kernel_apply(*small, effect, tile_number, /*allow_gpu=*/false);
+
+  std::shared_ptr<ImBuf> patched = paint_layer_anchor_slice_buffer_clone(*cached);
+  if (patched == nullptr) {
+    return false;
+  }
+  const float *src = small->float_buffer.data;
+  float *dst = patched->float_data_for_write();
+  for (const int y : IndexRange(valid.ymin, BLI_rcti_size_y(&valid))) {
+    const float *src_row = src +
+                           (int64_t(y - region_small.ymin) * region_width +
+                            int64_t(valid.xmin - region_small.xmin)) *
+                               4;
+    float *dst_row = dst + (int64_t(y) * width + valid.xmin) * 4;
+    memcpy(dst_row, src_row, size_t(BLI_rcti_size_x(&valid)) * sizeof(float[4]));
+  }
+  /* The versions are taken after the render: an edit that landed while it ran is read next time. */
+  r_patched_synced = map_sources_snapshot(images);
+  r_patched = std::move(patched);
+  r_region_valid = valid;
+  perf_total.note("kind=%d size=%dx%d region=%d,%d-%d,%d",
+                  int(effect.kind_subtype),
+                  width,
+                  height,
+                  valid.xmin,
+                  valid.ymin,
+                  valid.xmax,
+                  valid.ymax);
   return true;
 }
 
@@ -510,7 +691,9 @@ std::shared_ptr<ImBuf> paint_layer_mask_effect_buffer_get(
     const bool describe_only,
     Vector<Image *> *r_images,
     const int tile_number,
-    const PaintLayerSurfaceRef painted_object)
+    const PaintLayerSurfaceRef painted_object,
+    const rcti *changed_region,
+    rcti *r_valid_region)
 {
   /* The re-entrancy guard: the describes the grey's own walk needs -- its input's, and the canvas
    * size -- stop before the item, but any other describe of the row reaches the item's branch and
@@ -534,12 +717,21 @@ std::shared_ptr<ImBuf> paint_layer_mask_effect_buffer_get(
     ~ComputingPop()
     {
       stack.remove_last();
+      /* The guard is a thread-local static, so its destructor runs after the leak check: an
+       * emptied vector would still hold its capacity and be reported as a leak (176 bytes here).
+       * Release the storage the moment the stack empties -- the common case, no nested compute. */
+      if (stack.is_empty()) {
+        stack.clear_and_shrink();
+      }
     }
   } computing_pop{computing};
 
+  PaintMaterialCompositeImageLayer input_entry;
   int width = 0;
   int height = 0;
-  if (!mask_effect_dimensions(ma, row, effect, tile_number, painted_object, width, height)) {
+  if (!mask_effect_input_entry(
+          ma, row, effect, tile_number, painted_object, input_entry, width, height))
+  {
     return {};
   }
   Vector<Image *> images;
@@ -552,7 +744,7 @@ std::shared_ptr<ImBuf> paint_layer_mask_effect_buffer_get(
   }
 
   const EffectCacheKey key = mask_effect_key_get(ma, row, effect, tile_number, painted_object);
-  return paint_layer_effect_cache_get_or_compute(
+  std::shared_ptr<ImBuf> color = paint_layer_effect_cache_get_or_compute_region(
       g_paint_mask_effect_cache,
       g_paint_mask_effect_cache_mutex,
       key,
@@ -563,7 +755,51 @@ std::shared_ptr<ImBuf> paint_layer_mask_effect_buffer_get(
       [&](std::shared_ptr<ImBuf> &r_color, Vector<PaintLayerEffectSource> &r_synced) {
         return paint_layer_mask_effect_compute(
             ma, row, effect, tile_number, painted_object, r_color, r_synced);
+      },
+      changed_region,
+      r_valid_region,
+      [&](const std::shared_ptr<ImBuf> &cached,
+          const rcti &maps_region,
+          std::shared_ptr<ImBuf> &r_patched,
+          Vector<PaintLayerEffectSource> &r_patched_synced,
+          rcti &r_region_valid) {
+        return mask_effect_region_compute(ma,
+                                          row,
+                                          effect,
+                                          tile_number,
+                                          painted_object,
+                                          input_entry,
+                                          images,
+                                          cached,
+                                          maps_region,
+                                          r_patched,
+                                          r_patched_synced,
+                                          r_region_valid);
       });
+  if (color != nullptr && r_valid_region != nullptr && changed_region != nullptr &&
+      !BLI_rcti_is_empty(changed_region))
+  {
+    /* The same rule the row's effect writer applies (#paint_layer_effect_buffer_get): the answer is
+     * current as a whole whichever way the cycle answered, so the band the caller's map is missing
+     * -- the offered band united with the one the cycle named, grown by the halo the kernel reads
+     * past it -- can be laid from it. A band the maps reach through a remapping is not the input's
+     * own texel grid, and no band can be narrowed there: the whole canvas answers instead. */
+    if (!paint_layer_kind_reads_anchor_point(effect) &&
+        BKE_paint_layers_effect_region_is_exact(input_entry, images, width, height))
+    {
+      rcti united = *r_valid_region;
+      BLI_rcti_union(&united, changed_region);
+      float params[PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM] = {};
+      paint_layer_effect_filter_params(effect, params);
+      const int halo = BKE_paint_layers_effect_halo(
+          eMaterialPaintLayerFilter(effect.kind_subtype), params, width, height);
+      BKE_paint_layers_effect_region_clip(united, halo, width, height, *r_valid_region);
+    }
+    else {
+      BLI_rcti_init(r_valid_region, 0, width, 0, height);
+    }
+  }
+  return color;
 }
 
 void paint_layer_mask_effect_cache_drop(const Material &ma,

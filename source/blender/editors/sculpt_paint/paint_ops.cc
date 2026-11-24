@@ -3822,6 +3822,10 @@ void ED_operatortypes_paint()
   WM_operatortype_append(ed::material_bake::MATERIAL_OT_paint_layer_source_refresh_toggle);
   /* Once at startup, so the paint-layer bake undo cleanup is live before the first update. */
   ed::material_bake::paint_layers_bake_undo_callback_init();
+  /* The Combined preview's GPU providers answer every main-thread effect compute (a mask item's
+   * grey can be baked or composited before any job exists), so they are registered here once,
+   * beside the other startup callbacks. */
+  ed::material_bake::paint_layers_owned_gpu_provider_ensure();
 
   /* texture assignment */
   WM_operatortype_append(BRUSH_OT_texture_slot_assign_image);

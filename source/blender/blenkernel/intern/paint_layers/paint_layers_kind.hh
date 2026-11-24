@@ -310,10 +310,12 @@ enum PaintLayerKindFlag : uint32_t {
   /**
    * A #PAINT_LAYER_KIND_NEEDS_BAKE effect whose result is a layer with an alpha of its own (a Drop
    * Shadow: straight colour, premultiplied in the effect cache's buffer, and the alpha it covers
-   * by) instead of a colour only. Laid over a row it is a correction with a map alpha: `f = opacity
-   * x alpha(map)` raises the row's coverage and content alpha, so it shows where the row has none.
-   * Every kind without the flag keeps a colour-only result and an alpha of one. A mask item takes
-   * no part in it: a mask effect's buffer has no alpha to cast from or to lay.
+   * by) instead of a colour only. The spreading kinds set it too -- Blur, Blur Directional and Glow
+   * blur or lift the content alpha along with the colour, so the spread extends the row's coverage
+   * instead of fading inside the original shape. Laid over a row it is a correction with a map
+   * alpha: `f = opacity x alpha(map)` raises the row's coverage and content alpha, so it shows where
+   * the row has none. Every kind without the flag keeps a colour-only result and an alpha of one. A
+   * mask item takes no part in it: a mask effect's buffer has no alpha to cast from or to lay.
    */
   PAINT_LAYER_KIND_RESULT_HAS_ALPHA = 1 << 15,
   /**

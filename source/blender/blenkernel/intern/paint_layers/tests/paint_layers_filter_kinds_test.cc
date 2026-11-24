@@ -1648,4 +1648,36 @@ TEST_F(PaintLayersFilterKindsTest, refused_parameterizations_give_an_empty_plan)
   EXPECT_TRUE(passes.is_empty()) << "the source mode with no iteration stays with the CPU";
 }
 
+TEST_F(PaintLayersFilterKindsTest, the_spreading_kinds_carry_the_result_alpha)
+{
+  /* The kinds whose kernel spreads the content past its shape: the composite lays them as a layer
+   * with their own alpha, so the spread extends the row's coverage. The Channel Split lays a layer
+   * of its own too (the grey it extracts carries its own alpha), the fill's coverage without any
+   * spread. The colour-only kinds keep the standard alpha of one. */
+  const auto has_result_alpha = [](const eMaterialPaintLayerFilter filter) {
+    const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER, filter);
+    return kind != nullptr && (kind->flags & PAINT_LAYER_KIND_RESULT_HAS_ALPHA) != 0;
+  };
+  for (const eMaterialPaintLayerFilter filter : {MA_PAINT_LAYER_FILTER_BLUR,
+                                                 MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL,
+                                                 MA_PAINT_LAYER_FILTER_GLOW,
+                                                 MA_PAINT_LAYER_FILTER_DROP_SHADOW,
+                                                 MA_PAINT_LAYER_FILTER_MASK_OUTLINE,
+                                                 MA_PAINT_LAYER_FILTER_FILL_AREA,
+                                                 MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT})
+  {
+    EXPECT_TRUE(has_result_alpha(filter)) << "filter " << int(filter);
+  }
+  for (const eMaterialPaintLayerFilter filter : {MA_PAINT_LAYER_FILTER_SHARPEN,
+                                                 MA_PAINT_LAYER_FILTER_HIGH_PASS,
+                                                 MA_PAINT_LAYER_FILTER_EDGE_DETECT,
+                                                 MA_PAINT_LAYER_FILTER_EMBOSS,
+                                                 MA_PAINT_LAYER_FILTER_ERODE_DILATE,
+                                                 MA_PAINT_LAYER_FILTER_NOISE,
+                                                 MA_PAINT_LAYER_FILTER_PIXELATE})
+  {
+    EXPECT_FALSE(has_result_alpha(filter)) << "filter " << int(filter);
+  }
+}
+
 }  // namespace blender::bke::tests

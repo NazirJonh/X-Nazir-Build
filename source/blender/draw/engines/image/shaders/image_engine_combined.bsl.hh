@@ -2532,20 +2532,22 @@ float3 effect_hsl_to_rgb(float3 hsl)
                 (nb - 0.5f) * chroma + hsl.z);
 }
 
-/** One axis of a box pass over the RGB of the fetched line: window `[max(c-r,0), min(c+r,lim-1)]`,
- * divided by its actual texel count (`hi - lo + 1`) -- a clamped edge, not a replicated one, exactly
- * as `paint_layer_effect_blur_pass_h/v`. Alpha is not read here; the caller carries it through. */
-float3 box_blur_axis(sampler2D tx, const int2 texel, const int axis, const int r, const int2 size)
+/** One axis of a box pass over the RGB and the content alpha of the fetched line: window
+ * `[max(c-r,0), min(c+r,lim-1)]`, divided by its actual texel count (`hi - lo + 1`) -- a clamped
+ * edge, not a replicated one, exactly as `paint_layer_effect_blur_pass_h/v`. The alpha is the same
+ * window average, so a blur pass spreads the coverage along with the colour; the plan's
+ * `alpha_from_kernel` decides whether the host keeps it. */
+float4 box_blur_axis(sampler2D tx, const int2 texel, const int axis, const int r, const int2 size)
 {
   const int center = (axis == 0) ? texel.x : texel.y;
   const int line_at = (axis == 0) ? texel.y : texel.x;
   const int lim = (axis == 0) ? size.x : size.y;
   const int lo = max(center - r, 0);
   const int hi = min(center + r, lim - 1);
-  float3 sum = float3(0.0f);
+  float4 sum = float4(0.0f);
   for (int k = lo; k <= hi; k++) {
     const int2 at = (axis == 0) ? int2(k, line_at) : int2(line_at, k);
-    sum += texelFetch(tx, at, 0).xyz;
+    sum += texelFetch(tx, at, 0);
   }
   return sum / float(hi - lo + 1);
 }
@@ -2687,10 +2689,11 @@ float3 fxaa(sampler2D tx, const int2 texel, const int2 size, const float3 luma_c
  * angle names, every tap clamped to the canvas the CPU's line kernel clamps it, the average mixed
  * over the source by the intensity. The angle rides in `filter_params_0.x` (degrees,
  * counter-clockwise off the map's +X) and the mix in `filter_params_0.z`, as the correction pass
- * is given them; the reach is the pass's own clamped `radius`. Alpha is not read here; the caller
- * carries it through.
+ * is given them; the reach is the pass's own clamped `radius`. The alpha is the plain line average,
+ * written into `w` without the mix: the mix softens only the colour, and a partial mix over the
+ * alpha would leave a translucent trail instead of the spread coverage.
  */
-float3 blur_directional(sampler2D tx,
+float4 blur_directional(sampler2D tx,
                         const int2 texel,
                         const int r,
                         const float angle_deg,
@@ -2700,14 +2703,18 @@ float3 blur_directional(sampler2D tx,
   const float angle_rad = radians(angle_deg);
   const float2 direction = float2(cos(angle_rad), sin(angle_rad));
   float3 sum = float3(0.0f);
+  float sum_a = 0.0f;
   for (int k = -r; k <= r; k++) {
     const int2 at = int2(clamp(texel.x + int(floor(direction.x * float(k) + 0.5f)), 0, size.x - 1),
                          clamp(texel.y + int(floor(direction.y * float(k) + 0.5f)), 0, size.y - 1));
-    sum += texelFetch(tx, at, 0).xyz;
+    const float4 tap = texelFetch(tx, at, 0);
+    sum += tap.xyz;
+    sum_a += tap.w;
   }
-  const float3 averaged = sum / float(2 * r + 1);
+  const float inv = 1.0f / float(2 * r + 1);
+  const float3 averaged = sum * inv;
   const float3 center = texelFetch(tx, texel, 0).xyz;
-  return center + (averaged - center) * clamp(amount, 0.0f, 1.0f);
+  return float4(center + (averaged - center) * clamp(amount, 0.0f, 1.0f), sum_a * inv);
 }
 
 /**
@@ -2811,8 +2818,9 @@ void effect_comp([[resource_table]] EffectResources &srt,
   float3 rgb = source.xyz;
   /* The alpha the store keeps: the standard rule, kept or dropped to one. A pass that lays a layer
    * of its own (the Channel Split, which the CPU writes with alpha one) overrides it in its case,
-   * and the tails that lay a layer write the alpha their kernel computed into `computed_alpha`,
-   * which the store keeps when the plan set #alpha_from_kernel for the pass. */
+   * and the tails and blur passes that compute an alpha write it into `computed_alpha`, which the
+   * store keeps when the plan set #alpha_from_kernel for the pass -- the kind's flag decides
+   * whether the spread alpha is kept, the shader only computes it. */
   float pass_alpha = (srt.tracks_alpha != 0) ? source.w : 1.0f;
   float computed_alpha = pass_alpha;
   switch (srt.pass_kind) {
@@ -2825,19 +2833,27 @@ void effect_comp([[resource_table]] EffectResources &srt,
       break;
     }
     case COMBINED_PASS_BLUR_H:
-      rgb = box_blur_axis(srt.input_tx, texel, 0, srt.radius, srt.texture_size);
+    case COMBINED_PASS_BLUR_V: {
+      /* Both axes write the blurred alpha too, so the vertical half reads the horizontal one's
+       * spread the way the CPU's pair does. */
+      const float4 b = box_blur_axis(
+          srt.input_tx, texel, (srt.pass_kind == COMBINED_PASS_BLUR_H) ? 0 : 1, srt.radius,
+          srt.texture_size);
+      rgb = b.xyz;
+      computed_alpha = b.w;
       break;
-    case COMBINED_PASS_BLUR_V:
-      rgb = box_blur_axis(srt.input_tx, texel, 1, srt.radius, srt.texture_size);
+    }
+    case COMBINED_PASS_BLUR_DIRECTIONAL: {
+      const float4 b = blur_directional(srt.input_tx,
+                                        texel,
+                                        srt.radius,
+                                        srt.filter_params_0.x,
+                                        srt.filter_params_0.z,
+                                        srt.texture_size);
+      rgb = b.xyz;
+      computed_alpha = b.w;
       break;
-    case COMBINED_PASS_BLUR_DIRECTIONAL:
-      rgb = blur_directional(srt.input_tx,
-                             texel,
-                             srt.radius,
-                             srt.filter_params_0.x,
-                             srt.filter_params_0.z,
-                             srt.texture_size);
-      break;
+    }
     case COMBINED_PASS_FXAA:
       rgb = fxaa(srt.input_tx, texel, srt.texture_size, srt.luma_coefficients.xyz);
       break;
@@ -2904,9 +2920,16 @@ void effect_comp([[resource_table]] EffectResources &srt,
        * the blur built (its red channel, the one grey the CPU reads back) scaled by the opacity in
        * `aux0`, screened under the tint in `pass_params.xyz` -- `c + glow * (1 - c)`, so a black
        * texel lands on the colour and a lit one keeps its light. The source is the original the
-       * tail is given. */
+       * tail is given. The choked grey is the luminance of the premultiplied colour, so the light a
+       * texel emits follows its coverage -- a half-transparent edge glows at half strength. The
+       * screen is a straight-colour formula: the source is premultiplied, so each channel is
+       * straightened before it and the result stays premultiplied by the new alpha
+       * `max(source.a, m)`, the way the composite decodes the buffer. */
       const float m = texelFetch(srt.aux_tx, texel, 0).x * srt.aux0;
-      rgb = source.xyz + srt.pass_params.xyz * m * (1.0f - source.xyz);
+      const float src_alpha = clamp(source.w, 0.0f, 1.0f);
+      const float inv_alpha = (src_alpha > 0.0f) ? 1.0f / src_alpha : 0.0f;
+      rgb = source.xyz + srt.pass_params.xyz * m * (1.0f - source.xyz * inv_alpha);
+      computed_alpha = clamp(max(src_alpha, m), 0.0f, 1.0f);
       break;
     }
     case COMBINED_PASS_BLOCK_AVERAGE: {
@@ -3494,8 +3517,9 @@ void effect_comp([[resource_table]] EffectResources &srt,
        * The coverage is the enclosed indicator the flood field names, softened by the box blur of
        * `radius` the CPU runs on a grey of its own -- folded here as the window sum of the
        * indicator over the clamped window, which is what the CPU's two axis passes compose to, so
-       * the alpha this pass writes survives the blur pair that follows it: the pair carries the
-       * centre texel's alpha through and touches the colour only. The colour itself is blurred by
+       * the alpha this pass writes survives the blur pair that follows it: that pair computes a
+       * blurred alpha of its own but keeps none of it (`alpha_from_kernel` stays off for its
+       * passes), so the alpha written here is carried through while the colour is blurred. The colour itself is blurred by
        * that pair, the CPU's own order -- the non-enclosed texels are empty before it, so the
        * fill's edge fades out without the border's own colours smearing in, which is why this tail
        * runs ahead of the pair and not behind it. */

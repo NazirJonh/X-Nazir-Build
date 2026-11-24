@@ -916,6 +916,226 @@ TEST_F(PaintLayersEffectTest, a_blur_directional_sweeps_the_angles_at_the_map_ed
   }
 }
 
+/** A 64x64 float buffer with a white 20x20 square centred on (32, 32): alpha and colour are one
+ * inside, zero outside. The spread tests read how far a kernel carries the content past it. */
+static ImBuf *alpha_square_buffer()
+{
+  constexpr int size = 64;
+  ImBuf *input = IMB_allocImBuf(size, size, ImBufFlags::FloatData);
+  if (input == nullptr) {
+    return nullptr;
+  }
+  float *pixels = input->float_data_for_write();
+  for (const int y : IndexRange(size)) {
+    for (const int x : IndexRange(size)) {
+      float *p = pixels + (int64_t(y) * size + x) * 4;
+      const bool inside = x >= size / 2 - 10 && x < size / 2 + 10 && y >= size / 2 - 10 &&
+                          y < size / 2 + 10;
+      const float covered = inside ? 1.0f : 0.0f;
+      p[0] = covered;
+      p[1] = covered;
+      p[2] = covered;
+      p[3] = covered;
+    }
+  }
+  return input;
+}
+
+TEST_F(PaintLayersEffectTest, a_blur_spreads_the_content_alpha)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *blur = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 8));
+
+  ImBuf *input = alpha_square_buffer();
+  ASSERT_NE(input, nullptr);
+  paint_layer_effect_kernel_apply(*input, *blur, false, PAINT_TILE_NUMBER_BASE);
+
+  constexpr int size = 64;
+  const float *pixels = input->float_data_for_write();
+  const auto texel = [&](const int x, const int y, const int c) {
+    return pixels[(int64_t(y) * size + x) * 4 + c];
+  };
+  /* The box window reaches eight texels, so four texels past the square's edge the alpha is the
+   * window fraction of the white -- more than none, less than the solid. */
+  EXPECT_GT(texel(45, 32, 3), 0.0f) << "the blurred alpha reaches the empty map";
+  EXPECT_LT(texel(45, 32, 3), 1.0f);
+  EXPECT_GT(texel(45, 32, 0), 0.0f) << "the colour spreads with the alpha";
+  EXPECT_NEAR(texel(32, 32, 3), 1.0f, 1e-5f) << "the centre stays solid";
+  EXPECT_NEAR(texel(52, 32, 3), 0.0f, 1e-6f) << "past the radius the map stays empty";
+  IMB_freeImBuf(input);
+
+  /* The soft shape spends the reach over three box pairs; the alpha rides the same chain. */
+  ASSERT_TRUE(
+      paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_GAUSSIAN));
+  ImBuf *soft = alpha_square_buffer();
+  ASSERT_NE(soft, nullptr);
+  paint_layer_effect_kernel_apply(*soft, *blur, false, PAINT_TILE_NUMBER_BASE);
+  const float *soft_pixels = soft->float_data_for_write();
+  EXPECT_GT(soft_pixels[(int64_t(32) * size + 45) * 4 + 3], 0.0f)
+      << "the soft blur spreads the alpha too";
+  EXPECT_NEAR(soft_pixels[3], 0.0f, 1e-6f) << "the far corner stays empty";
+  IMB_freeImBuf(soft);
+}
+
+TEST_F(PaintLayersEffectTest, a_directional_blur_spreads_the_alpha_on_the_line)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *blur = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_DIRECTIONAL_RADIUS, 8));
+  ASSERT_TRUE(paint_layer_kind_param_set(*blur, PAINT_LAYER_BLUR_DIRECTIONAL_ANGLE, 0.0f));
+
+  constexpr int size = 64;
+  const auto run_alpha = [&](const float mix, Vector<float> &r_alpha) {
+    ASSERT_TRUE(paint_layer_kind_param_set(*blur, PAINT_LAYER_BLUR_DIRECTIONAL_MIX, mix));
+    ImBuf *input = alpha_square_buffer();
+    ASSERT_NE(input, nullptr);
+    paint_layer_effect_kernel_apply(*input, *blur, false, PAINT_TILE_NUMBER_BASE);
+    const float *pixels = input->float_data_for_write();
+    r_alpha.resize(int64_t(size) * size);
+    for (int64_t i = 0; i < r_alpha.size(); i++) {
+      r_alpha[i] = pixels[i * 4 + 3];
+    }
+    IMB_freeImBuf(input);
+  };
+
+  Vector<float> half;
+  Vector<float> full;
+  run_alpha(0.5f, half);
+  run_alpha(1.0f, full);
+  /* The line runs along +X: four texels to the right of the square the alpha is spread, four below
+   * it on the empty row it stays zero. */
+  EXPECT_GT(half[int64_t(32) * size + 45], 0.0f) << "the alpha spreads along the line";
+  EXPECT_NEAR(half[int64_t(45) * size + 32], 0.0f, 1e-6f) << "nothing spreads across the line";
+  /* The mix softens the colour only; the alpha is always the plain line average. */
+  for (int64_t i = 0; i < half.size(); i++) {
+    EXPECT_FLOAT_EQ(half[i], full[i]) << "alpha is independent of the mix, texel " << i;
+  }
+
+  /* A zero mix still spreads the coverage: the pass used to return early there, which left the
+   * alpha of every texel as it came and broke the contract above. */
+  ASSERT_TRUE(paint_layer_kind_param_set(*blur, PAINT_LAYER_BLUR_DIRECTIONAL_MIX, 0.0f));
+  ImBuf *zero = alpha_square_buffer();
+  ASSERT_NE(zero, nullptr);
+  paint_layer_effect_kernel_apply(*zero, *blur, false, PAINT_TILE_NUMBER_BASE);
+  const float *zero_pixels = zero->float_data_for_write();
+  for (int64_t i = 0; i < int64_t(size) * size; i++) {
+    EXPECT_FLOAT_EQ(zero_pixels[i * 4 + 3], full[i])
+        << "a zero mix spreads the same alpha, texel " << i;
+  }
+  EXPECT_NEAR(zero_pixels[(int64_t(32) * size + 32) * 4 + 0], 1.0f, 1e-6f)
+      << "a zero mix leaves the colour alone inside the square";
+  EXPECT_NEAR(zero_pixels[(int64_t(32) * size + 45) * 4 + 0], 0.0f, 1e-6f)
+      << "and leaves it alone where only the spread reaches";
+  IMB_freeImBuf(zero);
+}
+
+TEST_F(PaintLayersEffectTest, a_glow_lifts_the_alpha_where_it_screens)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *glow = add_effect(*row, MA_PAINT_LAYER_FILTER_GLOW);
+  ASSERT_TRUE(
+      paint_layer_kind_param_int_set(*glow, PAINT_LAYER_GLOW_MODE, PAINT_LAYER_GLOW_PRECISE));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*glow, PAINT_LAYER_GLOW_WIDTH, 8));
+  ASSERT_TRUE(paint_layer_kind_param_set(*glow, PAINT_LAYER_GLOW_SPREAD, 0.0f));
+  ASSERT_TRUE(paint_layer_kind_param_set(*glow, PAINT_LAYER_GLOW_OPACITY, 1.0f));
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  ASSERT_TRUE(paint_layer_kind_param_color_set(*glow, PAINT_LAYER_GLOW_COLOR, white));
+
+  ImBuf *input = alpha_square_buffer();
+  ASSERT_NE(input, nullptr);
+  paint_layer_effect_kernel_apply(*input, *glow, false, PAINT_TILE_NUMBER_BASE);
+
+  constexpr int size = 64;
+  const float *pixels = input->float_data_for_write();
+  const auto texel = [&](const int x, const int y, const int c) {
+    return pixels[(int64_t(y) * size + x) * 4 + c];
+  };
+  /* The glow screens its blurred band over the empty map within its width, and lifts the alpha the
+   * same way: `max(alpha, m)`. Past the width nothing reaches the far corner. */
+  EXPECT_GT(texel(45, 32, 3), 0.0f) << "the glow lifts the alpha around the square";
+  EXPECT_NEAR(texel(0, 0, 3), 0.0f, 1e-6f) << "the far corner stays empty";
+  IMB_freeImBuf(input);
+}
+
+TEST_F(PaintLayersEffectTest, a_glow_keeps_the_premultiplied_colour_below_the_alpha)
+{
+  /* The effect buffer is premultiplied and the composite decodes it by dividing by the alpha: a
+   * screen over the premultiplied colour would overshoot on a semi-transparent edge and decode to
+   * a bright halo. The square here is straight 0.5 at alpha 0.5 (premultiplied 0.25), so the
+   * invariant `rgb <= alpha` has to hold after the glow on every texel. */
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *glow = add_effect(*row, MA_PAINT_LAYER_FILTER_GLOW);
+  ASSERT_TRUE(
+      paint_layer_kind_param_int_set(*glow, PAINT_LAYER_GLOW_MODE, PAINT_LAYER_GLOW_PRECISE));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*glow, PAINT_LAYER_GLOW_WIDTH, 8));
+  ASSERT_TRUE(paint_layer_kind_param_set(*glow, PAINT_LAYER_GLOW_SPREAD, 0.0f));
+  ASSERT_TRUE(paint_layer_kind_param_set(*glow, PAINT_LAYER_GLOW_OPACITY, 1.0f));
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  ASSERT_TRUE(paint_layer_kind_param_color_set(*glow, PAINT_LAYER_GLOW_COLOR, white));
+
+  ImBuf *input = alpha_square_buffer();
+  ASSERT_NE(input, nullptr);
+  constexpr int size = 64;
+  {
+    float *pixels = input->float_data_for_write();
+    for (const int64_t i : IndexRange(int64_t(size) * size)) {
+      float *p = pixels + i * 4;
+      if (p[3] > 0.0f) {
+        p[0] = 0.25f; /* straight 0.5, premultiplied by 0.5 */
+        p[1] = 0.25f;
+        p[2] = 0.25f;
+        p[3] = 0.5f;
+      }
+    }
+  }
+  paint_layer_effect_kernel_apply(*input, *glow, false, PAINT_TILE_NUMBER_BASE);
+
+  const float *pixels = input->float_data_for_write();
+  float max_alpha = 0.0f;
+  for (const int64_t i : IndexRange(int64_t(size) * size)) {
+    const float alpha = pixels[i * 4 + 3];
+    max_alpha = std::max(max_alpha, alpha);
+    for (const int c : IndexRange(3)) {
+      EXPECT_LE(pixels[i * 4 + c], alpha + 1e-5f)
+          << "premultiplied colour over alpha, texel " << i << " channel " << c;
+    }
+  }
+  /* The glow reads its luminance off the premultiplied buffer: the 0.5-alpha square stores 0.25, so
+   * the screen lands at 0.25 and `max(alpha, m)` keeps the content's own 0.5 rather than lifting it
+   * past it. The blur still spreads that reduced coverage into the empty map around the square. */
+  EXPECT_NEAR(max_alpha, 0.5f, 1e-5f)
+      << "the glow does not lift the content's own alpha past its source";
+  EXPECT_GT(pixels[((int64_t)32 * size + 45) * 4 + 3], 0.0f)
+      << "the glow spreads the coverage around the square";
+  IMB_freeImBuf(input);
+}
+
+TEST_F(PaintLayersEffectTest, a_sharpen_keeps_the_content_alpha)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *sharpen = add_effect(*row, MA_PAINT_LAYER_FILTER_SHARPEN);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*sharpen, PAINT_LAYER_SHARPEN_RADIUS, 8));
+  ASSERT_TRUE(paint_layer_kind_param_set(*sharpen, PAINT_LAYER_SHARPEN_AMOUNT, 1.0f));
+
+  ImBuf *input = alpha_square_buffer();
+  ASSERT_NE(input, nullptr);
+  paint_layer_effect_kernel_apply(*input, *sharpen, false, PAINT_TILE_NUMBER_BASE);
+
+  constexpr int size = 64;
+  const float *pixels = input->float_data_for_write();
+  const auto texel = [&](const int x, const int y, const int c) {
+    return pixels[(int64_t(y) * size + x) * 4 + c];
+  };
+  /* The blur pair its unsharp mask reads carries the alpha, but the tail writes the colour only:
+   * the content alpha neither spreads nor fades. */
+  EXPECT_NEAR(texel(45, 32, 3), 0.0f, 1e-6f) << "a colour-only kind leaves the empty map empty";
+  EXPECT_NEAR(texel(0, 0, 3), 0.0f, 1e-6f);
+  EXPECT_NEAR(texel(32, 32, 3), 1.0f, 1e-5f) << "the covered texels keep their alpha";
+  IMB_freeImBuf(input);
+}
+
 TEST_F(PaintLayersEffectTest, a_normal_to_mask_of_a_flat_normal_is_black)
 {
   /* A flat normal carries no field: the Height has no divergence to integrate, the Edges no
@@ -5543,6 +5763,53 @@ TEST_F(PaintLayersEffectTest, the_pass_plan_matches_each_kernels_shape)
   EXPECT_EQ(passes[0].pass_count, 1);
 }
 
+TEST_F(PaintLayersEffectTest, only_the_spreading_kinds_keep_the_blurred_alpha)
+{
+  /* Blur, Blur Directional and Glow carry the content alpha through their kernels, so the plan
+   * marks every pass that computes it: the host keeps `computed_alpha` there instead of the
+   * standard rule. */
+  Vector<PaintLayerEffectPass> passes;
+  const std::array<float, 2> box{float(PAINT_LAYER_BLUR_BOX), 5.0f};
+  BKE_paint_layers_effect_pass_plan(MA_PAINT_LAYER_FILTER_BLUR, box.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 2);
+  for (const PaintLayerEffectPass &pass : passes) {
+    EXPECT_TRUE(pass.alpha_from_kernel) << "the box blur spreads the alpha";
+  }
+
+  const std::array<float, 2> soft{float(PAINT_LAYER_BLUR_GAUSSIAN), 8.0f};
+  BKE_paint_layers_effect_pass_plan(MA_PAINT_LAYER_FILTER_BLUR, soft.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 6);
+  for (const PaintLayerEffectPass &pass : passes) {
+    EXPECT_TRUE(pass.alpha_from_kernel) << "both halves of every soft pair spread the alpha";
+  }
+
+  const std::array<float, 3> directional{30.0f, 7.0f, 1.0f};
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL, directional.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 1);
+  EXPECT_TRUE(passes[0].alpha_from_kernel) << "the line average spreads the alpha too";
+
+  /* The blur pair a Sharpen reads carries the alpha for the spread kinds only; its tail writes the
+   * colour, so the pair must not keep it. */
+  const std::array<float, 2> sharpen{2.0f, 0.5f};
+  BKE_paint_layers_effect_pass_plan(MA_PAINT_LAYER_FILTER_SHARPEN, sharpen.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 3);
+  EXPECT_FALSE(passes[0].alpha_from_kernel) << "a colour-only kind keeps the standard alpha";
+  EXPECT_FALSE(passes[1].alpha_from_kernel);
+  EXPECT_FALSE(passes[2].alpha_from_kernel);
+
+  /* The Glow lifts the alpha only where its screen tail lands; the luminance, choke and blur passes
+   * before it need none. */
+  const std::array<float, 7> glow{
+      float(PAINT_LAYER_GLOW_SOFT), 8.0f, 0.2f, 1.0f, 1.0f, 0.5f, 0.25f};
+  BKE_paint_layers_effect_pass_plan(MA_PAINT_LAYER_FILTER_GLOW, glow.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 9);
+  for (int i = 0; i < 8; i++) {
+    EXPECT_FALSE(passes[i].alpha_from_kernel) << "pass " << i << " keeps no computed alpha";
+  }
+  EXPECT_TRUE(passes[8].alpha_from_kernel) << "the screen tail lifts the alpha";
+}
+
 TEST_F(PaintLayersEffectTest, every_gpu_computed_kind_builds_a_pass_plan)
 {
   /* The loop bound is the last filter enumerator, not a _NUM sentinel (the enum has none): a new
@@ -7082,13 +7349,14 @@ TEST_F(PaintLayersEffectTest, a_bounded_row_source_footprint_is_the_quarter_plus
   rcti region;
   ASSERT_TRUE(bke::paint_layers::footprint::row_source_region(
       *ma, *row, PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE}, 512, region));
-  /* Scale 2 over 512 texels: the unit square's preimage is [0, 256) plus the one-texel pad, grown
-   * by the box blur's two-texel halo. The max edges are exclusive, so the region covers the texels
-   * [0, 259) and is not the whole canvas. */
+  /* Scale 2 over 512 texels: the unit square's preimage is [0, 256) plus the one-texel pad. The
+   * blur runs on the row's own 8-square stack, so its two-texel halo reaches `512 / 8 = 64` times
+   * as far in canvas texels: 128. The max edges are exclusive, so the region covers the texels
+   * [0, 385) and is not the whole canvas. */
   EXPECT_EQ(region.xmin, 0);
   EXPECT_EQ(region.ymin, 0);
-  EXPECT_EQ(region.xmax, 259);
-  EXPECT_EQ(region.ymax, 259);
+  EXPECT_EQ(region.xmax, 385);
+  EXPECT_EQ(region.ymax, 385);
   EXPECT_LT(region.xmax, 512);
 }
 
@@ -7120,8 +7388,8 @@ TEST_F(PaintLayersEffectTest, a_row_source_footprint_uses_the_channel_that_carri
       *ma, *row, PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE}, 512, region));
   EXPECT_EQ(region.xmin, 0);
   EXPECT_EQ(region.ymin, 0);
-  EXPECT_EQ(region.xmax, 259);
-  EXPECT_EQ(region.ymax, 259);
+  EXPECT_EQ(region.xmax, 385);
+  EXPECT_EQ(region.ymax, 385);
 }
 
 TEST_F(PaintLayersEffectTest, an_unbounded_row_source_mapping_refuses)
@@ -7278,12 +7546,13 @@ TEST_F(PaintLayersEffectTest, a_transform_effect_moves_the_row_source_footprint)
   rcti region;
   ASSERT_TRUE(bke::paint_layers::footprint::row_source_region(
       *ma, *row, PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE}, 512, region));
-  /* [-0.25, 0.25] over 512 texels, plus the pad and the blur's two-texel halo: x0 clamps at 0,
-   * x1 is `ceil(0.25 * 512) + 1 + 2`. */
+  /* [-0.25, 0.25] over 512 texels, plus the pad and the blur's halo scaled to the canvas. The blur
+   * runs on the row's 8-square stack, so its two-texel radius reaches `512 / 8 * 2 = 128` canvas
+   * texels: x0 clamps at 0, x1 is `ceil(0.25 * 512) + 1 + 128`. */
   EXPECT_EQ(region.xmin, 0);
   EXPECT_EQ(region.ymin, 0);
-  EXPECT_EQ(region.xmax, 131);
-  EXPECT_EQ(region.ymax, 131);
+  EXPECT_EQ(region.xmax, 257);
+  EXPECT_EQ(region.ymax, 257);
 }
 
 TEST_F(PaintLayersEffectTest, a_laid_correction_refuses_the_row_source_footprint)

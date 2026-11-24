@@ -153,14 +153,18 @@ void BKE_paint_layers_effect_pass_plan(eMaterialPaintLayerFilter filter,
   /* One horizontal window pass and its vertical twin, both of \a radius: each reads the pass before
    * it and reaches \a radius along its own axis, so the regions fold per axis. The source is asked
    * per pass, so the pair's vertical half reads the horizontal one's result. \a maximum is the
-   * Extremum pair's direction; the other window pairs leave it at erode's false. */
+   * Extremum pair's direction; the other window pairs leave it at erode's false. \a alpha_from_kernel
+   * is set on both halves: the vertical half reads the horizontal one's alpha, so it has to write
+   * its own for the pair to spread the content alpha as the CPU's blur passes do. */
   const auto add_axis_pair = [&](const ePaintLayerEffectPass h_kind,
                                  const ePaintLayerEffectPass v_kind,
                                  const int radius,
-                                 const bool maximum = false) {
+                                 const bool maximum = false,
+                                 const bool alpha_from_kernel = false) {
     add(h_kind, radius);
     PaintLayerEffectPass &h = r_passes.last();
     h.maximum = maximum;
+    h.alpha_from_kernel = alpha_from_kernel;
     h.source = window_source();
     h.aux = ePaintLayerEffectPassAux::None;
     h.reach = h.radius;
@@ -168,6 +172,7 @@ void BKE_paint_layers_effect_pass_plan(eMaterialPaintLayerFilter filter,
     add(v_kind, radius);
     PaintLayerEffectPass &v = r_passes.last();
     v.maximum = maximum;
+    v.alpha_from_kernel = alpha_from_kernel;
     v.source = window_source();
     v.aux = ePaintLayerEffectPassAux::None;
     v.reach = v.radius;
@@ -223,12 +228,16 @@ void BKE_paint_layers_effect_pass_plan(eMaterialPaintLayerFilter filter,
       const int radius = effect_pass_param_int(params, PAINT_LAYER_BLUR_RADIUS);
       const bool box = effect_pass_param_int(params, PAINT_LAYER_BLUR_SHAPE) ==
                        PAINT_LAYER_BLUR_BOX;
-      /* Each box pass reads its own clamped radius; a soft blur spends the reach over three pairs. */
+      /* Each box pass reads its own clamped radius; a soft blur spends the reach over three pairs.
+       * The kind spreads the content alpha along with the colour, so every pass of the chain writes
+       * the blurred alpha, the vertical half reading the horizontal one's. */
       const int pairs = box ? 1 : 3;
       for (int i = 0; i < pairs; i++) {
         add_axis_pair(ePaintLayerEffectPass::BlurH,
                       ePaintLayerEffectPass::BlurV,
-                      effect_pass_clamp_radius(box ? radius : std::max(radius / 2, 1), width, height));
+                      effect_pass_clamp_radius(box ? radius : std::max(radius / 2, 1), width, height),
+                      false,
+                      true);
       }
       break;
     }
@@ -246,6 +255,8 @@ void BKE_paint_layers_effect_pass_plan(eMaterialPaintLayerFilter filter,
        * so the halo and the region growth read the reach across both. */
       pass.reach = pass.radius;
       pass.axis_mask = PAINT_LAYER_EFFECT_AXIS_XY;
+      /* The kernel spreads the content alpha along the same line, so the pass writes it. */
+      pass.alpha_from_kernel = true;
       break;
     }
     case MA_PAINT_LAYER_FILTER_SHARPEN: {
@@ -380,7 +391,8 @@ void BKE_paint_layers_effect_pass_plan(eMaterialPaintLayerFilter filter,
        * `out += tint * (glow * opacity) * (1 - out)`: a black texel lands on the tint, a lit one
        * keeps its light. The opacity rides in #aux0, the tint in #params (the packing lays a
        * colour's three channels at its place in the schema order), and it computes its own texel
-       * only, so it reaches nothing. */
+       * only, so it reaches nothing. It lifts the alpha where the screen lands, `max(alpha, m)`, so
+       * the glow spreads the row's coverage; the passes before it keep their own alpha. */
       add(ePaintLayerEffectPass::ScreenTail, 0);
       PaintLayerEffectPass &tail = r_passes.last();
       tail.source = ePaintLayerEffectPassSource::Input;
@@ -388,6 +400,7 @@ void BKE_paint_layers_effect_pass_plan(eMaterialPaintLayerFilter filter,
       tail.reach = 0;
       /* The mask is meaningless without a reach. */
       tail.axis_mask = PAINT_LAYER_EFFECT_AXIS_NONE;
+      tail.alpha_from_kernel = true;
       tail.aux0 = params[PAINT_LAYER_GLOW_OPACITY];
       tail.params.x = params[PAINT_LAYER_GLOW_COLOR + 0];
       tail.params.y = params[PAINT_LAYER_GLOW_COLOR + 1];

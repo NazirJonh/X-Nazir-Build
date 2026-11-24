@@ -3583,6 +3583,29 @@ static bool bake_object_tile_write(
 }
 
 /**
+ * \a region read in the input's `input`-sized pixels, written in the `canvas` map's: the frame's
+ * edges scale outward (floor the start, ceil the end), so a texel block of a smaller input is
+ * covered whole. The CPU effects filter at the input's resolution, so a footprint computed there
+ * has to be carried into the map's own pixels this way.
+ */
+static void bake_region_scale_out(rcti &region,
+                                  const int canvas,
+                                  const int input_width,
+                                  const int input_height)
+{
+  const auto floor_axis = [](const int v, const int canvas, const int input) {
+    return clamp_i(int(int64_t(v) * canvas / input), 0, canvas);
+  };
+  const auto ceil_axis = [](const int v, const int canvas, const int input) {
+    return clamp_i(int((int64_t(v) * canvas + input - 1) / input), 0, canvas);
+  };
+  region.xmin = floor_axis(region.xmin, canvas, input_width);
+  region.ymin = floor_axis(region.ymin, canvas, input_height);
+  region.xmax = ceil_axis(region.xmax, canvas, input_width);
+  region.ymax = ceil_axis(region.ymax, canvas, input_height);
+}
+
+/**
  * The rectangle of the effect's input canvas its content footprint bounds, grown by the chain's
  * halo and clamped to the canvas: the part of the canvas a changed input texel can move the
  * effect's result in. False when any channel the effect filters has an unbounded input (a mapping
@@ -3615,17 +3638,28 @@ static bool bake_effect_content_footprint(const Material &ma,
       return false;
     }
     rcti channel_region;
+    int input_width = 0;
+    int input_height = 0;
     if (!BKE_paint_layers_effect_input_footprint_region(
             ma,
             row,
             effect,
             channel,
             PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE},
-            channel_region))
+            channel_region,
+            &input_width,
+            &input_height))
     {
       /* One unbounded channel unbounds the effect: the whole canvas is the safe answer. */
       return false;
     }
+    if (input_width <= 0 || input_height <= 0) {
+      return false;
+    }
+    /* The footprint and the chain's radius are in the input's own pixels; the map this bake writes
+     * is `canvas` square. Carry both outward: an effect filtering an 8-square input reaches 512
+     * texels of a 2048 map for a two-texel radius. */
+    bake_region_scale_out(channel_region, canvas, input_width, input_height);
     if (have_region) {
       BLI_rcti_union(&r_region, &channel_region);
     }
@@ -3633,9 +3667,12 @@ static bool bake_effect_content_footprint(const Material &ma,
       r_region = channel_region;
       have_region = true;
     }
-    max_halo = std::max(max_halo,
-                        bke::paint_layers::footprint::paint_layer_effect_chain_halo(
-                            ma, row, effect, channel, canvas, canvas));
+    const int halo_scale = std::max((canvas + input_width - 1) / input_width,
+                                    (canvas + input_height - 1) / input_height);
+    max_halo = std::max(
+        max_halo,
+        halo_scale * bke::paint_layers::footprint::paint_layer_effect_chain_halo(
+                         ma, row, effect, channel, input_width, input_height));
   }
   if (!have_region) {
     return false;

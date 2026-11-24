@@ -52,11 +52,13 @@ std::shared_ptr<ImBuf> paint_layer_anchor_slice_buffer_clone(const ImBuf &source
 }
 
 /**
- * One horizontal box pass over the RGB of \a buffer, edges clamped, alpha untouched. Rows run in
- * parallel; each keeps a scratch copy of itself, since the sliding window reads behind the texel
+ * One horizontal box pass over the RGB and the content alpha of \a buffer, edges clamped. Rows run
+ * in parallel; each keeps a scratch copy of itself, since the sliding window reads behind the texel
  * the pass has already written.
  */
-static void paint_layer_effect_blur_pass_h(ImBuf &buffer, const int radius)
+static void paint_layer_effect_blur_pass_h(ImBuf &buffer,
+                                           const int radius,
+                                           const bool blur_alpha)
 {
   const int width = buffer.x;
   const int height = buffer.y;
@@ -66,7 +68,7 @@ static void paint_layer_effect_blur_pass_h(ImBuf &buffer, const int radius)
     for (const int y : range) {
       float *dst = pixels + int64_t(y) * width * 4;
       memcpy(row.data(), dst, size_t(width) * sizeof(float[4]));
-      float sum[3] = {0.0f, 0.0f, 0.0f};
+      float sum[4] = {0.0f, 0.0f, 0.0f, 0.0f};
       int lo = 0;
       int hi = -1;
       for (const int x : IndexRange(width)) {
@@ -75,6 +77,9 @@ static void paint_layer_effect_blur_pass_h(ImBuf &buffer, const int radius)
           sum[0] += row[int64_t(k) * 4 + 0];
           sum[1] += row[int64_t(k) * 4 + 1];
           sum[2] += row[int64_t(k) * 4 + 2];
+          if (blur_alpha) {
+            sum[3] += row[int64_t(k) * 4 + 3];
+          }
         }
         hi = new_hi;
         const int new_lo = std::max(x - radius, 0);
@@ -82,19 +87,25 @@ static void paint_layer_effect_blur_pass_h(ImBuf &buffer, const int radius)
           sum[0] -= row[int64_t(k) * 4 + 0];
           sum[1] -= row[int64_t(k) * 4 + 1];
           sum[2] -= row[int64_t(k) * 4 + 2];
+          if (blur_alpha) {
+            sum[3] -= row[int64_t(k) * 4 + 3];
+          }
         }
         lo = new_lo;
         const float inv = 1.0f / float(hi - lo + 1);
         dst[int64_t(x) * 4 + 0] = sum[0] * inv;
         dst[int64_t(x) * 4 + 1] = sum[1] * inv;
         dst[int64_t(x) * 4 + 2] = sum[2] * inv;
+        if (blur_alpha) {
+          dst[int64_t(x) * 4 + 3] = sum[3] * inv;
+        }
       }
     }
   });
 }
 
 /**
- * One vertical box pass over the RGB of \a buffer, edges clamped, alpha untouched.
+ * One vertical box pass over the RGB and the content alpha of \a buffer, edges clamped.
  *
  * The pass walks the buffer row by row with one sliding sum per column, instead of walking it
  * column by column: a column walk of a 4K float buffer strided by a row is a cache miss per texel,
@@ -103,17 +114,19 @@ static void paint_layer_effect_blur_pass_h(ImBuf &buffer, const int radius)
  * keeps the originals of those. The sum is sequential in y, so the pass stays single-threaded; the
  * horizontal pass above carries the parallelism.
  */
-static void paint_layer_effect_blur_pass_v(ImBuf &buffer, const int radius)
+static void paint_layer_effect_blur_pass_v(ImBuf &buffer,
+                                           const int radius,
+                                           const bool blur_alpha)
 {
   const int width = buffer.x;
   const int height = buffer.y;
   float *pixels = buffer.float_data_for_write();
-  Vector<float> sums(int64_t(width) * 3, 0.0f);
+  Vector<float> sums(int64_t(width) * 4, 0.0f);
   /* The window drops row `k` once `y - radius > k`, but row `k` was overwritten when the pass wrote
    * it. The originals of the rows still to be dropped are kept in a ring: a row is saved just before
    * it is written and read back `radius + 1` rows later, so `radius + 2` slots never collide. */
   const int ring_num = radius + 2;
-  Vector<float> ring(int64_t(ring_num) * width * 3);
+  Vector<float> ring(int64_t(ring_num) * width * 4);
   int lo = 0;
   int hi = -1;
   for (const int y : IndexRange(height)) {
@@ -121,47 +134,64 @@ static void paint_layer_effect_blur_pass_v(ImBuf &buffer, const int radius)
     for (int k = hi + 1; k <= new_hi; k++) {
       const float *src = pixels + int64_t(k) * width * 4;
       for (const int x : IndexRange(width)) {
-        float *s = sums.data() + int64_t(x) * 3;
+        float *s = sums.data() + int64_t(x) * 4;
         s[0] += src[int64_t(x) * 4 + 0];
         s[1] += src[int64_t(x) * 4 + 1];
         s[2] += src[int64_t(x) * 4 + 2];
+        if (blur_alpha) {
+          s[3] += src[int64_t(x) * 4 + 3];
+        }
       }
     }
     hi = new_hi;
     const int new_lo = std::max(y - radius, 0);
     for (int k = lo; k < new_lo; k++) {
-      const float *original = ring.data() + int64_t(k % ring_num) * width * 3;
+      const float *original = ring.data() + int64_t(k % ring_num) * width * 4;
       for (const int x : IndexRange(width)) {
-        float *s = sums.data() + int64_t(x) * 3;
-        s[0] -= original[int64_t(x) * 3 + 0];
-        s[1] -= original[int64_t(x) * 3 + 1];
-        s[2] -= original[int64_t(x) * 3 + 2];
+        float *s = sums.data() + int64_t(x) * 4;
+        s[0] -= original[int64_t(x) * 4 + 0];
+        s[1] -= original[int64_t(x) * 4 + 1];
+        s[2] -= original[int64_t(x) * 4 + 2];
+        if (blur_alpha) {
+          s[3] -= original[int64_t(x) * 4 + 3];
+        }
       }
     }
     lo = new_lo;
     const float inv = 1.0f / float(hi - lo + 1);
     float *dst = pixels + int64_t(y) * width * 4;
-    float *saved = ring.data() + int64_t(y % ring_num) * width * 3;
+    float *saved = ring.data() + int64_t(y % ring_num) * width * 4;
     for (const int x : IndexRange(width)) {
-      saved[int64_t(x) * 3 + 0] = dst[int64_t(x) * 4 + 0];
-      saved[int64_t(x) * 3 + 1] = dst[int64_t(x) * 4 + 1];
-      saved[int64_t(x) * 3 + 2] = dst[int64_t(x) * 4 + 2];
+      saved[int64_t(x) * 4 + 0] = dst[int64_t(x) * 4 + 0];
+      saved[int64_t(x) * 4 + 1] = dst[int64_t(x) * 4 + 1];
+      saved[int64_t(x) * 4 + 2] = dst[int64_t(x) * 4 + 2];
+      if (blur_alpha) {
+        saved[int64_t(x) * 4 + 3] = dst[int64_t(x) * 4 + 3];
+      }
     }
     for (const int x : IndexRange(width)) {
-      const float *s = sums.data() + int64_t(x) * 3;
+      const float *s = sums.data() + int64_t(x) * 4;
       dst[int64_t(x) * 4 + 0] = s[0] * inv;
       dst[int64_t(x) * 4 + 1] = s[1] * inv;
       dst[int64_t(x) * 4 + 2] = s[2] * inv;
+      if (blur_alpha) {
+        dst[int64_t(x) * 4 + 3] = s[3] * inv;
+      }
     }
   }
 }
 
-/** A box blur of \a radius over the RGB of \a buffer, one pass per axis. */
-static void paint_layer_effect_blur_box(ImBuf &buffer, const int radius)
+/** A box blur of \a radius over the RGB and, when \a blur_alpha is set, the content alpha of
+ * \a buffer, one pass per axis. A caller whose result does not carry alpha (a Bevel's smoothing, a
+ * scratch grey the Glow reads, the unsharp helpers' blurred copy) passes false and saves the
+ * per-texel alpha work. */
+static void paint_layer_effect_blur_box(ImBuf &buffer,
+                                        const int radius,
+                                        const bool blur_alpha = true)
 {
   const int r = std::clamp(radius, 1, std::max(buffer.x, buffer.y));
-  paint_layer_effect_blur_pass_h(buffer, r);
-  paint_layer_effect_blur_pass_v(buffer, r);
+  paint_layer_effect_blur_pass_h(buffer, r, blur_alpha);
+  paint_layer_effect_blur_pass_v(buffer, r, blur_alpha);
 }
 
 /** A private blurred copy of \a source: the detail the unsharp-style kernels read against. */
@@ -173,24 +203,26 @@ static bool paint_layer_effect_blur_copy(const ImBuf &source,
   if (r_blurred == nullptr) {
     return false;
   }
-  paint_layer_effect_blur_box(*r_blurred, radius);
+  paint_layer_effect_blur_box(*r_blurred, radius, /*blur_alpha=*/false);
   return true;
 }
 
 /**
- * A line average at \a angle_deg over the RGB of \a buffer, mixed over the colour by \a mix: the
- * samples walk the line the angle names, one texel at a time, `\a radius` steps each way of the
- * centre, each read clamped to the canvas edge like a box pass's window. The samples average
- * plainly -- the streak the filter lays is the direction, not a weighted tail. Alpha is untouched.
+ * A line average at \a angle_deg over the RGB and the content alpha of \a buffer, mixed over the
+ * colour by \a mix: the samples walk the line the angle names, one texel at a time, `\a radius`
+ * steps each way of the centre, each read clamped to the canvas edge like a box pass's window. The
+ * samples average plainly -- the streak the filter lays is the direction, not a weighted tail. The
+ * alpha is the plain line average too and is written unconditionally, not through \a mix: the mix
+ * softens only the colour, and a partial mix over the alpha would leave a translucent trail instead
+ * of the spread coverage.
  */
 static void paint_layer_effect_blur_directional(ImBuf &buffer,
                                                 const float angle_deg,
                                                 const int radius,
                                                 const float mix)
 {
-  if (mix <= 0.0f) {
-    return;
-  }
+  /* A zero mix still runs: it leaves the colour alone, but the alpha is always the line average, so
+   * the spread its coverage lays is not a function of the colour's intensity. */
   std::shared_ptr<ImBuf> source = paint_layer_anchor_slice_buffer_clone(buffer);
   if (source == nullptr) {
     return;
@@ -211,6 +243,7 @@ static void paint_layer_effect_blur_directional(ImBuf &buffer,
       float *dst = pixels + int64_t(y) * width * 4;
       for (const int x : IndexRange(width)) {
         float sum[3] = {0.0f, 0.0f, 0.0f};
+        float sum_a = 0.0f;
         for (const int k : IndexRange(-reach, 2 * reach + 1)) {
           /* One texel along the line per step, clamped to the canvas the window is. */
           const int sx = std::clamp(x + int(std::floor(direction.x * float(k) + 0.5f)), 0, width - 1);
@@ -219,12 +252,14 @@ static void paint_layer_effect_blur_directional(ImBuf &buffer,
           sum[0] += tap[0];
           sum[1] += tap[1];
           sum[2] += tap[2];
+          sum_a += tap[3];
         }
         const float inv = 1.0f / float(2 * reach + 1);
         for (const int c : IndexRange(3)) {
           const float averaged = sum[c] * inv;
           dst[int64_t(x) * 4 + c] += (averaged - dst[int64_t(x) * 4 + c]) * weight;
         }
+        dst[int64_t(x) * 4 + 3] = sum_a * inv;
       }
     }
   });
@@ -262,9 +297,9 @@ static void paint_layer_effect_unsharp_apply(ImBuf &buffer, const int radius, Op
 }
 
 /**
- * Run \a op over the RGB of \a buffer, one texel at a time, in place: rows run in parallel, and
- * \a op receives the texel's column, row and pointer and writes its three colour channels. Alpha is
- * untouched. The one frame the per-texel effects write their result through.
+ * Run \a op over the texels of \a buffer, one at a time, in place: rows run in parallel, and \a op
+ * receives the texel's column, row and pointer and writes its three colour channels. Alpha is left
+ * as it is unless \a op writes it too -- a spreading kernel such as the Glow lifts it there.
  */
 template<typename Op> static void paint_layer_effect_map_rgb(ImBuf &buffer, Op op)
 {
@@ -588,19 +623,25 @@ static void paint_layer_effect_noise_apply(ImBuf &buffer, const MaterialPaintLay
 }
 
 /** Three box passes, a gaussian approximation; the radius reads as the per-pass half reach. */
-static void paint_layer_effect_blur_soft(ImBuf &buffer, const int radius)
+static void paint_layer_effect_blur_soft(ImBuf &buffer,
+                                         const int radius,
+                                         const bool blur_alpha = true)
 {
   const int pass = paint_layer_gaussian_pass_radius(radius);
-  paint_layer_effect_blur_box(buffer, pass);
-  paint_layer_effect_blur_box(buffer, pass);
-  paint_layer_effect_blur_box(buffer, pass);
+  paint_layer_effect_blur_box(buffer, pass, blur_alpha);
+  paint_layer_effect_blur_box(buffer, pass, blur_alpha);
+  paint_layer_effect_blur_box(buffer, pass, blur_alpha);
 }
 
 /**
  * The Glow kernel over \a buffer in place: the content's luminance, choked by the spread, blurred
  * by the width and screened under the colour at the opacity. The glow bleeds off the content's own
  * light, so the bright areas of a row spill over its dark ones; the source is the colour
- * management's scene-linear luminance, the one the High Pass and the Noise read. Alpha is untouched.
+ * management's scene-linear luminance, the one the High Pass and the Noise read -- off the buffer's
+ * own premultiplied colour, so the light a texel emits is proportional to its coverage and a
+ * half-transparent edge glows with half the strength. The alpha is lifted where the screen lands,
+ * `max(alpha, m)`: the glow spreads its coverage over the empty map around the content, not only
+ * its colour.
  */
 static void paint_layer_effect_glow_apply(ImBuf &buffer, const MaterialPaintLayer &effect)
 {
@@ -628,23 +669,30 @@ static void paint_layer_effect_glow_apply(ImBuf &buffer, const MaterialPaintLaye
     texel[2] = m;
   });
 
-  /* One box pass is precise; three soften into a gaussian falloff. */
+  /* One box pass is precise; three soften into a gaussian falloff. The glow buffer is a scratch
+   * grey read through its red channel, so its alpha is left alone. */
   if (mode == PAINT_LAYER_GLOW_PRECISE) {
-    paint_layer_effect_blur_box(*glow, width);
+    paint_layer_effect_blur_box(*glow, width, /*blur_alpha=*/false);
   }
   else {
-    paint_layer_effect_blur_soft(*glow, width);
+    paint_layer_effect_blur_soft(*glow, width, /*blur_alpha=*/false);
   }
 
-  /* Screened under the colour, `out = c + glow * (1 - c)`: a black texel under the glow lands
-   * exactly on the colour, a lit one keeps its light, and the result stays bounded where the colour
-   * is. */
+  /* Screened under the colour, `out = c + glow * (1 - c)`, in straight colour: the buffer is
+   * premultiplied by its content alpha, so each channel is straightened before the formula and the
+   * stored value stays premultiplied by the new alpha `max(alpha, m)` -- a screen over the
+   * premultiplied colour would overshoot on a semi-transparent edge, and the composite decodes the
+   * buffer by dividing by that alpha. */
   const float *glow_data = glow->float_buffer.data;
   paint_layer_effect_map_rgb(buffer, [&](const int x, const int y, float *texel) {
     const float m = glow_data[(int64_t(y) * tile_width + x) * 4] * opacity;
+    const float alpha = clamp_f(texel[3], 0.0f, 1.0f);
+    const float inv_alpha = alpha > 0.0f ? 1.0f / alpha : 0.0f;
     for (const int c : IndexRange(3)) {
-      texel[c] += color[c] * m * (1.0f - texel[c]);
+      const float straight = texel[c] * inv_alpha;
+      texel[c] += color[c] * m * (1.0f - straight);
     }
+    texel[3] = clamp_f(std::max(alpha, m), 0.0f, 1.0f);
   });
 }
 
@@ -1696,7 +1744,9 @@ static void paint_layer_effect_bevel_apply(ImBuf &buffer,
     texel[2] = value;
   });
   if (smooth > 0) {
-    paint_layer_effect_blur_box(buffer, smooth);
+    /* The Bevel lays a colour only: the box passes are asked to leave the content alpha alone, so
+     * the kind keeps the alpha it had without a full-buffer copy to put back afterwards. */
+    paint_layer_effect_blur_box(buffer, smooth, /*blur_alpha=*/false);
   }
 }
 

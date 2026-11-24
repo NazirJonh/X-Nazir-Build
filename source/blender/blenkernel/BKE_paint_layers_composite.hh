@@ -805,13 +805,19 @@ void BKE_paint_layers_effect_valid_region(const Material &ma,
  *
  * \param context: the tile context the effect's input is computed under, the same one the caller
  *        passes the compute (the bake describes and computes on #PAINT_TILE_NUMBER_BASE).
+ * \param r_input_width / r_input_height: when given, the input's own canvas the rectangle is in.
+ *        The CPU effects filter at that resolution, so a caller writing a `canvas`-sized map scales
+ *        the rectangle and the chain's halo by it (`canvas / input`): a two-texel radius of an
+ *        8-square input reaches 512 texels of a 2048 map.
  */
 bool BKE_paint_layers_effect_input_footprint_region(const Material &ma,
                                                     const MaterialPaintLayer &row,
                                                     const MaterialPaintLayer &effect,
                                                     int channel,
                                                     const PaintLayerTileContext &context,
-                                                    rcti &r_region);
+                                                    rcti &r_region,
+                                                    int *r_input_width = nullptr,
+                                                    int *r_input_height = nullptr);
 
 /**
  * Whether \a correction stands for an effect row's result: the description builder names the effect

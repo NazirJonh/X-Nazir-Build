@@ -1142,7 +1142,8 @@ static const PaintLayerKindInfo kinds[] = {
      blur_params,
      int(std::size(blur_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_EFFECT_REGION_EXACT)},
+              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_RESULT_HAS_ALPHA |
+              PAINT_LAYER_KIND_EFFECT_REGION_EXACT)},
     /* A line average at an angle: one pass of one kernel, not separable like the box blur's pair,
      * which reaches both ways at once along the line it samples. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
@@ -1153,7 +1154,8 @@ static const PaintLayerKindInfo kinds[] = {
      blur_directional_params,
      int(std::size(blur_directional_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_EFFECT_REGION_EXACT)},
+              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_RESULT_HAS_ALPHA |
+              PAINT_LAYER_KIND_EFFECT_REGION_EXACT)},
     /* A shadow cast off the row's own shape: the silhouette is spread, blurred and offset before
      * it is tinted. Its result is a layer with an alpha of its own, so the shadow shows on the
      * empty map around a stroke. In a mask the tint is a grey of itself (the mask kind normalizes),
@@ -1433,8 +1435,8 @@ static const PaintLayerKindInfo kinds[] = {
      glow_params,
      int(std::size(glow_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_MASK_NEEDS_LUMA |
-              PAINT_LAYER_KIND_EFFECT_WHOLE_MAP |
+              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_RESULT_HAS_ALPHA |
+              PAINT_LAYER_KIND_MASK_NEEDS_LUMA | PAINT_LAYER_KIND_EFFECT_WHOLE_MAP |
               PAINT_LAYER_KIND_EFFECT_REGION_EXACT)},
     /* A bevel replaces the colour with a distance ramp from the content's borders: its alpha, or
      * its luminance when the source says so -- an opaque row bevels by the dark side of its paint.

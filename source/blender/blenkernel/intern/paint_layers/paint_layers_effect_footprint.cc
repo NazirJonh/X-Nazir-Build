@@ -33,6 +33,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_tile.hh"
+#include "BKE_paint_material_composite.hh"
 
 #include "paint_layers_composite_intern.hh"
 #include "paint_layers_effect_footprint.hh"
@@ -213,8 +214,9 @@ int paint_layer_effect_chain_halo(const Material &ma,
     }
     float params[PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM];
     paint_layer_effect_filter_params(chain_effect, params);
-    /* At the canvas's own size, the upper bound of every radius clamp: a kernel running on a
-     * smaller buffer clamps downwards, never past what this halo grew the region by. */
+    /* Asked at the dimensions of the buffer the kernels run on: the caller passes the stack's own
+     * size for a bake map of another size, so the radius is in that buffer's texels. A smaller
+     * buffer reaches farther in canvas texels (`size / stack`), which each caller scales for. */
     halo += BKE_paint_layers_effect_halo(
         eMaterialPaintLayerFilter(chain_effect.kind_subtype), params, width, height);
     if (&chain_effect == &effect) {
@@ -294,7 +296,6 @@ bool row_source_region(const Material &ma,
    * chain's filters reach grows the rectangle at the end; the largest channel's is the one every
    * channel's result stays inside. */
   const MaterialPaintLayer *last_effect = static_cast<const MaterialPaintLayer *>(row.effects.last);
-  int max_halo = 0;
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
     const int effect_channel = int(info.channel);
     for (const MaterialPaintLayer &effect : row.effects) {
@@ -309,9 +310,6 @@ bool row_source_region(const Material &ma,
       if (chain_has_whole_map(ma, row, *last_effect, effect_channel)) {
         return false;
       }
-      max_halo = std::max(
-          max_halo,
-          paint_layer_effect_chain_halo(ma, row, *last_effect, effect_channel, size, size));
     }
   }
 
@@ -355,6 +353,35 @@ bool row_source_region(const Material &ma,
   if (!entry.has_constant_color && entry.color_image == nullptr) {
     return false;
   }
+
+  /* The chain's filters run at the stack's own resolution -- the effect input is the described
+   * row, whose size is the source map's, not the bake map's. `paint_layer_effect_chain_halo` asks
+   * them at that size, so a stack smaller than the `size`-square map magnifies the reach by
+   * `size / stack`: a two-texel radius of an 8-square stack reaches 512 texels of a 2048 map. The
+   * rectangle the caller may render alone has to carry that reach in canvas texels. */
+  int stack_width = 0;
+  int stack_height = 0;
+  if (!BKE_paint_material_composite_stack_dimensions(
+          Span<PaintMaterialCompositeImageLayer>(&entry, 1), stack_width, stack_height) ||
+      stack_width <= 0 || stack_height <= 0)
+  {
+    return false;
+  }
+  const int halo_scale = std::max((size + stack_width - 1) / stack_width,
+                                  (size + stack_height - 1) / stack_height);
+  int max_halo = 0;
+  if (last_effect != nullptr) {
+    for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+      max_halo = std::max(
+          max_halo,
+          halo_scale * paint_layer_effect_chain_halo(ma,
+                                                     row,
+                                                     *last_effect,
+                                                     int(info.channel),
+                                                     stack_width,
+                                                     stack_height));
+    }
+  }
   rctf uv;
   if (!uv_rect(entry.mapping, entry.input_transforms, uv)) {
     return false;
@@ -383,7 +410,9 @@ bool BKE_paint_layers_effect_input_footprint_region(const Material &ma,
                                                     const MaterialPaintLayer &effect,
                                                     const int channel,
                                                     const PaintLayerTileContext &context,
-                                                    rcti &r_region)
+                                                    rcti &r_region,
+                                                    int *r_input_width,
+                                                    int *r_input_height)
 {
   /* A whole-map kind anywhere in the chain below the effect (it included) makes the result a
    * function of the whole canvas -- a flood's labels or a reduction's sums cannot be narrowed to
@@ -470,6 +499,12 @@ bool BKE_paint_layers_effect_input_footprint_region(const Material &ma,
   /* The one-texel pad absorbs the half-texel centre offset and the rounding at the frame's edge;
    * the rest of the conversion is the shared one. */
   constexpr int pad = 1;
+  if (r_input_width != nullptr) {
+    *r_input_width = width;
+  }
+  if (r_input_height != nullptr) {
+    *r_input_height = height;
+  }
   return uv_rect_to_region(uv, width, height, pad, r_region);
 }
 

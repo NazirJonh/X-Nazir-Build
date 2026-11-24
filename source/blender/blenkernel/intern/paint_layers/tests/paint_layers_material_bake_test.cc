@@ -3535,9 +3535,10 @@ TEST_F(PaintLayersMaterialBakeTest, an_edit_of_a_material_row_that_covers_nothin
  * The planner renders a Fill row's bake whole the first time and, while the maps stand and the
  * description still agrees with them, takes only the rectangle the row's own read chain bounds:
  * the preimage of the unit square under the row's mapping, grown by its blur's halo, aligned
- * outward to the 256 tiles. Scale 4 over a 512 canvas lays the content in `[0, 128)` plus the
- * pad and the halo, so the aligned write rect is `[0, 256) x [0, 256)` -- a quarter of the
- * canvas -- and a sentinel written outside it survives every narrowed write. The row is a Fill,
+ * outward to the 256 tiles. Scale 5 over a 512 canvas lays the content in `[0, 103)`; the blur runs
+ * on the row's own 8-square stack, so its two-texel radius reaches 128 canvas texels, and the pad
+ * and halo still align the write rect to `[0, 256) x [0, 256)` -- a quarter of the canvas -- so a
+ * sentinel written outside it survives every narrowed write. The row is a Fill,
  * not a Material row: a Material row's maps are rendered from its source by a different path,
  * which this narrowing does not serve.
  * \{ */
@@ -3546,7 +3547,7 @@ TEST_F(PaintLayersOwnedEffectTest, a_bounded_fill_row_full_edit_is_written_in_it
 {
   MaterialPaintLayer *row = nullptr;
   Image *map = nullptr;
-  add_bounded_fill(&row, &map, 4.0f, 512, "Bounded");
+  add_bounded_fill(&row, &map, 5.0f, 512, "Bounded");
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(run_plan());
   ASSERT_NE(row->bake, nullptr);
@@ -3565,7 +3566,7 @@ TEST_F(PaintLayersOwnedEffectTest, a_bounded_fill_row_full_edit_is_written_in_it
    * a full one of the same edited content. */
   MaterialPaintLayer *reference = nullptr;
   Image *reference_map = nullptr;
-  add_bounded_fill(&reference, &reference_map, 4.0f, 512, "BoundedRef");
+  add_bounded_fill(&reference, &reference_map, 5.0f, 512, "BoundedRef");
   ASSERT_NE(reference, nullptr);
   write_map_rect(*reference_map, rcti{0, 8, 0, 8}, 200);
 
@@ -3749,7 +3750,7 @@ TEST_F(PaintLayersOwnedEffectTest, a_full_update_re_renders_a_bounded_fill_row_i
 {
   MaterialPaintLayer *row = nullptr;
   Image *map = nullptr;
-  add_bounded_fill(&row, &map, 4.0f, 512, "FullUpdate");
+  add_bounded_fill(&row, &map, 5.0f, 512, "FullUpdate");
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(run_plan());
   Image *base_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
@@ -3815,8 +3816,9 @@ TEST_F(PaintLayersOwnedEffectTest, an_edit_whose_band_misses_the_footprint_keeps
  * composites from the localized copy and commits on the main thread. With the maps standing and
  * the hash unchanged, the creation resolves the same footprint and the job renders and writes its
  * tile-aligned rectangle; a first bake, a structural change and a live row keep the whole canvas.
- * Scale 4 over a 2048 canvas lays the content in the first 512 texels, grown by the halo and
- * aligned outward to `[0, 768)` -- a ninth of the canvas -- so a sentinel written outside it
+ * Scale 4 over a 2048 canvas lays the content in the first 512 texels; the Blur runs on the row's
+ * 8-square stack, so its two-texel radius reaches 512 canvas texels, and the footprint grown by
+ * that halo aligns outward to `[0, 1024)` -- half the canvas -- so a sentinel written outside it
  * survives every narrowed write.
  * \{ */
 
@@ -3830,14 +3832,22 @@ TEST_F(PaintLayersOwnedEffectTest, a_bounded_fill_row_heavy_edit_is_written_in_i
   Image *base_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
   ASSERT_NE(base_map, nullptr);
   ASSERT_NE(row->bake->coverage, nullptr);
-  /* The first bake is a whole render: the bounded fill lays nothing outside its footprint, so the
-   * map is transparent there -- alpha 0, not black with an alpha of 1. */
+  /* The first bake is a whole render. The bounded fill lays its content in `[0, 512)`; the Blur
+   * runs on the row's own 8-square stack, so its two-texel radius reaches 512 canvas texels and
+   * the content alpha spreads to `[0, 1024)`. Colour stays nowhere outside the content. */
   const Vector<uchar> first = read_map(*base_map);
-  EXPECT_EQ(first[(int64_t(1000) * 2048 + 1000) * 4 + 3], 0)
-      << "nothing of a bounded row lies outside its footprint";
-  /* Sentinels outside the `[0, 768)` write rect, in the colour map and in the coverage map. */
-  write_map_rect(*base_map, rcti{1000, 1010, 1000, 1010}, 255);
-  write_map_rect(*row->bake->coverage, rcti{1000, 1010, 1000, 1010}, 255);
+  EXPECT_EQ(first[(int64_t(1200) * 2048 + 1200) * 4 + 3], 0)
+      << "the spread stops at the Blur's halo in canvas texels";
+  EXPECT_GT(first[(int64_t(1000) * 2048 + 1000) * 4 + 3], 0)
+      << "the Blur spreads the content alpha over the empty map";
+  EXPECT_EQ(first[(int64_t(1000) * 2048 + 1000) * 4 + 0], 0)
+      << "the content's colour lies inside its footprint only";
+  EXPECT_EQ(first[(int64_t(60) * 2048 + 60) * 4 + 3], 255)
+      << "the content itself stays opaque";
+  /* Sentinels outside the `[0, 1024)` write rect -- the footprint grown by the stack-scaled halo --
+   * in the colour map and in the coverage map. */
+  write_map_rect(*base_map, rcti{1500, 1510, 1500, 1510}, 255);
+  write_map_rect(*row->bake->coverage, rcti{1500, 1510, 1500, 1510}, 255);
 
   /* The reference: an identical heavy row whose first (whole) bake happens after the same edit. */
   MaterialPaintLayer *reference = nullptr;
@@ -3861,14 +3871,16 @@ TEST_F(PaintLayersOwnedEffectTest, a_bounded_fill_row_heavy_edit_is_written_in_i
   EXPECT_GT(paint_layer_effect_partial_compute_count(), partial_before)
       << "the narrowed bake computed the folded Blur over its rectangle alone";
 
-  EXPECT_EQ(map_byte_at(after, 2048, 1000, 1000), 255)
+  EXPECT_EQ(map_byte_at(after, 2048, 1500, 1500), 255)
       << "the job wrote the footprint's rectangle alone; the sentinel outside it stands";
-  EXPECT_EQ(map_byte_at(read_map(*row->bake->coverage), 2048, 1000, 1000), 255)
+  EXPECT_EQ(map_byte_at(read_map(*row->bake->coverage), 2048, 1500, 1500), 255)
       << "the coverage write takes the same rectangle";
   EXPECT_NEAR(map_byte_at(after, 2048, 60, 60), map_byte_at(full, 2048, 60, 60), 3)
       << "the content inside the footprint matches a whole render";
   EXPECT_NEAR(map_byte_at(after, 2048, 514, 514), map_byte_at(full, 2048, 514, 514), 3)
       << "the halo just past the content's edge matches a whole render";
+  EXPECT_NEAR(map_byte_at(after, 2048, 900, 900), map_byte_at(full, 2048, 900, 900), 3)
+      << "the stack-scaled halo's outskirt matches a whole render too";
   EXPECT_NE(map_byte_at(after, 2048, 60, 60), 0)
       << "the edited content was re-rendered inside the footprint";
 }
@@ -3884,8 +3896,10 @@ TEST_F(PaintLayersOwnedEffectTest, a_full_update_re_renders_a_heavy_fill_row_in_
   ASSERT_NE(base_map, nullptr);
   ASSERT_NE(row->bake->coverage, nullptr);
   const Vector<uchar> before = read_map(*base_map);
-  write_map_rect(*base_map, rcti{1000, 1010, 1000, 1010}, 255);
-  write_map_rect(*row->bake->coverage, rcti{1000, 1010, 1000, 1010}, 255);
+  /* Sentinels outside the `[0, 1024)` write rect -- the footprint grown by the stack-scaled halo,
+   * the same rectangle the rewritten bounded-fill test above lands on. */
+  write_map_rect(*base_map, rcti{1500, 1510, 1500, 1510}, 255);
+  write_map_rect(*row->bake->coverage, rcti{1500, 1510, 1500, 1510}, 255);
 
   /* A full update carries no rectangle: the row is due again although its hash still matches, and
    * the job's full render takes the footprint alone. */
@@ -3900,9 +3914,9 @@ TEST_F(PaintLayersOwnedEffectTest, a_full_update_re_renders_a_heavy_fill_row_in_
   const Vector<uchar> after = read_map(*row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
   EXPECT_GT(paint_layer_effect_partial_compute_count(), partial_before)
       << "a full update still offers the footprint to the folded effect";
-  EXPECT_EQ(map_byte_at(after, 2048, 1000, 1000), 255)
+  EXPECT_EQ(map_byte_at(after, 2048, 1500, 1500), 255)
       << "the job's full render took the footprint's rectangle; the sentinel outside it stands";
-  EXPECT_EQ(map_byte_at(read_map(*row->bake->coverage), 2048, 1000, 1000), 255)
+  EXPECT_EQ(map_byte_at(read_map(*row->bake->coverage), 2048, 1500, 1500), 255)
       << "the coverage write takes the same rectangle";
   EXPECT_EQ(map_byte_at(after, 2048, 60, 60), map_byte_at(before, 2048, 60, 60))
       << "inside the footprint the re-render lays what the first bake laid";
@@ -4096,7 +4110,7 @@ TEST_F(PaintLayersOwnedEffectTest, a_partial_bake_keeps_the_effect_cache_unchang
 {
   MaterialPaintLayer *row = nullptr;
   Image *map = nullptr;
-  add_bounded_fill(&row, &map, 4.0f, 512, "PartialCache");
+  add_bounded_fill(&row, &map, 5.0f, 512, "PartialCache");
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(run_plan());
   ASSERT_NE(row->bake, nullptr);

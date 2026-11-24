@@ -238,29 +238,6 @@ bool cache_entry_ready(const LayerSourceKey &key)
   return entry != nullptr && !entry->stale;
 }
 
-/** The Material rows a row's content reads, whose renders must land before it can be composited. */
-void forced_rows_collect(const Material &ma,
-                         const MaterialPaintLayer &row,
-                         Vector<bUUID> &r_markers)
-{
-  if (BKE_paint_layers_material_row_render_forced_wanted(ma, row)) {
-    r_markers.append(row.marker);
-  }
-  for (const MaterialPaintLayer &effect : row.effects) {
-    if (BKE_paint_layers_material_row_render_forced_wanted(ma, effect)) {
-      r_markers.append(effect.marker);
-    }
-  }
-  for (const MaterialPaintLayer &item : row.mask_stack) {
-    if (BKE_paint_layers_material_row_render_forced_wanted(ma, item)) {
-      r_markers.append(item.marker);
-    }
-  }
-  for (const MaterialPaintLayer &child : row.children) {
-    forced_rows_collect(ma, child, r_markers);
-  }
-}
-
 void cache_trim_to_budget(const LayerSourceKey &keep)
 {
   int64_t total = 0;
@@ -496,7 +473,7 @@ EnsureResult ensure_row_bake(Main &bmain,
   }
 
   Vector<bUUID> forced;
-  forced_rows_collect(owner, *row, forced);
+  BKE_paint_layers_material_row_forced_collect(owner, *row, forced);
   if (!forced.is_empty()) {
     material_bake::material_bake_layered_rows_ensure(bmain, owner, false, forced);
     std::lock_guard lock(cache_mutex());

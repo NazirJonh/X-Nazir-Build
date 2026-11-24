@@ -1020,10 +1020,11 @@ bool paint_layers_maps_sync(Material &ma, Main &bmain)
       Image *wanted = (record != nullptr) ? record->image : nullptr;
       if (wanted == nullptr &&
           paint_layer_kind_has_flag(*layer, PAINT_LAYER_KIND_READS_SOURCE) &&
-          BKE_paint_layers_material_row_is_canvas(*layer))
+          BKE_paint_layers_material_row_reads_render(*layer))
       {
         /* A canvas Material row (a row, a correction, a mask item) shows the canvas map its bake
-         * holds; the role decides which channel that map is rendered into. */
+         * holds; the role decides which channel that map is rendered into. A narrowed Live row
+         * reads the same rendered result, so its image nodes follow it too. */
         wanted = paint_layer_material_canvas_image(ma, *layer, channel);
       }
       if (wanted == nullptr && layer->role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {

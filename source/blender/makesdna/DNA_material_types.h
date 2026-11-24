@@ -752,9 +752,10 @@ enum eMaterialPaintLayerMaterialScope : int8_t {
   MA_PAINT_LAYER_MATERIAL_SCOPE_MATERIAL = 0,
   /**
    * The isolated result of one stack row of the source (#MaterialPaintLayer::material_row_marker):
-   * a leaf lays its own result, a folder the composite of its children. The result is baked into
-   * the row's maps (there is no live form for a slice of another material's stack), so the row
-   * follows its source the way the maps of a rendered Normal do.
+   * a leaf lays its own result, a folder the composite of its children. The result is rendered
+   * into the row's maps in both canvas modes (there is no live form for a slice of another
+   * material's stack), so the row follows its source the way the maps of a rendered Normal do;
+   * #material_canvas_mode decides whether those maps are read at the row's UV or on a canvas.
    */
   MA_PAINT_LAYER_MATERIAL_SCOPE_ROW = 1,
 };
@@ -775,10 +776,16 @@ enum eMaterialPaintLayerSourceRefresh : int8_t {
 };
 
 /**
- * #MaterialPaintLayer::material_canvas_mode -- how a FULL-scope Material row shows its source.
- * Zero keeps the behaviour rows written before the field existed. A narrowed row
- * (#MA_PAINT_LAYER_MATERIAL_SCOPE_ROW) has no live form, so it always reads its maps and this
- * field means nothing to it.
+ * #MaterialPaintLayer::material_canvas_mode -- how a Material row shows its source. Zero is Live.
+ * A narrowed row (#MA_PAINT_LAYER_MATERIAL_SCOPE_ROW) reads the referenced row's rendered result in
+ * both modes: Live UV reads it at the row's UV, Canvas renders it into a canvas.
+ *
+ * Accepted behaviour change (not versioned): before narrowed rows had a Live mode, a narrowed row
+ * was always a canvas and its #material_canvas_mode meant nothing, so a file saved then holds zero
+ * for it. On load such a row now reads as Live -- its result at the row's UV, without the Mapping
+ * and the projections -- rather than as the canvas it used to be. This is deliberate: there is no
+ * versioning for paint layers, and a silent Live is the narrower, cheaper form of the same render.
+ * Only an explicit Canvas choice brings the canvas, the Mapping and the projections back.
  */
 enum eMaterialPaintLayerCanvasMode : int8_t {
   /** Live UV: the source's graph is evaluated as it is, at the active UV of its main path. */

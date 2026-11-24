@@ -798,6 +798,16 @@ bool source_group_structure_hash_get(bNodeTree &wrapper, uint64_t &r_hash);
  */
 bool source_group_normal_live(const Material &source);
 
+/**
+ * Whether the group of \a source exposes \a channel at all: the copy links only sockets of the
+ * tree it copies, so a channel whose feed on the Principled is reached through another Group node
+ * (or by nothing, or by a node the copy skips) has no output, and the map rendered from it stands
+ * in for it (see #source_group_follow_source). The one statement of the rule the wrapper builds
+ * by, so the planner that leaves a channel to the group and the group it builds cannot drift
+ * apart on it.
+ */
+bool source_group_channel_live(const Material &source, int channel);
+
 /** How a row maps its source group: whether the wrapper carries Mapping nodes, and which axes fold. */
 struct SourceGroupMapping {
   bool mapped = false;

@@ -13,6 +13,7 @@ from bl_ui.space_properties import PropertiesAnimationMixin
 
 from bl_ui.properties_paint_common import (
     _MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS,
+    _slot_row_button,
     draw_curve_patch_brush_drop_row,
     paint_shape_tool_active,
 )
@@ -824,6 +825,15 @@ bpy.types.WindowManager.material_layer_show_channel_overview = bpy.props.BoolPro
     default=False,
 )
 
+# The fold is on the WindowManager on purpose: it is a per-window view state, not a property of a
+# material or a row, and putting it in DNA would make it a saved, per-row setting the user did not
+# ask for. Being per-window (shared by every material drawn in it) is the accepted trade-off.
+bpy.types.WindowManager.material_layer_source_settings_expanded = bpy.props.BoolProperty(
+    name="Source Settings",
+    description="Show the scope, canvas mode and update controls of the source material",
+    default=False,
+)
+
 
 class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
     """The Layer Material tab for a layered material: the active layer read from the description,
@@ -1001,20 +1011,31 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
         if layer.source == 'MATERIAL':
             # The ID Browser popover: a grid with the Material asset libraries, instead of a plain
             # search list. A Material row always reads a material, so the built-in unlink and the
-            # user count are left out; the pointer's own poll and setter refuse a cycle.
-            layout.template_ID_browser(
+            # user count are left out; the pointer's own poll and setter refuse a cycle. The empty
+            # slot reads "Source Material" and takes a drop; Clear Source beside it lets go of the
+            # assigned one, the way a texture slot does. The fold chevron sits at the slot row's
+            # right edge like the Source Picker's grid toggle: the scope, canvas and update
+            # controls of the source stay behind it.
+            line = layout.row(align=True)
+            line.context_pointer_set("material_paint_layer_source_target", layer)
+            line.template_ID_browser(
                 layer, "material",
-                text="Source",
+                text="Source Material",
                 use_rename=False,
                 use_unlink=False,
                 use_users=False,
             )
-            if layer.material is None:
-                layout.label(text="No source material", icon='ERROR')
-            else:
-                # Whole material, or one stack row of it (a dynamic decal configured where it is
-                # built): the narrowed reference, its update setting and its state.
-                draw_material_layer_source_row(layout, context, layer)
+            if layer.material is not None:
+                clear = _slot_row_button(line)
+                clear.operator("material.paint_layer_source_material_clear", text="", icon='X')
+            wm = context.window_manager
+            fold = _slot_row_button(line)
+            fold.prop(wm, "material_layer_source_settings_expanded", text="",
+                      icon='DOWNARROW_HLT' if wm.material_layer_source_settings_expanded else 'RIGHTARROW',
+                      emboss=False)
+            # Whole material, or one stack row of it (a dynamic decal configured where it is
+            # built): the narrowed reference, its update setting and its state.
+            draw_material_layer_source_row(layout, context, layer, draw_fold=False)
             return
         # A generator is procedural: its kind, parameters and ramp replace the map controls. A
         # Gradient keeps its own panel; every other pattern draws the schema of its kind.

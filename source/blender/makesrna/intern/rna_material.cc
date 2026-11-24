@@ -1690,11 +1690,13 @@ static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
       BKE_report(reports, RPT_ERROR, "A Material layer needs the material it reads");
       return nullptr;
     }
+    /* The row reads the material it was given, the way the ID browser's slot assignment does: a
+     * copy would be another stack, and rows added to the picked material would never reach the
+     * row. #bmain stays unused here (no payload of this kind needs a database). */
     params.source = source_material;
-    /* Each Material row reads a material of its own, so its settings are its own. */
-    params.bmain = bmain;
   }
-  params.name = (name[0] != '\0') ? name : nullptr;
+  /* An unset optional string reaches the callback as null. */
+  params.name = (name != nullptr && name[0] != '\0') ? name : nullptr;
   /* An unset optional pointer reaches the callback as null, not as a null #PointerRNA. */
   params.anchor = (anchor_ptr != nullptr) ? static_cast<MaterialPaintLayer *>(anchor_ptr->data) :
                                             nullptr;
@@ -1794,8 +1796,9 @@ static void rna_Material_paint_layer_add_material_do(bContext *C,
   const bool mask = kind == PaintLayerAddKind::MaskCorrectionMaterial;
   PaintLayerAddParams params;
   params.kind = kind;
+  /* The row reads the picked material itself, the same as the slot assignment: a copy would be
+   * another stack, and rows added to the picked material would never reach the row. */
   params.source = source;
-  params.bmain = CTX_data_main(C);
   params.anchor = BKE_paint_layers_active_layer_get(*ma);
   MaterialPaintLayer *layer = BKE_paint_layers_add_with_policy(*ma, params);
   if (layer == nullptr) {
@@ -2995,7 +2998,9 @@ static void rna_MaterialPaintLayer_material_set(PointerRNA *ptr,
   }
   Material *source = static_cast<Material *>(value.data);
   if (source == nullptr) {
-    BKE_report(reports, RPT_ERROR, "A Material layer needs the material it reads");
+    /* Emptying the slot is a real state: the row stays a Material row and reads nothing until a
+     * source is picked again. */
+    BKE_paint_layers_material_clear(*ma, layer);
     return;
   }
   if (!BKE_paint_layers_set_material(*ma, layer, source)) {
@@ -3211,9 +3216,9 @@ static void rna_MaterialPaintLayer_material_canvas_mode_set(PointerRNA *ptr, int
   }
   layer->material_canvas_mode = int8_t(value);
   /* The other mode's cache describes it: a canvas the row stopped reading, or a live row that
-   * keeps none, so the bake goes the way a source change goes. A narrowed row reads its maps
-   * whatever the mode says, and its bake is the render it shows -- cleared all the same, since
-   * the switch is a request for another shape of the row. */
+   * keeps none, so the bake goes the way a source change goes. A narrowed row reads its rendered
+   * result in both modes, and that render is what it shows -- cleared all the same, since the
+   * switch is a request for another shape of the row. */
   if (Material *ma = rna_paint_layer_material(ptr, layer)) {
     if (layer->bake != nullptr) {
       BKE_paint_layers_bake_clear(*ma, *layer);
@@ -5428,7 +5433,7 @@ static MaterialPaintLayer *rna_MaterialPaintLayer_effect_add(PointerRNA ptr,
      * Outliner's Add does. */
     PaintLayerAddParams params;
     params.anchor = layer;
-    params.name = (name[0] != '\0') ? name : nullptr;
+    params.name = (name != nullptr && name[0] != '\0') ? name : nullptr;
     if (!rna_paint_layer_params_from_source(source, filter, generator, true, reports, params)) {
       return nullptr;
     }
@@ -5460,7 +5465,7 @@ static MaterialPaintLayer *rna_MaterialPaintLayer_mask_item_add(PointerRNA ptr,
                       PaintLayerAddKind::MaskCorrectionFill :
                       PaintLayerAddKind::MaskCorrection;
     params.anchor = layer;
-    params.name = (name[0] != '\0') ? name : nullptr;
+    params.name = (name != nullptr && name[0] != '\0') ? name : nullptr;
     if (MaterialPaintLayer *item = BKE_paint_layers_add_with_policy(*ma, params)) {
       return item;
     }
@@ -7500,8 +7505,8 @@ static const EnumPropertyItem rna_material_paint_layer_source_status_items[] = {
     {MA_PAINT_LAYER_SOURCE_STATUS_TOO_LARGE,
      "TOO_LARGE",
      0,
-     "Canvas Too Large",
-     "The canvas is larger than the ceiling the render makes, so no render was started"},
+     "Source Render Too Large",
+     "The row's render is larger than the ceiling the render makes, so no render was started"},
     {MA_PAINT_LAYER_SOURCE_STATUS_SOURCE_GONE,
      "SOURCE_GONE",
      0,
@@ -7515,7 +7520,8 @@ static const EnumPropertyItem rna_material_paint_layer_canvas_mode_items[] = {
      "LIVE",
      0,
      "Live UV",
-     "Instant: the source's graph is evaluated live at the active UV of its main shader path"},
+     "Read at the active UV of the main shader path: a whole material's graph is evaluated live "
+     "there, a narrowed row's rendered result is sampled there"},
     {MA_PAINT_LAYER_CANVAS_MODE_CANVAS,
      "CANVAS",
      0,
@@ -8002,8 +8008,11 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Source Status Text", "The status word for the source row");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, nullptr);
 
-  /* How a Full-Material row shows its source: live at the active UV, or rendered to the row's maps
-   * and read like an image (a Source Canvas). A narrowed row reads its maps whatever this says. */
+  /* How a Material row shows its source: live at the active UV, or rendered to the row's maps and
+   * read like an image (a Source Canvas). A narrowed row's source is the referenced row rendered
+   * whole in both modes; the mode only decides whether that render is read at the row's UV or laid
+   * on a canvas. Files saved before narrowed rows had a Live mode read such a row as Live (its
+   * zero means Live now) -- the accepted, unversioned change of meaning, not a lost canvas. */
   prop = RNA_def_property(srna, "material_canvas_mode", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_material_paint_layer_canvas_mode_items);
   RNA_def_property_enum_funcs(prop,
@@ -8012,8 +8021,10 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
                               nullptr);
   RNA_def_property_ui_text(prop,
                            "Canvas Mode",
-                           "Whether the source shows live at its own UVs, or is rendered to the "
-                           "row's canvas and read like an image");
+                           "Whether the source is read at the row's UVs, or rendered to the row's "
+                           "canvas and read like an image with the Mapping and the projections. A "
+                           "narrowed row reads the referenced row's result in both modes; a file "
+                           "saved before that choice existed reads such a row as Live");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "material_is_canvas", PROP_BOOLEAN, PROP_NONE);
@@ -8021,8 +8032,8 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop,
                            "Is Canvas",
-                           "The row reads its baked maps like an image: a narrowed row always "
-                           "does, a Full-Material row when its Canvas Mode is Canvas");
+                           "The row is rendered into a canvas and read like an image, with the "
+                           "Mapping and the projections, instead of being read live at its UV");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, nullptr);
 
   /* The side the canvas of a canvas row is made at, among the sides the ceiling offers. */

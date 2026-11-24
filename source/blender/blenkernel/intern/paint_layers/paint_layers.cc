@@ -2695,14 +2695,27 @@ bool BKE_paint_layers_material_row_narrowed(const MaterialPaintLayer &row)
 
 bool BKE_paint_layers_material_row_is_canvas(const MaterialPaintLayer &row)
 {
-  /* A narrowed row has no live form, so it always reads its maps; a FULL row reads them when the
-   * user switched it to Canvas. The one test of "this row reads its baked maps like an image":
-   * every reader that branches on it asks this, so a canvas that only some of them recognize
-   * cannot come apart. The scope question -- which source hash the render follows, where the
-   * render runs -- stays #BKE_paint_layers_material_row_narrowed's. */
-  return BKE_paint_layers_material_row_narrowed(row) ||
-         (row.source == MA_PAINT_LAYER_SOURCE_MATERIAL &&
-          row.material_canvas_mode == MA_PAINT_LAYER_CANVAS_MODE_CANVAS);
+  /* A Material row shows its source as a canvas when the user switched it to Canvas, whatever its
+   * scope: a narrowed row has no live source graph of its own, so its two modes both read the
+   * rendered result of the referenced row -- Live UV reads it at the row's UV, Canvas renders it
+   * into a canvas with the Mapping and the projections. The one test of "this row reads a canvas",
+   * so a mode that only some readers recognize cannot come apart. Which content the render follows
+   * -- the referenced row's result or the whole material -- and where it runs stay
+   * #BKE_paint_layers_material_row_narrowed's questions. */
+  return row.source == MA_PAINT_LAYER_SOURCE_MATERIAL &&
+         row.material_canvas_mode == MA_PAINT_LAYER_CANVAS_MODE_CANVAS;
+}
+
+bool BKE_paint_layers_material_row_reads_render(const MaterialPaintLayer &row)
+{
+  /* The one test of "this row shows the maps of its own render, not the source's live graph": the
+   * canvas reads it on a canvas, and a narrowed row reads it at its UV whatever its mode. Keeping
+   * the disjunction here -- and nowhere else -- is what keeps the two answers from coming apart:
+   * #BKE_paint_layers_material_row_is_canvas says only "read with an aspect and Mapping projections",
+   * #BKE_paint_layers_material_row_narrowed only "the source is one row", and every reader asks
+   * this one about what the row lays. */
+  return BKE_paint_layers_material_row_is_canvas(row) ||
+         BKE_paint_layers_material_row_narrowed(row);
 }
 
 const MaterialPaintLayer *BKE_paint_layers_source_row_find(const Material &source,
@@ -3617,10 +3630,12 @@ bool BKE_paint_layers_mapping_supported(const Material &ma, const MaterialPaintL
    * transform inside its wrapper. The source must exist; a material with no node tree has nothing
    * for the mapping to move. */
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
-    if (BKE_paint_layers_material_row_is_canvas(layer)) {
+    if (BKE_paint_layers_material_row_reads_render(layer))
+    {
       /* A canvas row reads its baked maps like an image at the row's UV: the Mapping moves that
        * read whatever the source's graph does, so the reads-UV check of a live row has no say
-       * here (the render does not follow the row's UV). The source must exist. */
+       * here (the render does not follow the row's UV). A narrowed Live row reads the same
+       * rendered result, so its Mapping has the same say. The source must exist. */
       return layer.material != nullptr;
     }
     return layer.material != nullptr && layer.material->nodetree != nullptr &&
@@ -4497,26 +4512,12 @@ bool BKE_paint_layers_fill_source_set(Material &ma,
    * them while the material is the source, so switching back restores what was there. They are
    * reported by the ID walk for any source, so their maps stay owned. */
   layer->source = target;
-  if (!use_material) {
-    /* The material is not kept: the ID walk reports the pointer of any row, so a Fill holding one
-     * would depend on a material it no longer reads, and a cycle through it would go unseen by the
-     * cycle test, which only follows Material rows. */
-    paint_layer_material_unlink(*layer);
-    layer->material_scope = MA_PAINT_LAYER_MATERIAL_SCOPE_MATERIAL;
-    layer->material_row_marker = {};
-    /* The canvas settings are the source's, of which a Fill has none: they go with the scope and
-     * the marker, so a return to Material starts from the defaults rather than carrying the canvas
-     * of a source the row no longer names. */
-    layer->material_canvas_mode = MA_PAINT_LAYER_CANVAS_MODE_LIVE;
-    layer->material_canvas_aspect = MA_PAINT_LAYER_CANVAS_ASPECT_SOURCE;
-    layer->material_canvas_size = 0;
-    layer->material_canvas_width = 0;
-    layer->material_canvas_height = 0;
-    /* The update policy is the source's too: a Fill follows nothing, and a return to Material
-     * starts from the default rather than carrying a Manual the user set for a source it no longer
-     * names ("starts from the defaults", as the docstring says). */
-    layer->source_refresh = MA_PAINT_LAYER_SOURCE_REFRESH_AUTO;
-  }
+  /* The reference is kept too, along with the scope, the marker, the canvas settings and the
+   * update policy it goes with: the Maps | Material flip is a view over one row, and switching
+   * back brings the material back as it was named. The ID walk reports the pointer of any row, so
+   * a Fill holding one stays remap-safe, and the cycle test follows any row that holds a material
+   * (see #paint_layers_list_reads_material), so a dependency the held pointer creates is one the
+   * test sees. */
   if (!use_material && paint_layer_channel_find(*layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR) ==
                            nullptr)
   {
@@ -4580,13 +4581,17 @@ bool BKE_paint_layers_mesh_map_type_set(Material &ma,
  * Whether a Material row of \a list or of what it holds reads \a target, through any depth.
  * \a visited keeps the walk finite and linear when the descriptions are not the acyclic graph the
  * edit paths keep them in (an ID remap, such as merging materials, can bypass those checks).
+ *
+ * Any row that holds a material counts, not only a Material row: a Fill keeping its reference
+ * across the Maps | Material flip holds one it does not read, and the ID walk reports that
+ * pointer, so the dependency -- and with it a cycle it could close -- is real while it is held.
  */
 static bool paint_layers_list_reads_material(const ListBaseT<MaterialPaintLayer> &list,
                                              const Material &target,
                                              Set<const Material *> &visited)
 {
   for (const MaterialPaintLayer &layer : list) {
-    if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer.material != nullptr) {
+    if (layer.material != nullptr) {
       if (layer.material == &target) {
         return true;
       }
@@ -4713,6 +4718,32 @@ bool BKE_paint_layers_set_material(Material &ma, MaterialPaintLayer *layer, Mate
   if (BKE_paint_layers_source_row_find(*source, layer->material_row_marker) == nullptr) {
     layer->material_row_marker = {};
   }
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
+bool BKE_paint_layers_material_clear(Material &ma, MaterialPaintLayer *layer)
+{
+  /* A row of the stack, a content correction or a mask correction: the slot the ID browser
+   * assigns exists on each of them. */
+  if (layer == nullptr || !paint_layer_in_stack_or_effect(ma, layer) ||
+      layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL)
+  {
+    return false;
+  }
+  if (layer->material == nullptr && BLI_uuid_is_nil(layer->material_row_marker)) {
+    return true;
+  }
+  paint_layer_material_unlink(*layer);
+  /* The maps are the old source's render and nothing reads them any more: the slot being empty is
+   * the legal "no source chosen" state, and holding another material's pixels until the next bake
+   * clear is neither useful nor expected. The status is computed, not stored, and reports OK for an
+   * empty slot (#BKE_paint_layers_material_source_status). */
+  BKE_paint_layers_bake_clear(ma, *layer);
+  /* A marker names a row of the material it was picked from: kept past the material, it would name
+   * whatever another stack happens to keep at it -- the same let-go a new material does in
+   * #BKE_paint_layers_set_material. */
+  layer->material_row_marker = {};
   BKE_paint_layers_tag_edited(ma);
   return true;
 }

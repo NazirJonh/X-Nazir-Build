@@ -211,9 +211,9 @@ struct PaintLayerAddParams {
    * Add reads. */
   Material *source = nullptr;
   /**
-   * When set, a #PaintLayerAddKind::Material row reads a local copy of \a source made in this
-   * database rather than \a source itself: each row then has settings of its own, and a linked
-   * source becomes editable. Null makes the row share \a source.
+   * The database the payload kinds create their IDs in: a Curve Patch effect's curve container, a
+   * Text Decal's Base Color map. A Material row no longer reads a copy of \a source through it --
+   * the row reads \a source itself, so rows added to it afterwards are the stack the row offers.
    */
   Main *bmain = nullptr;
   /**

@@ -20,7 +20,6 @@
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 
-#include "BKE_lib_id.hh"
 #include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_gradient.hh"
 
@@ -599,19 +598,16 @@ static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
   }
   if (params.kind == PaintLayerAddKind::Material) {
     /* A material row owns no channel records: it lays what its source shows. The source was checked
-     * above, so the row never exists without one. */
+     * above, so the row never exists without one. The row reads the material itself, not a copy:
+     * rows added to that material afterwards are the source's live stack, which a copy would not
+     * see. #PaintLayerAddParams::bmain is the payload database of the kinds that need one. */
     created->source = MA_PAINT_LAYER_SOURCE_MATERIAL;
-    Material *source = params.source;
-    if (params.bmain != nullptr) {
-      /* The copy is made once the row exists, so a refused Add leaves no orphan behind. */
-      if (Material *copy = id_cast<Material *>(BKE_id_copy(params.bmain, &params.source->id))) {
-        source = copy;
-      }
-    }
-    BKE_paint_layers_set_material(ma, created, source);
-    if (source != params.source) {
-      /* The copy was made with one user, which the row now holds in its place. */
-      id_us_min(&source->id);
+    if (!BKE_paint_layers_set_material(ma, created, params.source)) {
+      /* The source passed the issue check above, so a refusal here is the row not being a place a
+       * material can be set -- a half-valid Material row without a material is a state the rest of
+       * the code treats as impossible, so drop the row rather than leave it. */
+      BKE_paint_layers_remove(ma, created);
+      return nullptr;
     }
     return created;
   }

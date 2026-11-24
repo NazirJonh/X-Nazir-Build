@@ -2599,12 +2599,14 @@ bool BKE_paint_layers_set_source(Material &ma,
 /**
  * Switch a stack row between the two ways a Fill takes its channel content from: its own maps and
  * values (#MA_PAINT_LAYER_SOURCE_CONSTANT, \a use_material false) and another material
- * (#MA_PAINT_LAYER_SOURCE_MATERIAL, \a use_material true). The records and their maps stay in the
- * row through both switches, so going to a material and back restores the Fill. The picked material
- * does not: it is let go when the row becomes a Fill again (with its scope and row marker), because
- * the ID walk reports the pointer of any row and a Fill must not depend on a material it does not
- * read. A row that was added as a Material row has no records and gets a Base Color one when it
- * becomes a Fill. Refused for a folder and for any other source.
+ * (#MA_PAINT_LAYER_SOURCE_MATERIAL, \a use_material true). Both sides are kept through the switch,
+ * so going to a material and back restores the Fill as it was: the records and their maps, and the
+ * picked material with its scope, row marker, canvas settings and update policy. The flip is a view
+ * over one row, not a change of what the row depends on -- a Fill that holds a material keeps
+ * depending on it, which the ID walk reports (it reports the pointer of any row) and the cycle test
+ * follows (it follows any row that holds one), so no dependency goes unseen while it is held. A row
+ * that was added as a Material row has no records and gets a Base Color one when it becomes a Fill.
+ * Refused for a folder and for any other source.
  */
 bool BKE_paint_layers_fill_source_set(Material &ma, MaterialPaintLayer *layer, bool use_material);
 
@@ -2683,6 +2685,17 @@ PaintLayerImageMapIssue BKE_paint_layers_row_image_map_issue(const MaterialPaint
  * every walk over the sources would never end.
  */
 bool BKE_paint_layers_set_material(Material &ma, MaterialPaintLayer *layer, Material *source);
+
+/**
+ * Empty the slot of the Material row \a layer: the reference is let go, and the narrowed marker
+ * with it -- a marker names a row of the material it was picked from, so one that outlives the
+ * material would name whatever another stack happens to keep at it. The scope and the canvas
+ * settings stay: they say how the row reads a source, not which one, so a material picked into the
+ * emptied slot resumes the reading the row was set up for. The row's maps are cleared with the
+ * reference: they are the old source's render and nothing reads them any more. True for a Material
+ * row of \a ma, even when its slot was empty already.
+ */
+bool BKE_paint_layers_material_clear(Material &ma, MaterialPaintLayer *layer);
 
 /**
  * Whether a mask correction that reads a material can take its grey from \a channel: a colour or a
@@ -2783,29 +2796,40 @@ const MaterialPaintLayer *BKE_paint_layers_source_row_find(const Material &sourc
 /**
  * Whether the Material row \a row reads one stack row of its source rather than the source whole
  * (#MA_PAINT_LAYER_MATERIAL_SCOPE_ROW). A narrowed row has no live form for the source's part: its
- * maps are always the render of the referenced row's content, so nothing resolves the source's
- * graph and no group of it is ever copied. The one test of the narrowed scope: every reader that
- * branches on it asks this, so a scope that only some of them recognize cannot come apart.
+ * maps are always the render of the referenced row's content -- in both canvas modes -- so nothing
+ * resolves the source's graph and no group of it is ever copied. The one test of the narrowed
+ * scope: every reader that branches on it asks this, so a scope that only some of them recognize
+ * cannot come apart.
  */
 bool BKE_paint_layers_material_row_narrowed(const MaterialPaintLayer &row);
 
 /**
- * Whether the Material row \a row reads its baked maps like an image (a Source Canvas): a narrowed
- * row always does (it has no live form), and a FULL row does when its
- * #MA_PAINT_LAYER_CANVAS_MODE is Canvas. What a canvas row lays comes from #MaterialPaintLayerBake
- * alone -- the source's graph is never resolved -- so the Mapping and the projections apply to it
- * whatever its role (row, correction, mask item), and the row's canvas is asked with
- * #BKE_paint_layers_material_canvas_size. A Live FULL row is not a canvas: its source graph is
- * evaluated as it is. The scope question -- which source hash the render follows, where the render
- * runs -- stays #BKE_paint_layers_material_row_narrowed's.
+ * Whether the Material row \a row reads a Source Canvas: its #MA_PAINT_LAYER_CANVAS_MODE is Canvas.
+ * What a canvas row lays comes from #MaterialPaintLayerBake alone -- the source's graph is never
+ * resolved -- so the Mapping and the projections apply to it whatever its role (row, correction,
+ * mask item), and the row's canvas is asked with #BKE_paint_layers_material_canvas_size. A Live row
+ * is not a canvas: a FULL one evaluates its source graph; a narrowed one reads the same rendered
+ * row result at the row's UV. The scope question -- which source hash the render follows, where the
+ * render runs -- stays #BKE_paint_layers_material_row_narrowed's.
  */
 bool BKE_paint_layers_material_row_is_canvas(const MaterialPaintLayer &row);
 
 /**
- * The content fold of one stack row of \a owner: its structural bake hash
- * (#BKE_paint_layers_bake_hash) with the mapping values of the row and of everything under it, and
- * a nested Material row's source tree hash, folded in. One formula for every reader that bakes a
- * row's content with its mapping applied -- the narrowed Material row
+ * Whether the Material row \a row lays the maps of its own render rather than the source's live
+ * graph: a canvas row (#BKE_paint_layers_material_row_is_canvas) reads its baked maps with an aspect
+ * and the Mapping and the projections, and a narrowed row (#BKE_paint_layers_material_row_narrowed)
+ * reads the referenced row's rendered result at its UV in both of its modes. The one test of "what
+ * this row shows": every reader that asks whether the row reads a render asks this, so a mode or a
+ * role that only some readers recognize cannot come apart. The two predicates above answer narrower
+ * questions and must not be paired by hand to reconstruct this one.
+ */
+bool BKE_paint_layers_material_row_reads_render(const MaterialPaintLayer &row);
+
+/**
+ * The content fold of one stack row of \a owner: its whole-row bake hash
+ * (#BKE_paint_layers_bake_hash_row_whole) with the mapping values of the row and of everything under
+ * it, and a nested Material row's source tree hash, folded in. One formula for every reader that
+ * bakes a row's content with its mapping applied -- the narrowed Material row
  * (#BKE_paint_layers_source_row_content_hash) and the brush's layer source
  * (#BKE_brush_layer_source_content_hash) -- so their keys cannot drift apart. It names no marker: a
  * caller that addresses the row by marker folds that in beside this.
@@ -2815,9 +2839,10 @@ uint64_t BKE_paint_layers_source_row_content_fold(const Material &owner,
 
 /**
  * The content hash of what a #MA_PAINT_LAYER_SOURCE_MATERIAL row narrowed to one stack row
- * (#MA_PAINT_LAYER_MATERIAL_SCOPE_ROW) reads: the structural bake hash of the row's subtree (the
- * row, its corrections, its mask items, its children) with the mapping values of everything under
- * it, folded with the marker itself. Pixels are deliberately absent: image edits are tracked by
+ * (#MA_PAINT_LAYER_MATERIAL_SCOPE_ROW) reads: the whole-row bake hash of the row's subtree (the
+ * row, its corrections, its mask items, its children -- mask, opacity, blend and visibility
+ * included, the way the row is rendered) with the mapping values of everything under it, folded
+ * with the marker itself. Pixels are deliberately absent: image edits are tracked by
  * the bake's pixel subscription, not by hashing. Zero when the marker resolves to nothing (the
  * "no bake possible" state, like the brush source's). A walk over the subtree, so not for per-texel
  * callers; asked per row at the render's stamp and the staleness test, on the main thread.
@@ -2918,6 +2943,19 @@ bool BKE_paint_layers_material_row_needs_render(const Material &ma, const Materi
  */
 bool BKE_paint_layers_material_row_render_forced_wanted(const Material &ma,
                                                         const MaterialPaintLayer &row);
+
+/**
+ * Collect the markers of \a row, its corrections and mask items, and the rows inside it (a folder's
+ * children) whose maps have to be rendered before they are read
+ * (#BKE_paint_layers_material_row_render_forced_wanted). The row's own content is what its readers
+ * render, so the rows beside it in the same list are not part of the walk. This is the one walk
+ * every consumer of a row's result shares -- the "Use Row Result" job, the brush's layer source and
+ * the narrowed row's forced render -- so the set they force cannot drift apart. \a r_markers is a
+ * set for every caller: order is not significant, but duplicates are not removed here.
+ */
+void BKE_paint_layers_material_row_forced_collect(const Material &ma,
+                                                  const MaterialPaintLayer &row,
+                                                  Vector<bUUID> &r_markers);
 
 /**
  * Whether the maps of the Material row \a layer no longer describe its source: it has none yet, the
@@ -3548,6 +3586,19 @@ void BKE_paint_layers_bake_hash(const Material &ma,
                                 uint32_t r_hash[2]);
 
 /**
+ * The hash of \a layer as a whole row, the key a reader of the row's finished picture follows: its
+ * mask, its opacity, its blend, its visibility and its per-channel settings are inside the result,
+ * the way a child of another row's bake holds them. #BKE_paint_layers_bake_hash is the row's own
+ * cache key, which leaves those live when the row bakes its content alone, so it cannot answer for
+ * a reader that shows the row whole -- the narrowed Material row's source, the brush's row source.
+ * A Material row combines both halves: its source, size and channel set (the structural hash) with
+ * its own corrections, mask and live factors. Pixels are absent here; they are the subscription's
+ * business.
+ */
+uint64_t BKE_paint_layers_bake_hash_row_whole(const Material &ma,
+                                              const MaterialPaintLayer &layer);
+
+/**
  * What a bake of a row holds, the one question the hash, the subscription, the render, the
  * substitution and the graph all ask, so they cannot disagree about it. The semantics of the
  * content answer are #paint_layer_row_bakes_content's.
@@ -3564,8 +3615,10 @@ enum class PaintLayerBakeScope {
 /**
  * Every map \a layer's bake reads: its own channel maps and those of its corrections, mask items
  * and children. A Material row reads the images of its source's node trees when its own bake is
- * the question (\a scope not #PaintLayerBakeScope::Child), and the maps it shows when it is a
- * child of the row being baked.
+ * the question (\a scope not #PaintLayerBakeScope::Child), the maps it shows when it is a child of
+ * the row being baked, and -- narrowed to one stack row -- every map a whole-row render of the
+ * referenced row reads (its channels, its corrections, its mask and its children, its own bake maps
+ * among them), so a stroke into any of them reaches the row's maps.
  *
  * Shared with consumers that cache a render of the row outside the planner, so a pixel edit marks
  * their cache stale exactly as it would the row's own bake.
@@ -3579,6 +3632,18 @@ void BKE_paint_layers_bake_collect_source_images(const Material &ma,
                                                  Vector<Image *> &r_images,
                                                  PaintLayerBakeScope scope =
                                                      PaintLayerBakeScope::WholeRow);
+
+/**
+ * Every map a whole-row render of \a row reads: its channels, its corrections, its mask items and
+ * its children, and the maps its own bake holds -- the picture a reader of the row shows. The set
+ * the brush's row source watches, and the one a narrowed Material row's source subscription
+ * collects: #BKE_paint_layers_bake_collect_source_images leaves a Material row's own mask and
+ * corrections out, as they are live over its cache, and a whole-row reader has no live layer to lay
+ * them over the maps it reads.
+ */
+void BKE_paint_layers_bake_collect_row_tree_images(const Material &ma,
+                                                   const MaterialPaintLayer &row,
+                                                   Vector<Image *> &r_images);
 
 /**
  * Why a row standing in for Object or Generated Gradient geometry cannot be baked for the objects

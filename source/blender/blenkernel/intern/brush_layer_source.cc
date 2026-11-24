@@ -71,7 +71,10 @@ void BKE_brush_layer_source_images_collect(const Material &owner,
   if (scope == BRUSH_MATERIAL_PAINT_LAYER_SOURCE_SCOPE_ROW) {
     const MaterialPaintLayer *row = BKE_paint_layers_source_row_find(owner, marker);
     if (row != nullptr) {
-      BKE_paint_layers_bake_collect_source_images(owner, *row, r_images);
+      /* The brush bakes the row as it looks, so its own corrections, mask and children are part of
+       * what the bake reads -- a Material row's own collector stops at its source and would leave
+       * them out. */
+      BKE_paint_layers_bake_collect_row_tree_images(owner, *row, r_images);
     }
     return;
   }

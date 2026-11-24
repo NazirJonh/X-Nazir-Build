@@ -337,9 +337,10 @@ void paint_source_status_slot_append(const Material &material,
  * resolves the row again from the owner's session uid and the row's marker. An identity, not a
  * pointer: the row can be rebuilt, or the DNA moved by undo, between this build and the click.
  *
- * The mode is a FULL row's choice (a narrowed row has no live form), and the size only means
- * something once the row reads a canvas, so those buttons appear with the state they act on. The
- * tooltip names the state the row is in and what the click switches it to.
+ * Every Material row chooses its mode; a narrowed row's render is the referenced row whole in
+ * either one. The size only means something once the row reads a canvas, so that button appears
+ * with the state it acts on. The tooltip names the state the row is in and what the click switches
+ * it to.
  */
 void paint_source_controls_append(StackRow &row,
                                   const Material &material,
@@ -372,15 +373,15 @@ void paint_source_controls_append(StackRow &row,
       narrowed,
       narrowed ? TIP_("Source: one row of the material. Click for the whole material") :
                  TIP_("Source: the whole material. Click for one row of its stack"));
-  if (!narrowed) {
-    add("MATERIAL_OT_paint_layer_source_canvas_toggle",
-        canvas ? ICON_IMAGE_DATA : ICON_UV,
-        canvas,
-        canvas ?
-            TIP_("Source: rendered to a canvas, with the Mapping and the projections. Click for "
-                 "Live UV") :
-            TIP_("Source: live at the active UV. Click to render it to a canvas"));
-  }
+  /* A narrowed row has both modes too: its source is the referenced row rendered whole, and the
+   * mode decides whether that render is read at the row's UV or laid on a canvas. */
+  add("MATERIAL_OT_paint_layer_source_canvas_toggle",
+      canvas ? ICON_IMAGE_DATA : ICON_UV,
+      canvas,
+      canvas ?
+          TIP_("Source: rendered to a canvas, with the Mapping and the projections. Click for "
+               "Live UV") :
+          TIP_("Source: read at the active UV. Click to render it to a canvas"));
   if (canvas) {
     const std::string size = (item.material_canvas_size == 0) ?
                                  TIP_("Inherit") :
@@ -2906,8 +2907,6 @@ class PaintLayersStackSource final : public StackSource,
         return -1;
       }
       params.source = id_cast<Material *>(args.source);
-      /* Each Material row reads a material of its own, so its settings are its own. */
-      params.bmain = CTX_data_main(&C);
     }
     params.kind = add_kind;
     if (params.kind == PaintLayerAddKind::CurvePatchEffect) {

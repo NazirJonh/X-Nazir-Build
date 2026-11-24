@@ -1105,10 +1105,11 @@ bool BKE_paint_layers_source_reads_uv(const Material &source)
 /** \name Narrowed source row hash
  *
  * The content hash a #MA_PAINT_LAYER_MATERIAL_SCOPE_ROW Material row reads: one stack row of the
- * source, its subtree hashed the way a bake of that row would be made. The brush's layer source
- * (`brush_layer_source.cc`), whose narrowing of one material is the oldest form of this, reads the
- * same fold (#BKE_paint_layers_source_row_content_fold) from here, so the two keys cannot drift
- * apart; kept beside the other source hashes so the regen point and the render stamp read one
+ * source, its subtree hashed the way that row is rendered whole -- its mask, its opacity, its blend
+ * and its visibility inside the picture, whatever the row's own bake would hold. The brush's layer
+ * source (`brush_layer_source.cc`), whose narrowing of one material is the oldest form of this,
+ * reads the same fold (#BKE_paint_layers_source_row_content_fold) from here, so the two keys cannot
+ * drift apart; kept beside the other source hashes so the regen point and the render stamp read one
  * formula.
  * \{ */
 
@@ -1167,9 +1168,10 @@ void BKE_paint_layers_source_row_hash_memo_drop()
 uint64_t BKE_paint_layers_source_row_content_fold(const Material &owner,
                                                   const MaterialPaintLayer &row)
 {
-  uint32_t hash[2];
-  BKE_paint_layers_bake_hash(owner, row, hash);
-  return source_row_mapping_hash(owner, row, (uint64_t(hash[1]) << 32) | uint64_t(hash[0]));
+  /* The reader shows the row whole: the hash is the whole-row one, so an edit of the row's mask, its
+   * opacity, its blend or its visibility moves the key even where the row's own bake would hold its
+   * content alone. */
+  return source_row_mapping_hash(owner, row, BKE_paint_layers_bake_hash_row_whole(owner, row));
 }
 
 uint64_t BKE_paint_layers_source_row_content_hash(const Material &source, const bUUID &marker)

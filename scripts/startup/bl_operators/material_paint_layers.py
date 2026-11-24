@@ -715,14 +715,23 @@ class MATERIAL_OT_paint_layers_output_render(Operator):
 # The rows offered by the open search popup. Kept at module level because the enum items callback
 # has to return strings that stay alive, and the popup is built after #invoke has returned.
 _brush_source_row_cache = []
-# (name, library path) of the brush whose Layer source row the open popup assigns.
-_brush_source_row_target = None
-# The Shape row uses the same operator. Only the identity of the part is kept ('FILL' or 'STROKE'):
-# the wrapped DNA address can move (undo, file load, scene change) between #invoke and #execute.
-_shape_source_texture_part = None
+# The Shape row uses the same operator; which part was clicked ('FILL' or 'STROKE') travels on the
+# operator's `shape_part` property, like the material owner does, so the global that used to hold it
+# is gone with the other module-level targets.
 
 
 def _brush_source_row_items(_self, _context):
+    # Re-walked at every collection, not just at #invoke: the search popup re-collects on every
+    # keystroke, and the search copies the names out (search_item_add), so replacing the strings
+    # here is safe -- the module list only has to outlive one collection. The owner is named by the
+    # operator's own properties (the popup copies them), so two open pickers do not share a target.
+    _brush_source_row_cache.clear()
+    owner = _material_by_identity(
+        (getattr(_self, "owner_name", ""),
+         getattr(_self, "owner_library", ""),
+         getattr(_self, "owner_uid", 0)))
+    if owner is not None and owner.is_layered:
+        _source_row_collect(owner.paint_layers, 0, _brush_source_row_cache)
     return _brush_source_row_cache
 
 
@@ -749,7 +758,9 @@ def find_layer_by_marker(rows, marker, include_corrections=False):
         if found is not None:
             return found
         if include_corrections:
-            for sub in (row.effects, row.mask_stack):
+            # The RNA name of the DNA field #MaterialPaintLayer::mask_stack is mask_items, so the
+            # struct reads it from Python under that name.
+            for sub in (row.effects, row.mask_items):
                 found = find_layer_by_marker(sub, marker, True)
                 if found is not None:
                     return found
@@ -765,33 +776,41 @@ class PAINT_OT_brush_layer_source_row_search(Operator):
     bl_property = "row"
 
     row: bpy.props.EnumProperty(name="Row", items=_brush_source_row_items)
+    # The popup's target, on the operator itself: the search popup copies the operator's
+    # properties, so each open picker keeps its own owner and brush. Identities are runtime ones --
+    # a datablock pointer is not allowed on an operator -- so the name, the library and the owner's
+    # session uid name the material, and the brush is named by name and library.
+    owner_name: bpy.props.StringProperty()
+    owner_library: bpy.props.StringProperty()
+    owner_uid: bpy.props.IntProperty()
+    brush_name: bpy.props.StringProperty()
+    brush_library: bpy.props.StringProperty()
+    shape_part: bpy.props.StringProperty()
 
     def execute(self, context):
         # The popup runs outside the button that opened it, so the layout's context pointer is
         # gone by now. A Shape target is only the part's identity, re-resolved here; a brush
-        # target is looked up again from its identity.
-        global _shape_source_texture_part
-        if _shape_source_texture_part is not None:
+        # target is looked up again from the identity the operator carries.
+        part = self.shape_part
+        if part:
             # Imported here rather than at module level: `bl_operators` modules load early, and
             # this keeps the bl_ui import (and its cost) out of startup.
             from bl_ui.properties_paint_common import paint_shape_settings
-            part = _shape_source_texture_part
-            _shape_source_texture_part = None
             if not self.row:
                 return {'CANCELLED'}
             shape = paint_shape_settings(context)
             tex = shape.stroke_texture if part == 'STROKE' else shape.fill_texture
             tex.layer_marker = self.row
             return {'FINISHED'}
-        brush = bpy.data.brushes.get(_brush_source_row_target) if _brush_source_row_target else None
+        brush = _brush_by_identity(
+            (self.brush_name, self.brush_library)) if self.brush_name else None
         if brush is None or brush.material_paint is None or not self.row:
             return {'CANCELLED'}
         brush.material_paint.source_layer_marker = self.row
         return {'FINISHED'}
 
     def invoke(self, context, _event):
-        global _brush_source_row_target, _shape_source_texture_part
-        _shape_source_texture_part = None
+        self.shape_part = ""
         shape_texture = getattr(context, "shape_texture", None)
         brush_paint = None if shape_texture is not None else \
             getattr(context, "brush_material_paint", None)
@@ -805,21 +824,24 @@ class PAINT_OT_brush_layer_source_row_search(Operator):
             shape = paint_shape_settings(context)
             pointer = shape_texture.as_pointer()
             if shape.fill_texture.as_pointer() == pointer:
-                _shape_source_texture_part = 'FILL'
+                self.shape_part = 'FILL'
             elif shape.stroke_texture.as_pointer() == pointer:
-                _shape_source_texture_part = 'STROKE'
+                self.shape_part = 'STROKE'
             else:
                 return {'CANCELLED'}
             owner = shape_texture.layer_owner
         elif brush_paint is not None:
             brush = brush_paint.id_data
-            _brush_source_row_target = (brush.name, brush.library.filepath if brush.library else None)
+            self.brush_name = brush.name
+            self.brush_library = brush.library.filepath if brush.library else ""
             owner = brush_paint.source_layer_owner
         else:
             return {'CANCELLED'}
-        _brush_source_row_cache.clear()
-        if owner is not None and owner.is_layered:
-            _source_row_collect(owner.paint_layers, 0, _brush_source_row_cache)
+        # The owner material's identity, so #_brush_source_row_items re-resolves it at every
+        # collection from the live stack -- nothing is snapshotted here.
+        self.owner_name = owner.name if owner is not None else ""
+        self.owner_library = owner.library.filepath if owner is not None and owner.library else ""
+        self.owner_uid = owner.session_uid if owner is not None else 0
         context.window_manager.invoke_search_popup(self)
         return {'CANCELLED'}
 
@@ -830,13 +852,76 @@ class PAINT_OT_brush_layer_source_row_search(Operator):
 # has to return strings that stay alive, and the popup is built after #invoke has returned -- the
 # same scheme the brush's search runs on.
 _mat_source_row_cache = []
-# (material name, library path or None, marker) of the Material row whose source row the open popup
-# names. Identities, not wrappers: the popup runs outside the button, and undo can move the DNA
-# between #invoke and #execute.
-_mat_source_row_target = None
+
+
+def _material_by_session_uid(session_uid):
+    """The material a runtime identity names, or None. The session uid is unique while the blend is
+    loaded, unlike a name two datablocks can share, and it survives an undo. This is the O(n)
+    fallback; a caller that knows the name reaches the datablock in O(1) first
+    (#_material_by_identity)."""
+    if not session_uid:
+        return None
+    for candidate in bpy.data.materials:
+        if candidate.session_uid == session_uid:
+            return candidate
+    return None
+
+
+def _brush_by_identity(identity):
+    """The brush a (name, library path) identity names, or None."""
+    if identity is None:
+        return None
+    name, library_path = identity
+    if not name:
+        return None
+    return bpy.data.brushes.get((name, library_path or None))
+
+
+# (material name, library path or None, session uid) of a material the open popup names. The uid
+# is what tells two datablocks with one name apart and survives an undo that moves the DNA; the name
+# and library are the fallback for a material the uid no longer finds. The session uid is the
+# runtime identity an operator may keep, unlike a Python wrapper, which an undo invalidates.
+def _material_by_identity(identity):
+    if identity is None:
+        return None
+    name, library_path, session_uid = identity
+    # O(1) in the typical case: the name and library name one datablock, and the uid says whether
+    # it is still the one the popup was opened for. A renamed or relinked datablock falls back to
+    # the walk by uid below.
+    ma = bpy.data.materials.get((name, library_path or None))
+    if ma is not None and ma.session_uid == session_uid:
+        return ma
+    return _material_by_session_uid(session_uid)
 
 
 def _mat_source_row_items(_self, _context):
+    # Re-walked at every collection, not just at #invoke: the search popup re-collects on every
+    # keystroke, and a stack edited in another window while the popup stays open is already in the
+    # DNA this reads. The search copies the names out (search_item_add), so replacing the strings
+    # here is safe -- the module list only has to outlive one collection.
+    _mat_source_row_cache.clear()
+    # The operator carries the row it was opened for, by its owner's identity and marker: the
+    # search popup copies the operator's properties, so two open pickers keep their own target.
+    owner = _material_by_identity(
+        (getattr(_self, "owner_name", ""),
+         getattr(_self, "owner_library", ""),
+         getattr(_self, "owner_uid", 0)))
+    marker = getattr(_self, "owner_marker", "")
+    source_ma = None
+    if owner is not None and marker:
+        # The owner row is the live truth: the slot may have been re-pointed since #invoke, and the
+        # list should offer whatever the row reads now.
+        layer = find_layer_by_marker(owner.paint_layers, marker, True)
+        if layer is not None:
+            source_ma = layer.material
+    if source_ma is None:
+        # No owner row to ask: the source the popup was opened for still names the stack to offer.
+        source_ma = _material_by_identity(
+            (getattr(_self, "source_name", ""),
+             getattr(_self, "source_library", ""),
+             getattr(_self, "source_uid", 0)))
+    if source_ma is not None:
+        _source_row_collect(source_ma.paint_layers, 0, _mat_source_row_cache)
     return _mat_source_row_cache
 
 
@@ -848,20 +933,32 @@ class MATERIAL_OT_paint_layer_source_row_search(Operator):
     bl_property = "row"
 
     row: bpy.props.EnumProperty(name="Row", items=_mat_source_row_items)
+    # The target of this popup, on the operator itself: the search popup copies the operator's
+    # properties, so each open picker keeps its own source and owner instead of sharing module
+    # globals with another one. The identities are runtime ones -- a datablock pointer is not
+    # allowed on an operator (an operator has no ID properties that can own a data-block), so the
+    # names, libraries and session uids name the materials, and the marker names the row.
+    source_name: bpy.props.StringProperty()
+    source_library: bpy.props.StringProperty()
+    source_uid: bpy.props.IntProperty()
+    owner_name: bpy.props.StringProperty()
+    owner_library: bpy.props.StringProperty()
+    owner_uid: bpy.props.IntProperty()
+    owner_marker: bpy.props.StringProperty()
 
     def execute(self, context):
         # The popup runs outside the button that opened it, so the layer is looked up again from
-        # the identities #invoke stored (the same reason the brush's search keeps them). The
-        # material is resolved by name and library together: two materials can carry one name when
-        # they come from different libraries, and the popup named the one it was opened for.
-        global _mat_source_row_target
-        target = _mat_source_row_target
-        _mat_source_row_target = None
-        if target is None or not self.row:
+        # the identities the operator carries (the same reason the brush's search keeps them). The
+        # session uid names the material the popup was opened for even when another datablock
+        # carries its name, and survives an undo.
+        marker = getattr(self, "owner_marker", "")
+        ma = _material_by_identity(
+            (getattr(self, "owner_name", ""),
+             getattr(self, "owner_library", ""),
+             getattr(self, "owner_uid", 0)))
+        if ma is None or not marker or not self.row:
             return {'CANCELLED'}
-        name, library_path, marker = target
-        ma = bpy.data.materials.get((name, library_path))
-        layer = None if ma is None else find_layer_by_marker(ma.paint_layers, marker, True)
+        layer = find_layer_by_marker(ma.paint_layers, marker, True)
         if layer is None:
             return {'CANCELLED'}
         if layer.source != 'MATERIAL':
@@ -875,7 +972,6 @@ class MATERIAL_OT_paint_layer_source_row_search(Operator):
         return {'FINISHED'}
 
     def invoke(self, context, _event):
-        global _mat_source_row_target
         # A UI that edits a layer the stack does not consider active (a correction, a mask item)
         # points at it through this context pointer; the button on the active row sets none.
         target = getattr(context, "material_paint_layer_source_target", None)
@@ -888,17 +984,55 @@ class MATERIAL_OT_paint_layer_source_row_search(Operator):
                 else None
         if layer is None or layer.source != 'MATERIAL' or layer.material is None:
             return {'CANCELLED'}
-        _mat_source_row_target = (
-            owner_ma.name,
-            owner_ma.library.filepath if owner_ma.library else None,
-            layer.marker,
-        )
-        _mat_source_row_cache.clear()
-        # The same walk the brush's search offers: the source's rows with their folder children,
-        # depth-indented (see #_source_row_collect).
-        _source_row_collect(layer.material.paint_layers, 0, _mat_source_row_cache)
+        # The operator carries its own target: the search popup copies these properties, so the
+        # list reads the source of this invocation and not another picker's. Names plus session
+        # uids rather than pointers, which an operator cannot hold: the popup's copy names the live
+        # datablocks the same way, and an undo that moves the DNA does not invalidate the uids.
+        self.owner_name = owner_ma.name
+        self.owner_library = owner_ma.library.filepath if owner_ma.library else ""
+        self.owner_uid = owner_ma.session_uid
+        self.owner_marker = layer.marker
+        self.source_name = layer.material.name
+        self.source_library = layer.material.library.filepath if layer.material.library else ""
+        self.source_uid = layer.material.session_uid
+        # The rows themselves are collected by #_mat_source_row_items at every collection, from the
+        # live stack of the source this names -- nothing is snapshotted here.
         context.window_manager.invoke_search_popup(self)
         return {'CANCELLED'}
+
+
+class MATERIAL_OT_paint_layer_source_material_clear(Operator):
+    """Empty the source slot: the row keeps how it reads a material, and reads none until one is
+    picked again"""
+    bl_idname = "material.paint_layer_source_material_clear"
+    bl_label = "Clear Source"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @staticmethod
+    def _target_layer(context):
+        # A UI that edits a layer the stack does not consider active (a correction, a mask item)
+        # points at it through this context pointer; the button on the active row sets none.
+        layer = getattr(context, "material_paint_layer_source_target", None)
+        if layer is not None:
+            return layer
+        mat = _context_material(context)
+        if mat is None or not mat.is_layered:
+            return None
+        return mat.paint_layers.active
+
+    @classmethod
+    def poll(cls, context):
+        layer = cls._target_layer(context)
+        return layer is not None and layer.source == 'MATERIAL' and layer.material is not None
+
+    def execute(self, context):
+        layer = self._target_layer(context)
+        if layer is None or layer.source != 'MATERIAL':
+            return {'CANCELLED'}
+        # Through RNA, so the pointer's setter runs: a null assignment is the emptying of the slot
+        # (the marker it carried is let go with the material).
+        layer.material = None
+        return {'FINISHED'}
 
 
 class PAINT_IDF_layer_material(bpy.types.IDFilter):
@@ -1427,6 +1561,7 @@ classes = (
     MATERIAL_OT_paint_layer_object_mask_refresh_tiles,
     MATERIAL_OT_paint_layer_decal_import_decal_master,
     MATERIAL_OT_paint_layer_source_row_search,
+    MATERIAL_OT_paint_layer_source_material_clear,
     PAINT_OT_brush_layer_source_row_search,
     PAINT_IDF_layer_material,
     PAINT_IDF_curve_patch_brush,

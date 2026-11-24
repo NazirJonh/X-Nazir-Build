@@ -316,6 +316,11 @@ static void resolve_normal_channel(const bNodeSocket &normal_socket,
 
   ChannelUnavailableReason image_reason = ChannelUnavailableReason::None;
   if (resolve_image_source(*color_source, r_resolve.images[channel], image_reason)) {
+    /* Nothing about the map's convention is lost here: a paint row's DirectX flag is a node in the
+     * generated chain -- the green flip sits between the row's map and the Normal Map's Color -- so
+     * such a channel reaches this branch as an image only when no row stands behind the map, and
+     * then there is no flag to carry. A reader of the map therefore needs no record of its own (see
+     * #paint_layer_material_channel_source). */
     r_resolve.channels[channel] = image_reason == ChannelUnavailableReason::None ?
                                       ChannelResolution::Image :
                                       ChannelResolution::Unavailable;

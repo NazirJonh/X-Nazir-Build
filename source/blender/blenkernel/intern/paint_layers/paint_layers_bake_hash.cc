@@ -41,6 +41,10 @@
 
 namespace blender {
 
+/* The FNV offset basis every bake hash starts from. Named so the "whole row" hash and the row hash
+ * cannot drift to a different seed by a copied literal. */
+static constexpr uint64_t BAKE_HASH_SEED = 1469598103934665603ull;
+
 /* -------------------------------------------------------------------- */
 /** \name Validity
  *
@@ -516,7 +520,7 @@ static uint64_t bake_hash_layer(uint64_t h,
  */
 static uint64_t bake_hash_material_row(const Material &ma, const MaterialPaintLayer &layer)
 {
-  uint64_t h = 1469598103934665603ull;
+  uint64_t h = BAKE_HASH_SEED;
   h = bake_hash_mix(h, uint64_t(0x4d4154u));
   h = bake_hash_mix(h, layer.material != nullptr ? layer.material->id.session_uid : 0);
   h = bake_hash_mix(h, layer.bake != nullptr ? uint32_t(layer.bake->size) : 0);
@@ -532,9 +536,40 @@ void BKE_paint_layers_bake_hash(const Material &ma,
    * corrections stay live over them and are not part of what was rendered. */
   const uint64_t hash = paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE) ?
                             bake_hash_material_row(ma, layer) :
-                            bake_hash_layer(1469598103934665603ull, ma, layer, false);
+                            bake_hash_layer(BAKE_HASH_SEED, ma, layer, false);
   r_hash[0] = uint32_t(hash & 0xFFFFFFFFu);
   r_hash[1] = uint32_t(hash >> 32);
+}
+
+/**
+ * The whole-row bake hash of \a layer: the content a reader gets when it renders the row as part of
+ * a picture, with the row's mask, opacity, blend and visibility folded in (the child scope). For a
+ * Material row the structural half of what it shows -- source, size, channel set -- is folded in
+ * beside it, since the row reads its maps whole. A CPU effect nested in the row's subtree (a
+ * projection, say) is folded in from the row's own subtree: the row is not a child of an outer bake,
+ * so it must ask #paint_layer_subtree_has_cpu_effect itself, or a change to a projection inside it
+ * would leave the key unchanged and the reader would never re-render.
+ */
+uint64_t BKE_paint_layers_bake_hash_row_whole(const Material &ma, const MaterialPaintLayer &layer)
+{
+  /* The child scope is the one that means "this row is part of a picture that holds its mask, its
+   * opacity, its blend and its visibility". That is what a reader of the row whole gets, whether
+   * the row's own bake would have held its content alone or not. The CPU subtree is still the row's
+   * own: the row is not a child of a bake that already asked, so it must ask here. */
+  const uint64_t whole = bake_hash_layer(BAKE_HASH_SEED,
+                                         ma,
+                                         layer,
+                                         /*is_child=*/true,
+                                         /*parent_cpu_in_subtree=*/
+                                         paint_layer_subtree_has_cpu_effect(layer));
+  if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
+    /* A Material row is read whole through the maps it shows, and those maps are its source, size
+     * and channel set -- the structural half. Its own corrections, mask, opacity and visibility are
+     * live over the maps and the child-scope half above holds them, so a reader that renders the
+     * row whole follows an edit of any of them. */
+    return bake_hash_mix(bake_hash_material_row(ma, layer), whole);
+  }
+  return whole;
 }
 
 bool BKE_paint_layers_bake_is_valid(const Material &ma, const MaterialPaintLayer &layer)

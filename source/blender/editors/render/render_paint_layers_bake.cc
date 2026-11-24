@@ -628,35 +628,6 @@ bool paint_layer_row_result_run(Main &bmain,
 }
 
 /**
- * The Material rows of \a row, its corrections and the rows inside it (a folder's children) whose
- * maps have to be rendered before they are read. The result of a row is that row's own content: the
- * rows beside or below it in the same list are not part of it, so they are not rendered here.
- */
-void paint_layer_row_result_forced_collect(const Material &ma,
-                                           const MaterialPaintLayer &row,
-                                           Vector<bUUID> &r_markers)
-{
-  if (BKE_paint_layers_material_row_render_forced_wanted(ma, row)) {
-    r_markers.append(row.marker);
-  }
-  /* A Material correction renders its own maps and is read by the row's result as well. */
-  for (const MaterialPaintLayer &effect : row.effects) {
-    if (BKE_paint_layers_material_row_render_forced_wanted(ma, effect)) {
-      r_markers.append(effect.marker);
-    }
-  }
-  /* So does a mask correction that reads a material: its grey shapes the row's coverage. */
-  for (const MaterialPaintLayer &item : row.mask_stack) {
-    if (BKE_paint_layers_material_row_render_forced_wanted(ma, item)) {
-      r_markers.append(item.marker);
-    }
-  }
-  for (const MaterialPaintLayer &child : row.children) {
-    paint_layer_row_result_forced_collect(ma, child, r_markers);
-  }
-}
-
-/**
  * A "Use Row Result" waiting for the renders of the source's maps. The timer owns it; the material
  * is found again on every tick, since the file or the stack may change meanwhile.
  */
@@ -776,7 +747,7 @@ wmOperatorStatus paint_layer_row_result_exec(bContext *C, wmOperator *op)
    * Normal, and a graph channel can only be read from a map. Render those maps first, then run
    * the job once the renders have landed. */
   Vector<bUUID> forced;
-  paint_layer_row_result_forced_collect(*owner, *source, forced);
+  BKE_paint_layers_material_row_forced_collect(*owner, *source, forced);
   if (!forced.is_empty()) {
     material_bake_layered_rows_ensure(*bmain, *owner, /*force_preview=*/true, forced);
     PaintLayerRowResultWait *wait = MEM_new<PaintLayerRowResultWait>(__func__);
@@ -1452,11 +1423,11 @@ wmOperatorStatus paint_layer_source_scope_toggle_exec(bContext *C, wmOperator *o
 
 wmOperatorStatus paint_layer_source_canvas_toggle_exec(bContext *C, wmOperator *op)
 {
-  /* A narrowed row has no live form: the mode is a FULL row's choice, and the button is not drawn
-   * for it. */
+  /* A narrowed row has both modes too: its source is the referenced row rendered whole, and the
+   * mode decides whether that render is read at the row's UV or laid on a canvas. */
   Material *ma = nullptr;
   MaterialPaintLayer *row = paint_layer_source_control_row_get(*C, op, &ma);
-  if (row == nullptr || BKE_paint_layers_material_row_narrowed(*row)) {
+  if (row == nullptr) {
     return OPERATOR_CANCELLED;
   }
   const int next = paint_layer_source_control_value_get(*ma, *row, "material_canvas_mode") ==

@@ -23,6 +23,7 @@
 #include "BLI_listbase.h"
 #include "BLI_path_utils.hh"
 #include "BLI_string.h"
+#include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
 #include "BLO_readfile.hh"
@@ -104,6 +105,64 @@ TEST_F(PaintLayersMaterialSource, a_material_row_reads_its_source_and_owns_no_re
   EXPECT_EQ(BKE_paint_layers_channel_add(*owner, row, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
   EXPECT_EQ(row->channels_num, 0);
   EXPECT_FALSE(BKE_paint_layers_row_is_paintable(*row));
+}
+
+TEST_F(PaintLayersMaterialSource, an_add_with_a_database_reads_the_source_itself)
+{
+  Material *owner = layered_material_add("Owner");
+  Material *source = layered_material_add("Source");
+  MaterialPaintLayer *source_row = BKE_paint_layers_add(
+      *source, "Rust", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(source_row, nullptr);
+
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Material;
+  params.source = source;
+  /* The Add popovers pass the database the payload kinds need. A Material row still reads the
+   * material it was given, not a copy: the picked material's stack is the live one, so a row added
+   * to it afterwards is what the row -- and its source-row picker -- sees. */
+  params.bmain = bmain;
+  MaterialPaintLayer *row = BKE_paint_layers_add_with_policy(*owner, params);
+  ASSERT_NE(row, nullptr);
+  EXPECT_EQ(row->material, source);
+
+  MaterialPaintLayer *added = BKE_paint_layers_add(
+      *source, "Added", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(added, nullptr);
+  EXPECT_EQ(BKE_paint_layers_source_row_find(*row->material, added->marker), added);
+  EXPECT_EQ(BKE_paint_layers_source_row_find(*row->material, source_row->marker), source_row);
+}
+
+TEST_F(PaintLayersMaterialSource, a_narrowed_row_keeps_both_canvas_modes)
+{
+  Material *owner = layered_material_add("Owner");
+  Material *source = layered_material_add("Source");
+  MaterialPaintLayer *source_row = BKE_paint_layers_add(
+      *source, "Rust", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(source_row, nullptr);
+  MaterialPaintLayer *row = material_row_add(*owner, *source);
+  ASSERT_NE(row, nullptr);
+
+  row->material_scope = MA_PAINT_LAYER_MATERIAL_SCOPE_ROW;
+  row->material_row_marker = source_row->marker;
+  EXPECT_TRUE(BKE_paint_layers_material_row_narrowed(*row));
+
+  /* Live is the default. A narrowed row has no live source graph, so Live reads the referenced
+   * row's render at the row's UV -- it is not a canvas, but it still renders. */
+  row->material_canvas_mode = MA_PAINT_LAYER_CANVAS_MODE_LIVE;
+  EXPECT_FALSE(BKE_paint_layers_material_row_is_canvas(*row));
+  EXPECT_TRUE(BKE_paint_layers_material_row_narrowed(*row));
+
+  /* Canvas is a request for the canvas read; the scope stays narrowed. */
+  row->material_canvas_mode = MA_PAINT_LAYER_CANVAS_MODE_CANVAS;
+  EXPECT_TRUE(BKE_paint_layers_material_row_is_canvas(*row));
+  EXPECT_TRUE(BKE_paint_layers_material_row_narrowed(*row));
+
+  /* A FULL row's mode keeps its old meaning. */
+  row->material_scope = MA_PAINT_LAYER_MATERIAL_SCOPE_MATERIAL;
+  EXPECT_TRUE(BKE_paint_layers_material_row_is_canvas(*row));
+  row->material_canvas_mode = MA_PAINT_LAYER_CANVAS_MODE_LIVE;
+  EXPECT_FALSE(BKE_paint_layers_material_row_is_canvas(*row));
 }
 
 TEST_F(PaintLayersMaterialSource, a_linked_source_can_be_made_local_and_the_row_follows)
@@ -381,6 +440,122 @@ TEST_F(PaintLayersMaterialSource, blend_round_trip_keeps_the_source)
 
   BLO_blendfiledata_free(bfd);
   BLI_delete(filepath, false, false);
+}
+
+TEST_F(PaintLayersMaterialSource, the_three_predicates_agree_on_the_four_modes)
+{
+  /* The one test of "what the row lays" is #BKE_paint_layers_material_row_reads_render: the canvas
+   * and the narrowed questions answer narrower things, and no reader may pair them by hand. The
+   * table is every combination of scope and mode a Material row can hold. */
+  struct Expect {
+    int scope;
+    int mode;
+    bool canvas;
+    bool narrowed;
+    bool reads_render;
+  };
+  const Expect table[] = {
+      {MA_PAINT_LAYER_MATERIAL_SCOPE_MATERIAL, MA_PAINT_LAYER_CANVAS_MODE_LIVE, false, false, false},
+      {MA_PAINT_LAYER_MATERIAL_SCOPE_MATERIAL,
+       MA_PAINT_LAYER_CANVAS_MODE_CANVAS,
+       true,
+       false,
+       true},
+      {MA_PAINT_LAYER_MATERIAL_SCOPE_ROW, MA_PAINT_LAYER_CANVAS_MODE_LIVE, false, true, true},
+      {MA_PAINT_LAYER_MATERIAL_SCOPE_ROW, MA_PAINT_LAYER_CANVAS_MODE_CANVAS, true, true, true},
+  };
+
+  Material *owner = layered_material_add("Owner");
+  Material *source = layered_material_add("Source");
+  MaterialPaintLayer *source_row = BKE_paint_layers_add(
+      *source, "Rust", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(source_row, nullptr);
+  MaterialPaintLayer *row = material_row_add(*owner, *source);
+  ASSERT_NE(row, nullptr);
+
+  for (const Expect &expect : table) {
+    row->material_scope = int8_t(expect.scope);
+    row->material_canvas_mode = int8_t(expect.mode);
+    if (expect.narrowed) {
+      row->material_row_marker = source_row->marker;
+    }
+    EXPECT_EQ(BKE_paint_layers_material_row_is_canvas(*row), expect.canvas)
+        << "scope " << expect.scope << " mode " << expect.mode;
+    EXPECT_EQ(BKE_paint_layers_material_row_narrowed(*row), expect.narrowed)
+        << "scope " << expect.scope << " mode " << expect.mode;
+    EXPECT_EQ(BKE_paint_layers_material_row_reads_render(*row), expect.reads_render)
+        << "scope " << expect.scope << " mode " << expect.mode;
+  }
+}
+
+TEST_F(PaintLayersMaterialSource, clearing_the_source_slot_lets_go_of_the_reference_and_maps)
+{
+  /* Clear is a legal "no source chosen" state, not the loss of a reference: the material and the
+   * marker go, the maps of the old source do not outlive them, and the status reads OK for the empty
+   * slot rather than the stale/gone words of a reference that failed. */
+  Material *owner = layered_material_add("Owner");
+  Material *source = BKE_material_add(bmain, "Rust");
+  MaterialPaintLayer *row = material_row_add(*owner, *source);
+  ASSERT_NE(row, nullptr);
+  ASSERT_EQ(row->material, source);
+
+  ASSERT_TRUE(BKE_paint_layers_material_clear(*owner, row));
+  EXPECT_EQ(row->material, nullptr);
+  EXPECT_EQ(row->source, MA_PAINT_LAYER_SOURCE_MATERIAL);
+  EXPECT_TRUE(BLI_uuid_is_nil(row->material_row_marker));
+  EXPECT_EQ(BKE_paint_layers_material_source_status(*owner, *row),
+            MA_PAINT_LAYER_SOURCE_STATUS_OK);
+
+  /* Clearing an already-empty slot is a no-op that still reports success. */
+  EXPECT_TRUE(BKE_paint_layers_material_clear(*owner, row));
+}
+
+TEST_F(PaintLayersMaterialSource, a_fill_flip_keeps_the_picked_material_and_its_view)
+{
+  /* Maps | Material is a view over one row, not two rows: the picked material and the row's own
+   * view of it stay while the Fill lays its own content, so switching back brings them back as
+   * they were. */
+  Material *owner = layered_material_add("Owner");
+  Material *source = layered_material_add("Source");
+  MaterialPaintLayer *source_row = BKE_paint_layers_add(
+      *source, "Rust", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(source_row, nullptr);
+  MaterialPaintLayer *row = material_row_add(*owner, *source);
+  ASSERT_NE(row, nullptr);
+
+  row->material_scope = MA_PAINT_LAYER_MATERIAL_SCOPE_ROW;
+  row->material_row_marker = source_row->marker;
+  row->material_canvas_mode = MA_PAINT_LAYER_CANVAS_MODE_CANVAS;
+  row->material_canvas_aspect = MA_PAINT_LAYER_CANVAS_ASPECT_CUSTOM;
+  row->material_canvas_width = 512;
+  row->material_canvas_height = 256;
+  row->source_refresh = MA_PAINT_LAYER_SOURCE_REFRESH_MANUAL;
+  const int users_before = source->id.us;
+
+  /* Maps is the Fill view: the row lays its own content, the material only kept. */
+  ASSERT_TRUE(BKE_paint_layers_fill_source_set(*owner, row, false));
+  EXPECT_EQ(row->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
+  ASSERT_EQ(row->material, source);
+  EXPECT_EQ(source->id.us, users_before);
+  /* The held pointer is a dependency the cycle walk follows, not only the Material view: another
+   * material may not read the owner while this Fill holds the source. */
+  EXPECT_TRUE(BKE_paint_layers_material_depends_on(*owner, *source));
+  EXPECT_EQ(material_row_add(*source, *owner), nullptr);
+  EXPECT_EQ(BKE_paint_layers_material_source_issue(*source, *owner),
+            PaintLayerMaterialSourceIssue::Cycle);
+
+  /* Back to Material: the source is read again with the view it had. */
+  ASSERT_TRUE(BKE_paint_layers_fill_source_set(*owner, row, true));
+  EXPECT_EQ(row->source, MA_PAINT_LAYER_SOURCE_MATERIAL);
+  EXPECT_EQ(row->material, source);
+  EXPECT_EQ(source->id.us, users_before);
+  EXPECT_EQ(row->material_scope, MA_PAINT_LAYER_MATERIAL_SCOPE_ROW);
+  EXPECT_TRUE(BLI_uuid_equal(row->material_row_marker, source_row->marker));
+  EXPECT_EQ(row->material_canvas_mode, MA_PAINT_LAYER_CANVAS_MODE_CANVAS);
+  EXPECT_EQ(row->material_canvas_aspect, MA_PAINT_LAYER_CANVAS_ASPECT_CUSTOM);
+  EXPECT_EQ(row->material_canvas_width, 512);
+  EXPECT_EQ(row->material_canvas_height, 256);
+  EXPECT_EQ(row->source_refresh, MA_PAINT_LAYER_SOURCE_REFRESH_MANUAL);
 }
 
 }  // namespace blender::bke::tests

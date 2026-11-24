@@ -1499,4 +1499,26 @@ TEST_F(PaintLayersGenerateTest, conversion_fill_align_switches_channels_without_
 
 /** \} */
 
+TEST_F(PaintLayersGenerateTest, source_group_channel_live_names_the_channels_the_wrapper_can_carry)
+{
+  /* The wrapper copies the source's root and the groups on the path to the Principled BSDF; a
+   * channel fed by a node of that copy gets an output, one fed through another Group node or by
+   * nothing does not. The live check is what keeps a channel without an output rendered as a map,
+   * so it must answer per channel rather than per source. */
+  Material *source = BKE_material_add(bmain, "Live Source");
+  bNodeTree &tree = *source->nodetree;
+  bNode *principled = principled_with_output_add(tree);
+  ASSERT_NE(principled, nullptr);
+  bNode *image = base_color_image_add(tree, *principled);
+  ASSERT_NE(image, nullptr);
+
+  /* Base Color is fed by a node the copy takes: the group has an output for it. */
+  EXPECT_TRUE(paint_layers::source_group_channel_live(*source,
+                                                      PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  /* Alpha is the Principled's own Alpha input, unfed here: the group has no coverage output. */
+  EXPECT_FALSE(paint_layers::source_group_channel_live(*source, PAINT_MATERIAL_CHANNEL_ALPHA));
+  /* A channel nothing feeds has no output either: its map stands in. */
+  EXPECT_FALSE(paint_layers::source_group_channel_live(*source, PAINT_MATERIAL_CHANNEL_METALLIC));
+}
+
 }  // namespace blender::bke::tests

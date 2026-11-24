@@ -11,6 +11,7 @@
 #include "BKE_image.hh"
 #include "BKE_material.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_edit.hh"
 
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
@@ -82,6 +83,37 @@ TEST_F(BrushLayerSourceTest, row_images_are_collected)
   BKE_brush_layer_source_images_collect(
       *ma, BRUSH_MATERIAL_PAINT_LAYER_SOURCE_SCOPE_ROW, row->marker, images);
   EXPECT_TRUE(images.contains(image));
+}
+
+TEST_F(BrushLayerSourceTest, material_row_images_include_its_mask)
+{
+  /* A Material row's own mask and corrections stay live over the maps it shows, so its own
+   * collector leaves them out -- but the brush bakes the row as it looks, with no live layer to lay
+   * them over the result: a stroke into the mask has to re-bake it. */
+  Material *plain = BKE_material_add(bmain, "Plain");
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Material;
+  params.source = plain;
+  MaterialPaintLayer *row = BKE_paint_layers_add_with_policy(*ma, params);
+  ASSERT_NE(row, nullptr);
+
+  const uint64_t before =
+      BKE_brush_layer_source_content_hash(*ma, BRUSH_MATERIAL_PAINT_LAYER_SOURCE_SCOPE_ROW,
+                                          row->marker);
+  ASSERT_NE(before, 0);
+
+  Image *mask_image = add_solid_image("Mask");
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *row, *mask_image), nullptr);
+  Vector<Image *> images;
+  BKE_brush_layer_source_images_collect(
+      *ma, BRUSH_MATERIAL_PAINT_LAYER_SOURCE_SCOPE_ROW, row->marker, images);
+  EXPECT_TRUE(images.contains(mask_image)) << "a stroke into the mask re-bakes the row source";
+
+  BKE_paint_layers_source_row_hash_memo_drop();
+  EXPECT_NE(BKE_brush_layer_source_content_hash(
+                *ma, BRUSH_MATERIAL_PAINT_LAYER_SOURCE_SCOPE_ROW, row->marker),
+            before)
+      << "and a mask added to the row moves the key";
 }
 
 }  // namespace blender::bke::tests

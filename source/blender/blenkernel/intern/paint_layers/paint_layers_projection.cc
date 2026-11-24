@@ -224,20 +224,22 @@ static bool paint_layer_has_live_map(const MaterialPaintLayer &layer)
 
 /**
  * Whether \a layer's kind holds a map a projection can read. The projection wraps a map's lookup
- * exactly as the UV mapping does, so the support rules are the same. A canvas Material row reads
- * its baked maps like an image, so it projects whatever its role is; a live row's source graph is
- * not wrapped for projection, so it stays unprojected.
+ * exactly as the UV mapping does, so the support rules are the same. A Material row that reads the
+ * maps of its own render -- a canvas row, and a narrowed row in either mode
+ * (#BKE_paint_layers_material_row_reads_render) -- reads those maps like an image, so it projects
+ * whatever its role is; a whole-material Live row's source graph is not wrapped for projection, so
+ * it stays unprojected.
  */
 static bool paint_layer_projection_payload_supported(const Material &ma,
                                                      const MaterialPaintLayer &layer)
 {
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
-    if (BKE_paint_layers_material_row_is_canvas(layer)) {
-      /* A canvas row reads its baked maps like an image: the projection wraps that read for every
-       * role alike -- the role only decides which map is read (a row or a correction: the
-       * channel's map; a mask item: the grey its bake holds), never whether one can project. The
-       * maps are expected of any canvas row with a source, the way a Fill's Mapping is editable
-       * before its first texture. */
+    if (BKE_paint_layers_material_row_reads_render(layer)) {
+      /* Every row that reads a render reads the same map #paint_layer_row_material_map returns,
+       * and the projection wraps that read for every role alike -- the role only decides which map
+       * is read (a row or a correction: the channel's map; a mask item: the grey its bake holds),
+       * never whether one can project. The maps are expected of any such row with a source, the
+       * way a Fill's Mapping is editable before its first texture. */
       return layer.material != nullptr;
     }
     /* The source wrapper rewrites every UV reader in a copied source tree; projecting that tree
@@ -1037,10 +1039,11 @@ bool BKE_paint_layers_projection_set_object(Material &ma,
 const Image *BKE_paint_layers_projection_aspect_image(const Material &ma,
                                                       const MaterialPaintLayer &layer)
 {
-  /* A canvas Material row projects its baked canvas: the map its render made, the same image
-   * #paint_layer_material_canvas_image hands the composer and the generator. */
+  /* A Material row that reads its render projects that render's map: the same image
+   * #paint_layer_material_canvas_image hands the composer and the generator, whether the row reads
+   * it on a canvas or (a narrowed row) at its UV. */
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE) &&
-      BKE_paint_layers_material_row_is_canvas(layer))
+      BKE_paint_layers_material_row_reads_render(layer))
   {
     return paint_layer_material_canvas_image(ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
   }

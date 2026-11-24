@@ -411,15 +411,21 @@ bool WM_toolsystem_activate_brush_and_tool(bContext *C, Paint *paint, Brush *bru
     return false;
   }
 
-  if (toolsystem_is_texture_erase_tool(active_tool)) {
-    /* Keep the main binding on the Paint tool's brush so Erase -> Paint restores it. */
-  }
-  else if (active_tool->runtime->brush_type == -1) {
-    /* Only update the main brush binding to reference the newly active brush. */
-    toolsystem_main_brush_binding_update_from_active(paint);
-  }
-  else {
-    toolsystem_brush_type_binding_update(paint, paint_mode, active_tool->runtime->brush_type);
+  /* A call with no window -- an operator driven from Python in background mode -- has no active
+   * tool: #toolsystem_active_tool_from_context_or_view3d answers null, and the tool bindings below
+   * are the editor's to update. The brush itself was set above; only the bindings are skipped, so
+   * the call cannot dereference the tool it does not have. */
+  if (active_tool != nullptr) {
+    if (toolsystem_is_texture_erase_tool(active_tool)) {
+      /* Keep the main binding on the Paint tool's brush so Erase -> Paint restores it. */
+    }
+    else if (active_tool->runtime->brush_type == -1) {
+      /* Only update the main brush binding to reference the newly active brush. */
+      toolsystem_main_brush_binding_update_from_active(paint);
+    }
+    else {
+      toolsystem_brush_type_binding_update(paint, paint_mode, active_tool->runtime->brush_type);
+    }
   }
 
   /* With Material canvas brush sync on, the paired paint mode adopts the same brush. This is the

@@ -236,11 +236,12 @@ bool BKE_paint_layers_material_row_stale(const Material &ma, const MaterialPaint
   if (current[0] == 0 && current[1] == 0) {
     return true;
   }
-  if (BKE_paint_layers_material_row_is_canvas(layer)) {
-    /* A canvas row has no Normal-only form: the render covers the source's whole content (the
-     * referenced row's for a narrowed one, the whole material's otherwise), so a source that moved
-     * on is stale against the maps whatever the row's channels are. A pixel edit of what the
-     * render reads is the subscription's answer. */
+  if (BKE_paint_layers_material_row_reads_render(layer))
+  {
+    /* A canvas row and a narrowed row (in either mode) have no Normal-only form: the render covers
+     * the source's whole content (the referenced row's for a narrowed one, the whole material's
+     * otherwise), so a source that moved on is stale against the maps whatever the row's channels
+     * are. A pixel edit of what the render reads is the subscription's answer. */
     if (current[0] != layer.bake->source_hash[0] || current[1] != layer.bake->source_hash[1]) {
       return true;
     }
@@ -301,9 +302,10 @@ void BKE_paint_layers_material_bake_stamp_get(const Material &ma,
   if (full == 0) {
     return;
   }
-  if (BKE_paint_layers_material_row_is_canvas(layer)) {
-    /* A canvas render has no Normal half: the row's whole content is one render, so there is
-     * nothing to remember against a partial start. */
+  if (BKE_paint_layers_material_row_reads_render(layer))
+  {
+    /* A canvas render and a narrowed row's render have no Normal half: the row's whole content is
+     * one render, so there is nothing to remember against a partial start. */
     return;
   }
   /* What the Normal reads at the start of the render, kept against the full hash it goes with:
@@ -349,6 +351,30 @@ bool BKE_paint_layers_material_row_render_forced_wanted(const Material &ma,
     }
   }
   return false;
+}
+
+void BKE_paint_layers_material_row_forced_collect(const Material &ma,
+                                                  const MaterialPaintLayer &row,
+                                                  Vector<bUUID> &r_markers)
+{
+  if (BKE_paint_layers_material_row_render_forced_wanted(ma, row)) {
+    r_markers.append(row.marker);
+  }
+  /* A Material correction renders its own maps and is read by the row's result as well. */
+  for (const MaterialPaintLayer &effect : row.effects) {
+    if (BKE_paint_layers_material_row_render_forced_wanted(ma, effect)) {
+      r_markers.append(effect.marker);
+    }
+  }
+  /* So does a mask correction that reads a material: its grey shapes the row's coverage. */
+  for (const MaterialPaintLayer &item : row.mask_stack) {
+    if (BKE_paint_layers_material_row_render_forced_wanted(ma, item)) {
+      r_markers.append(item.marker);
+    }
+  }
+  for (const MaterialPaintLayer &child : row.children) {
+    BKE_paint_layers_material_row_forced_collect(ma, child, r_markers);
+  }
 }
 
 bool BKE_paint_layers_material_row_due(const Material &ma, const MaterialPaintLayer &layer)
@@ -474,7 +500,7 @@ const char *BKE_paint_layers_material_source_status_text(const PaintLayerSourceS
     case MA_PAINT_LAYER_SOURCE_STATUS_STALE:
       return "Source changed";
     case MA_PAINT_LAYER_SOURCE_STATUS_TOO_LARGE:
-      return "Canvas too large";
+      return "Source render too large";
     case MA_PAINT_LAYER_SOURCE_STATUS_SOURCE_GONE:
       return "The source row is gone";
   }
@@ -525,11 +551,19 @@ Span<int> BKE_paint_layers_material_canvas_size_presets()
 
 bool BKE_paint_layers_material_canvas_refused(const Material &ma, const MaterialPaintLayer &row)
 {
-  if (!BKE_paint_layers_material_row_is_canvas(row)) {
+  /* The ceiling guards the synchronous render's buffers, which a narrowed Live row uses too: it
+   * renders the referenced row at the row's own side, not on a canvas, but the buffers are the
+   * same. A FULL Live row renders through the source-graph job, which has its own budget. */
+  if (!BKE_paint_layers_material_row_reads_render(row))
+  {
     return false;
   }
-  const PaintLayerCanvasSize canvas = BKE_paint_layers_material_canvas_size(ma, row);
-  return std::max(canvas.width, canvas.height) > BKE_paint_layers_material_canvas_max_side();
+  int side = BKE_paint_layers_material_row_size(ma, row);
+  if (BKE_paint_layers_material_row_is_canvas(row)) {
+    const PaintLayerCanvasSize canvas = BKE_paint_layers_material_canvas_size(ma, row);
+    side = std::max(canvas.width, canvas.height);
+  }
+  return side > BKE_paint_layers_material_canvas_max_side();
 }
 
 /** The side a Material row is rendered at when neither the row nor the material names one. Kept
@@ -785,15 +819,30 @@ void BKE_paint_layers_material_row_log(const Material &ma,
 bool BKE_paint_layers_material_sources_notice(Material &ma)
 {
   Vector<std::pair<bUUID, uint64_t>> signatures;
+  Vector<std::pair<bUUID, uint64_t>> contents;
   BKE_paint_layers_foreach_source_row(
       static_cast<const Material &>(ma), [&](const MaterialPaintLayer &row) {
         signatures.append({row.marker, paint_layer_material_live_signature(ma, row)});
+        if (row.material != nullptr && paint_layer_material_row_needs_map(ma, row)) {
+          /* What the row reads, separate from the shape of its group: a new row or map in the
+           * source moves the content even when the group's node shape does not. The narrowed hash
+           * already names the referenced row. Only a row that lays maps is hashed: a row the graph
+           * shows live keeps none, so its content is never compared. The narrowed hash walks the
+           * referenced row's subtree (O(subtree) per narrowed row, per regen), the FULL one is the
+           * memoized tree hash -- the cost is bounded by the rows that actually bake. */
+          const uint64_t content =
+              BKE_paint_layers_material_row_narrowed(row) ?
+                  BKE_paint_layers_source_row_content_hash(*row.material, row.material_row_marker) :
+                  BKE_paint_layers_source_material_tree_hash_cached(*row.material);
+          contents.append({row.marker, content});
+        }
         return true;
       });
   if (signatures.is_empty()) {
     return false;
   }
   bool changed = false;
+  Vector<bUUID> moved_rows;
   {
     std::lock_guard lock(bake_runtime_mutex());
     BakeMaterialRuntime &runtime = bake_runtime().lookup_or_add(ma.id.session_uid,
@@ -810,11 +859,62 @@ bool BKE_paint_layers_material_sources_notice(Material &ma)
         changed = true;
       }
     }
+    for (const auto &[marker, content] : contents) {
+      uint64_t *previous = runtime.source_content.lookup_ptr(UUID(marker));
+      if (previous == nullptr) {
+        runtime.source_content.add(UUID(marker), content);
+      }
+      else if (*previous != content) {
+        *previous = content;
+        moved_rows.append(marker);
+      }
+    }
+    /* Rows deleted since the last notice must not keep their remembered answers: otherwise the maps
+     * grow with every add/remove and a marker reused by a new row could read the old row's content.
+     * Collected first, removed after: the map must not be changed while it is walked. */
+    Set<UUID> live_markers;
+    live_markers.reserve(signatures.size());
+    for (const auto &entry : signatures) {
+      live_markers.add(UUID(entry.first));
+    }
+    Vector<UUID> stale_live;
+    for (const UUID &marker : runtime.live_signature.keys()) {
+      if (!live_markers.contains(marker)) {
+        stale_live.append(marker);
+      }
+    }
+    for (const UUID &marker : stale_live) {
+      runtime.live_signature.remove(marker);
+    }
+    Vector<UUID> stale_content;
+    for (const UUID &marker : runtime.source_content.keys()) {
+      if (!live_markers.contains(marker)) {
+        stale_content.append(marker);
+      }
+    }
+    for (const UUID &marker : stale_content) {
+      runtime.source_content.remove(marker);
+    }
   }
   if (changed) {
     /* The shape of a row's group follows its source: a value that became a texture is other nodes.
      */
     ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
+  }
+  if (!moved_rows.is_empty()) {
+    /* A row whose maps are rendered from this content must follow it: the source moved even if no
+     * node the group copies changed shape, so the planner has to look at the row again. A row every
+     * channel of which the graph shows live keeps no maps to move, so it does not make the material
+     * wait for a render. Without this, a new row or map in a layered source could leave the
+     * consumer's map showing what the source was before it -- the row's own bake hash was stamped
+     * at the old content and nothing asked it to move. */
+    for (const bUUID &marker : moved_rows) {
+      const MaterialPaintLayer *layer = BKE_paint_layers_find(ma, marker);
+      if (layer != nullptr && paint_layer_material_row_needs_map(ma, *layer)) {
+        ma.paint_layers_flag |= MA_PAINT_LAYERS_BAKE_STALE;
+        break;
+      }
+    }
   }
   return changed;
 }
@@ -1088,15 +1188,27 @@ bool BKE_paint_layers_material_bake_render_row(Main &bmain, Material &ma, Materi
     BKE_paint_layers_material_bake_land(ma, row.marker, hash, source_hash, false, 0);
     return false;
   }
-  /* The canvas as the row asked for it: the requested size comes back as it is, and a canvas
-   * longer than the ceiling refuses the render instead of silently clamping it -- "Canvas too
-   * large" is the honest status, a quietly resized canvas is not. The refusal is remembered the
-   * way a missing marker is, so an update does not start the same refused render again. */
-  if (canvas_row_canvas_size_check(ma, row)) {
+  /* The render as the row asked for it: the requested size comes back as it is, and a render
+   * longer than the ceiling refuses instead of silently clamping it -- "Source render too large" is
+   * the honest status, a quietly resized render is not. The refusal is remembered the way a missing
+   * marker is, so an update does not start the same refused render again. A narrowed Live row has
+   * no canvas, but its synchronous render uses the same buffers, so the ceiling covers it too. */
+  if (BKE_paint_layers_material_row_reads_render(row) && canvas_row_canvas_size_check(ma, row))
+  {
     BKE_paint_layers_material_bake_land(ma, row.marker, hash, source_hash, false, 0);
     return false;
   }
-  const PaintLayerCanvasSize canvas = BKE_paint_layers_material_canvas_size(ma, row);
+  /* Zeroed: the guard above leaves only a canvas row or a narrowed one, so a branch always runs, but
+   * the compiler cannot see through the predicates. */
+  PaintLayerCanvasSize canvas{};
+  if (BKE_paint_layers_material_row_is_canvas(row)) {
+    canvas = BKE_paint_layers_material_canvas_size(ma, row);
+  }
+  else if (BKE_paint_layers_material_row_narrowed(row)) {
+    const int side = std::max(BKE_paint_layers_material_row_size(ma, row), 16);
+    canvas.width = side;
+    canvas.height = side;
+  }
   const int size = canvas.width;
   const int canvas_height = canvas.height;
   /* The buffers are allocated once per call and reused between the channels; the alpha channel of

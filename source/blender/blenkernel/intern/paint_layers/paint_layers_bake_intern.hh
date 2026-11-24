@@ -361,6 +361,16 @@ struct BakeMaterialRuntime {
    */
   Map<UUID, uint64_t> live_signature;
   /**
+   * What each Material row last read of its source, by marker: the source material's content hash
+   * for a FULL row, the referenced row's subtree hash for a narrowed one. The scene update compares
+   * it to know a source change must make the row's rendered maps stale even when the shape of its
+   * group did not move -- a row or a map added to a layered source, say. Entries of rows the stack
+   * no longer holds are dropped by #BKE_paint_layers_material_sources_notice, so the map does not
+   * grow with add/remove churn; only rows that lay maps are hashed (the narrowed hash is O(subtree)
+   * per row per regen, the FULL one is the memoized tree hash).
+   */
+  Map<UUID, uint64_t> source_content;
+  /**
    * What the Normal read in the source when the last landed render of each Material row started, by
    * marker: a source edit that leaves it alone is no reason to render when only the Normal is.
    * Runtime only; a row read from a file renders once on its first edit.

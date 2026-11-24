@@ -374,6 +374,35 @@ static void source_group_normal_output_add(const bNode &principled,
 }
 
 /**
+ * The Principled BSDF input socket name a paint \a channel reads. Alpha is a separate socket; every
+ * other channel names the socket #BKE_paint_material_channels reports. Null when the channel has no
+ * socket. The one statement of the channel -> socket-name rule, shared by the wrapper's level build
+ * (#source_group_level_build) and the live check (#source_group_channel_live).
+ */
+static const char *channel_socket_name(const int channel)
+{
+  if (channel == PAINT_MATERIAL_CHANNEL_ALPHA) {
+    return "Alpha";
+  }
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (int(info.channel) == channel) {
+      return info.socket_name;
+    }
+  }
+  return nullptr;
+}
+
+/** The input socket of \a principled that paint \a channel reads, or null. */
+static const bNodeSocket *principled_channel_input(const bNode &principled, const int channel)
+{
+  const char *socket_name = channel_socket_name(channel);
+  if (socket_name == nullptr) {
+    return nullptr;
+  }
+  return bke::node_find_socket(principled, SOCK_IN, UString::from_ptr_noinline(socket_name));
+}
+
+/**
  * Copy \a orig into \a tree and expose the paint channels the source feeds: at the level of the
  * Principled BSDF straight from the nodes that feed its inputs, above it from the instance of the
  * private copy of the next group on the path, which exposes them the same way.
@@ -420,11 +449,9 @@ static bool source_group_level_build(const SourceGroupBuild &build,
   Vector<SourceGroupOutput> outputs;
   if (innermost) {
     const auto output_add = [&](const int channel,
-                                const char *socket_name,
                                 const char *ui_name,
                                 const char *socket_type) {
-      const bNodeSocket *input = bke::node_find_socket(
-          build.principled, SOCK_IN, UString::from_ptr_noinline(socket_name));
+      const bNodeSocket *input = principled_channel_input(build.principled, channel);
       if (input == nullptr) {
         return;
       }
@@ -443,11 +470,10 @@ static bool source_group_level_build(const SourceGroupBuild &build,
         continue;
       }
       output_add(int(info.channel),
-                 info.socket_name,
                  info.ui_name,
                  info.is_color ? "NodeSocketColor" : "NodeSocketFloat");
     }
-    output_add(int(PAINT_MATERIAL_CHANNEL_ALPHA), "Alpha", "Coverage", "NodeSocketFloat");
+    output_add(int(PAINT_MATERIAL_CHANNEL_ALPHA), "Coverage", "NodeSocketFloat");
     /* A chain inserted at a parent level may feed this level's Normal through a group input, so
      * the row's `mapped` flag (not only this level's local chain) decides the remap. */
     source_group_normal_output_add(
@@ -705,6 +731,29 @@ bool source_group_normal_live(const Material &source)
   }
   const bNodeSocket *color = bke::node_find_socket(*fed.node, SOCK_IN, "Color"_ustr);
   return color != nullptr && source_group_follow_source(*color).node != nullptr;
+}
+
+bool source_group_channel_live(const Material &source, const int channel)
+{
+  ChannelUnavailableReason reason = ChannelUnavailableReason::None;
+  Vector<const bNode *> group_path;
+  const bNode *principled = BKE_paint_material_principled_find(source, reason, &group_path);
+  if (principled == nullptr) {
+    return false;
+  }
+  if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+    return source_group_normal_live(source);
+  }
+  /* The same socket the wrapper's level build takes the channel's output from (#output_add in
+   * #source_group_level_build): its feed decides whether the copy can carry the channel. */
+  const bNodeSocket *input = principled_channel_input(*principled, channel);
+  if (input == nullptr) {
+    return false;
+  }
+  const FedSocket fed = source_group_follow_source(*input);
+  /* A node the copy skips (a view-pass viewer) leaves the channel without an output the same way a
+   * Group node does. */
+  return fed.node != nullptr && !node_is_view_pass(*fed.node);
 }
 
 }  // namespace blender::bke::paint_layers

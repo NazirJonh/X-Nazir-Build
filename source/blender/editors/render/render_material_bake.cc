@@ -2682,6 +2682,95 @@ static bool material_composite_is_shown(Main &bmain, wmWindowManager &wm, const 
   return false;
 }
 
+/**
+ * One forced-render pass. \a visiting names the source materials the pass is already inside (a stack
+ * built by hand, or one that came from outside, may point its narrowed rows at each other, and the
+ * assign poll's acyclicity is not a guarantee this file can rely on); \a depth counts how far a
+ * chain of forced source renders has gone. Both stop the walk instead of recursing until the stack
+ * overflows.
+ */
+struct LayeredRowsPass {
+  Set<const Material *> visiting;
+  int depth = 0;
+};
+/* A chain deeper than this is treated like a cycle: a real decal chain is a handful of rows, and a
+ * render plan that needs more is a graph the planner should have refused. */
+static constexpr int LAYERED_ROWS_MAX_DEPTH = 8;
+
+/**
+ * Render the maps of the row \a marker names in the source material, before a narrowed row of
+ * another material reads them. The source's planner keeps a live row's colour maps empty while
+ * nothing reads them -- a partial render holds the Normal alone (#bake_row_maps_partial) -- and
+ * the CPU composite that renders the narrowed row's content cannot evaluate a shader: a channel
+ * the source supplies as a graph (a procedural node, a mix of textures) resolves to no map, the
+ * rows that lay it are dropped, and the narrowed row's channels come out empty. Forcing the
+ * source's render with the preview policy defeats the partial render, so the EEVEE bake of the
+ * maps evaluates the procedural content the way a FULL row's render does.
+ *
+ * Synchronous: the narrowed render runs on the main thread right after this and reads the maps as
+ * they are now. The recursion goes through #layered_rows_render_only -- not the public entry -- so
+ * the pass keeps its cycle guard and does not purge the orphan maps or drop the hash memo that the
+ * outer walk is using.
+ */
+static void forced_referenced_row_render(Main &bmain,
+                                         Material &source,
+                                         const bUUID &marker,
+                                         LayeredRowsPass &pass);
+
+/**
+ * The body of #material_bake_layered_rows_ensure, and what #forced_referenced_row_render runs for a
+ * nested source: it renders the rows that are due or forced, and nothing else. It does not purge the
+ * orphan maps or drop the source-hash memo -- the public entry does that once per pass, and a nested
+ * render must not reset the memo the outer walk is reading. Callers go through
+ * #layered_rows_pass_enter, which holds the cycle and depth guard around this body.
+ */
+static void layered_rows_render_only(Main &bmain,
+                                     Material &ma,
+                                     const bool force_preview,
+                                     const Span<bUUID> forced_rows,
+                                     const bool blocking,
+                                     LayeredRowsPass &pass);
+
+/* The pass entry with the guard: a material already being rendered in this pass, or a chain that
+ * has gone too deep, is refused and logged rather than followed, so a cyclic stack cannot recurse
+ * off the stack. */
+static void layered_rows_pass_enter(Main &bmain,
+                                    Material &ma,
+                                    const bool force_preview,
+                                    const Span<bUUID> forced_rows,
+                                    const bool blocking,
+                                    LayeredRowsPass &pass)
+{
+  if (pass.visiting.contains(&ma) || pass.depth >= LAYERED_ROWS_MAX_DEPTH) {
+    printf("[paint-layers material row] forcing '%s' would cycle or run too deep; skipped\n",
+           ma.id.name);
+    return;
+  }
+  pass.visiting.add(&ma);
+  pass.depth++;
+  layered_rows_render_only(bmain, ma, force_preview, forced_rows, blocking, pass);
+  pass.depth--;
+  pass.visiting.remove(&ma);
+}
+
+static void forced_referenced_row_render(Main &bmain,
+                                         Material &source,
+                                         const bUUID &marker,
+                                         LayeredRowsPass &pass)
+{
+  const MaterialPaintLayer *referenced = BKE_paint_layers_source_row_find(source, marker);
+  if (referenced == nullptr) {
+    return;
+  }
+  Vector<bUUID> forced;
+  BKE_paint_layers_material_row_forced_collect(source, *referenced, forced);
+  if (forced.is_empty()) {
+    return;
+  }
+  layered_rows_pass_enter(
+      bmain, source, /*force_preview=*/true, forced, /*blocking=*/true, pass);
+}
+
 void material_bake_layered_rows_ensure(Main &bmain,
                                        Material &ma,
                                        const bool force_preview,
@@ -2693,6 +2782,17 @@ void material_bake_layered_rows_ensure(Main &bmain,
   /* The plan asks the narrowed-row content hashes against the stack as it is now: the memo the
    * redraws share starts empty here, whatever edits or loads put the stack where it is. */
   BKE_paint_layers_source_row_hash_memo_drop();
+  LayeredRowsPass pass;
+  layered_rows_pass_enter(bmain, ma, force_preview, forced_rows, blocking, pass);
+}
+
+static void layered_rows_render_only(Main &bmain,
+                                     Material &ma,
+                                     const bool force_preview,
+                                     const Span<bUUID> forced_rows,
+                                     const bool blocking,
+                                     LayeredRowsPass &pass)
+{
   wmWindowManager *wm = static_cast<wmWindowManager *>(bmain.wm.first);
   if (wm == nullptr || !BKE_paint_layers_is_layered(ma)) {
     return;
@@ -2745,9 +2845,11 @@ void material_bake_layered_rows_ensure(Main &bmain,
      * canvas's width. Writing the long side
      * into the bake here would make the next pass see a different size every time the canvas is not
      * square (a portrait SOURCE aspect, a CUSTOM canvas with width != height), clear the hash and
-     * re-render forever. Its size belongs to the canvas paths alone. The one exception is the
-     * row's first render: the bake structure that holds its maps is made through the size setter,
-     * so a narrowed row with none still gets one -- once, before it has anything to compare. */
+     * re-render forever. Its size belongs to the canvas paths alone, and a narrowed Live row's
+     * square render takes the row's own size without this pass writing it back. The one exception
+     * is the row's first render: the bake structure that holds its maps is made through the size
+     * setter, so a narrowed row with none still gets one -- once, before it has anything to
+     * compare. */
     const bool narrowed = BKE_paint_layers_material_row_narrowed(*row);
     const int size = bake_size_clamp(BKE_paint_layers_material_row_size(ma, *row));
     if ((!narrowed || row->bake == nullptr) && BKE_paint_layers_bake_size_get(*row) != size) {
@@ -2765,6 +2867,12 @@ void material_bake_layered_rows_ensure(Main &bmain,
      * above, so a row that follows its source manually waits for the forced renders (the Update
      * Now button). */
     if (narrowed) {
+      /* The narrowed row's content is the referenced row's render, which reads the source's own
+       * maps -- the maps a live row of the source may not hold yet. Whatever still misses a map is
+       * rendered first, or the channels the source supplies as a graph would come out empty. */
+      if (row->material != nullptr && row->material->nodetree != nullptr) {
+        forced_referenced_row_render(bmain, *row->material, row->material_row_marker, pass);
+      }
       if (BKE_paint_layers_material_bake_render_row(bmain, ma, *row)) {
         WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma.id);
       }

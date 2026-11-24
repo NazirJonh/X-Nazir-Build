@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdlib>
+#include <mutex>
 #include <string>
 
 #include "MEM_guardedalloc.h"
@@ -743,6 +744,185 @@ TEST_F(PaintLayersMaterialBakeTest, a_source_edit_that_changes_the_shape_marks_t
   EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
   ma->paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
   EXPECT_FALSE(BKE_paint_layers_material_sources_notice(*ma));
+}
+
+/** Defined with the Bump-as-Normal tests below: a Bump fed by a Value makes the Normal a render. */
+static bNode *bump_normal_link(Material &material);
+
+TEST_F(PaintLayersMaterialBakeTest, a_row_added_to_a_layered_source_marks_the_consumers_map_stale)
+{
+  Material *layered = BKE_material_add(bmain, "Layered Source");
+  principled_source_set_up(*layered, /*graphs=*/false);
+  /* The source must have a channel only a render can show, or the row keeps no maps: a Bump-made
+   * Normal has no live form. Every other channel is a plain value the graph shows live, and a row
+   * made only of those would never render, so the content move below would rightly go unnoticed. */
+  ASSERT_NE(bump_normal_link(*layered), nullptr);
+  layered->paint_layers_flag = MA_PAINT_LAYERED;
+  MaterialPaintLayer *paint = BKE_paint_layers_add(
+      *layered, "Paint", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(paint, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*layered, paint, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            nullptr);
+  MaterialPaintLayer *row = add_material_row(*layered);
+  ASSERT_NE(row, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_material_sources_notice(*ma)) << "the first sight is not a change";
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_STALE;
+
+  /* The new row changes what a FULL row renders, even though the shape of the consumer's group
+   * follows the same channels: the content hash is what its maps must follow. */
+  MaterialPaintLayer *added = BKE_paint_layers_add(
+      *layered, "Added", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(added, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*layered, added, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *layered));
+  BKE_paint_layers_source_material_hash_forget(*layered);
+  BKE_paint_layers_material_sources_notice(*ma);
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_BAKE_STALE, 0);
+}
+
+TEST_F(PaintLayersMaterialBakeTest, a_removed_row_forgets_its_source_content_and_signature)
+{
+  /* The remembered answers are keyed by row marker: one left behind by a removed row would be read
+   * by whatever row takes that marker next, as if the old row's shape and source content were its
+   * own. The notice drops the entries of rows the stack no longer holds, and does not read the
+   * surviving rows as moved while doing so. */
+  Material *plain = BKE_material_add(bmain, "Plain");
+  principled_source_set_up(*plain, /*graphs=*/false);
+  /* A channel only a render can show: without one the rows keep no maps, so no content is hashed
+   * and there would be nothing to clean up. */
+  ASSERT_NE(bump_normal_link(*plain), nullptr);
+  MaterialPaintLayer *first = add_material_row(*plain);
+  MaterialPaintLayer *second = add_material_row(*plain);
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(second, nullptr);
+
+  EXPECT_FALSE(BKE_paint_layers_material_sources_notice(*ma)) << "the first sight is not a change";
+  const UUID first_marker(first->marker);
+  const UUID second_marker(second->marker);
+  {
+    std::lock_guard lock(bake_runtime_mutex());
+    BakeMaterialRuntime *runtime = bake_runtime().lookup_ptr(ma->id.session_uid);
+    ASSERT_NE(runtime, nullptr);
+    EXPECT_TRUE(runtime->live_signature.contains(first_marker));
+    EXPECT_TRUE(runtime->source_content.contains(first_marker));
+    EXPECT_TRUE(runtime->source_content.contains(second_marker));
+  }
+
+  ASSERT_TRUE(BKE_paint_layers_remove(*ma, first));
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_STALE;
+  EXPECT_FALSE(BKE_paint_layers_material_sources_notice(*ma)) << "the surviving row did not move";
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_BAKE_STALE, 0);
+  {
+    std::lock_guard lock(bake_runtime_mutex());
+    BakeMaterialRuntime *runtime = bake_runtime().lookup_ptr(ma->id.session_uid);
+    ASSERT_NE(runtime, nullptr);
+    EXPECT_FALSE(runtime->live_signature.contains(first_marker));
+    EXPECT_FALSE(runtime->source_content.contains(first_marker));
+    EXPECT_TRUE(runtime->live_signature.contains(second_marker));
+    EXPECT_TRUE(runtime->source_content.contains(second_marker));
+  }
+}
+
+TEST_F(PaintLayersMaterialBakeTest,
+       a_mask_edit_of_a_content_baked_source_row_moves_the_narrowed_key)
+{
+  /* The narrowed reader renders the referenced row whole -- its mask included -- while the row's
+   * own bake holds its content alone when it carries a CPU effect. The key the reader follows has
+   * to be the whole-row one, or adding a mask to such a row would leave the reader's maps as they
+   * were. */
+  Material *layered = BKE_material_add(bmain, "Layered Source");
+  principled_source_set_up(*layered, /*graphs=*/false);
+  layered->paint_layers_flag = MA_PAINT_LAYERED;
+  MaterialPaintLayer *paint = BKE_paint_layers_add(
+      *layered, "Paint", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(paint, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*layered, paint, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            nullptr);
+  /* A CPU-computed effect: the row bakes its content alone, its mask living over that bake. */
+  ASSERT_NE(BKE_paint_layers_filter_add(*layered, paint, MA_PAINT_LAYER_FILTER_BLUR), nullptr);
+
+  BKE_paint_layers_source_row_hash_memo_drop();
+  const uint64_t before = BKE_paint_layers_source_row_content_hash(*layered, paint->marker);
+  MaterialPaintLayer *mask = BKE_paint_layers_mask_add(*layered, paint, 1.0f);
+  ASSERT_NE(mask, nullptr);
+  BKE_paint_layers_source_row_hash_memo_drop();
+  const uint64_t after = BKE_paint_layers_source_row_content_hash(*layered, paint->marker);
+  EXPECT_NE(before, after) << "the reader shows the row whole, its mask inside";
+}
+
+TEST_F(PaintLayersMaterialBakeTest,
+       a_narrowed_row_subscribes_to_the_referenced_rows_own_maps)
+{
+  /* The narrowed render describes the referenced row live, so its own channel and mask maps are
+   * what a stroke lands in. A row that keeps no bake of its own has no bake maps to subscribe to:
+   * the raw maps have to be in the list, or the reader would never follow a stroke. */
+  Material *layered = BKE_material_add(bmain, "Layered Source");
+  principled_source_set_up(*layered, /*graphs=*/false);
+  layered->paint_layers_flag = MA_PAINT_LAYERED;
+  Image *color_map = add_image("Source Map");
+  MaterialPaintLayer *paint = BKE_paint_layers_add(
+      *layered, "Paint", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(paint, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*layered, paint, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *layered, paint, PAINT_MATERIAL_CHANNEL_BASE_COLOR, color_map));
+  Image *mask_map = add_image("Source Mask");
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*layered, *paint, *mask_map), nullptr);
+  ASSERT_EQ(paint->bake, nullptr) << "a light row keeps no bake, and so no bake maps";
+
+  MaterialPaintLayer *reader = add_material_row(*layered);
+  ASSERT_NE(reader, nullptr);
+  reader->material_scope = MA_PAINT_LAYER_MATERIAL_SCOPE_ROW;
+  reader->material_row_marker = paint->marker;
+
+  Vector<Image *> images;
+  BKE_paint_layers_bake_collect_source_images(*ma, *reader, images);
+  EXPECT_TRUE(images.contains(color_map))
+      << "a stroke into the source's own map reaches the reader";
+  EXPECT_TRUE(images.contains(mask_map)) << "and so does a stroke into its mask";
+}
+
+TEST_F(PaintLayersMaterialBakeTest,
+       a_mask_or_an_effect_on_a_material_row_source_moves_the_narrowed_key)
+{
+  /* The reader of a row that is itself a Material row renders it whole: the row's own corrections,
+   * mask and live factors are laid over the maps it shows. Both the key and the pixel subscription
+   * have to hold them, or adding a mask or an effect to the referenced row would leave the reader
+   * showing the row as it was. */
+  Material *layered = BKE_material_add(bmain, "Layered Source");
+  principled_source_set_up(*layered, /*graphs=*/false);
+  layered->paint_layers_flag = MA_PAINT_LAYERED;
+  Material *plain = BKE_material_add(bmain, "Plain");
+  principled_source_set_up(*plain, /*graphs=*/false);
+  PaintLayerAddParams nested_params;
+  nested_params.kind = PaintLayerAddKind::Material;
+  nested_params.source = plain;
+  nested_params.name = "Nested";
+  MaterialPaintLayer *nested = BKE_paint_layers_add_with_policy(*layered, nested_params);
+  ASSERT_NE(nested, nullptr);
+
+  BKE_paint_layers_source_row_hash_memo_drop();
+  const uint64_t before = BKE_paint_layers_source_row_content_hash(*layered, nested->marker);
+  Image *mask_map = add_image("Nested Mask");
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*layered, *nested, *mask_map), nullptr);
+  BKE_paint_layers_source_row_hash_memo_drop();
+  const uint64_t with_mask = BKE_paint_layers_source_row_content_hash(*layered, nested->marker);
+  EXPECT_NE(before, with_mask) << "a mask on the referenced Material row is part of the picture";
+
+  ASSERT_NE(BKE_paint_layers_filter_add(*layered, nested, MA_PAINT_LAYER_FILTER_BLUR), nullptr);
+  BKE_paint_layers_source_row_hash_memo_drop();
+  const uint64_t with_effect = BKE_paint_layers_source_row_content_hash(*layered, nested->marker);
+  EXPECT_NE(with_mask, with_effect) << "and so is an effect added to the row";
+
+  MaterialPaintLayer *reader = add_material_row(*layered);
+  ASSERT_NE(reader, nullptr);
+  reader->material_scope = MA_PAINT_LAYER_MATERIAL_SCOPE_ROW;
+  reader->material_row_marker = nested->marker;
+  Vector<Image *> images;
+  BKE_paint_layers_bake_collect_source_images(*ma, *reader, images);
+  EXPECT_TRUE(images.contains(mask_map)) << "a stroke into that mask reaches the reader";
 }
 
 TEST_F(PaintLayersMaterialBakeTest,
@@ -4482,5 +4662,109 @@ TEST_F(PaintLayersOwnedEffectTest, a_mask_region_without_a_changed_band_keeps_th
 }
 
 /** \} */
+
+TEST_F(PaintLayersMaterialBakeTest, a_nested_projection_on_a_cpu_source_row_moves_the_narrowed_key)
+{
+  /* The narrowed reader's key is the referenced row's whole-row hash. That row is not a child of an
+   * outer bake, so it has to ask #paint_layer_subtree_has_cpu_effect itself: only then is the
+   * projection of a nested node folded into the key. Without that a change to a projection inside
+   * the row would leave the reader's maps as they were. The projection sits on a mask item and the
+   * CPU effect on the row that owns it, so neither #paint_layer_row_folds_into_bake (the row) nor
+   * the item alone can fold it -- only the row's own CPU subtree can. */
+  Material *layered = BKE_material_add(bmain, "Layered Source");
+  principled_source_set_up(*layered, /*graphs=*/false);
+  layered->paint_layers_flag = MA_PAINT_LAYERED;
+  MaterialPaintLayer *paint = BKE_paint_layers_add(
+      *layered, "Paint", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(paint, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*layered, paint, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            nullptr);
+  ASSERT_NE(BKE_paint_layers_filter_add(*layered, paint, MA_PAINT_LAYER_FILTER_BLUR), nullptr);
+  Image *mask_map = add_image("Mask Map");
+  MaterialPaintLayer *item = BKE_paint_layers_mask_add_image(*layered, *paint, *mask_map);
+  ASSERT_NE(item, nullptr);
+  ASSERT_EQ(item->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      *layered, item, MA_PAINT_LAYER_MAPPING_SPACE_BOX));
+  ASSERT_NE(item->projection, nullptr);
+  ASSERT_TRUE(paint_layer_subtree_has_cpu_effect(*paint));
+  ASSERT_FALSE(paint_layer_row_folds_into_bake(*layered, *item))
+      << "the item does not fold through its own effect; only the row's CPU subtree folds it";
+
+  const uint64_t before = BKE_paint_layers_bake_hash_row_whole(*layered, *paint);
+  /* A projection parameter moves: the reader renders the row whole, so its key must follow. */
+  item->projection->size[0] += 0.25f;
+  const uint64_t after = BKE_paint_layers_bake_hash_row_whole(*layered, *paint);
+  EXPECT_NE(before, after) << "a nested projection inside a CPU row is part of what the reader shows";
+}
+
+TEST_F(PaintLayersMaterialBakeTest, a_narrowed_live_row_over_the_ceiling_is_refused)
+{
+  /* A narrowed row has no canvas in Live, but its synchronous render uses the same buffers, so the
+   * ceiling covers it too: the honest state is "Source render too large", not a quietly clamped
+   * render. Before the narrowed Live mode existed this path could not be reached. */
+  Material *layered = BKE_material_add(bmain, "Layered Source");
+  principled_source_set_up(*layered, /*graphs=*/false);
+  layered->paint_layers_flag = MA_PAINT_LAYERED;
+  MaterialPaintLayer *paint = BKE_paint_layers_add(
+      *layered, "Paint", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(paint, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*layered, paint, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            nullptr);
+
+  MaterialPaintLayer *reader = add_material_row(*layered);
+  ASSERT_NE(reader, nullptr);
+  reader->material_scope = MA_PAINT_LAYER_MATERIAL_SCOPE_ROW;
+  reader->material_row_marker = paint->marker;
+  reader->material_canvas_mode = MA_PAINT_LAYER_CANVAS_MODE_LIVE;
+  ASSERT_FALSE(BKE_paint_layers_material_row_is_canvas(*reader));
+
+  /* A Live narrowed row's side is the bake's, or the owning material's layer size before it has
+   * one. The reader belongs to the fixture's material (#add_material_row). */
+  ma->paint_layers_image_size = BKE_paint_layers_material_canvas_max_side() + 1;
+  EXPECT_TRUE(BKE_paint_layers_material_canvas_refused(*ma, *reader));
+  EXPECT_EQ(BKE_paint_layers_material_source_status(*ma, *reader),
+            MA_PAINT_LAYER_SOURCE_STATUS_TOO_LARGE);
+}
+
+/** \} */
+
+TEST_F(PaintLayersMaterialBakeTest, a_directx_normal_row_is_rendered_not_read_as_a_plain_image)
+{
+  /* The DirectX convention lives on the row's channel record, and a Material row that reads the
+   * source has no record of its own. The flag must therefore be applied inside the source's own
+   * render: the generated chain puts the green flip between the row's map and the Normal Map's
+   * Color, so the channel resolves as Baked and never as Image. A reader shows the render (which
+   * carries the flip), not the encoded map sampled raw. The test locks the invariant down: a
+   * generator that handed an Image straight to the Normal Map would silently lose the flag for
+   * every Material row reading this source, and nothing on the reader side could recover it. */
+  Material *layered = BKE_material_add(bmain, "Layered Source");
+  principled_source_set_up(*layered, /*graphs=*/false);
+  layered->paint_layers_flag = MA_PAINT_LAYERED;
+  MaterialPaintLayer *paint = BKE_paint_layers_add(
+      *layered, "Paint", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(paint, nullptr);
+  Image *normal_map = add_image("Normal Map");
+  ASSERT_NE(BKE_paint_layers_channel_add(*layered, paint, PAINT_MATERIAL_CHANNEL_NORMAL), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *layered, paint, PAINT_MATERIAL_CHANNEL_NORMAL, normal_map));
+  ASSERT_TRUE(BKE_paint_layers_normal_set_directx(*layered, paint, true));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *layered));
+
+  const std::shared_ptr<const MaterialSourceResolve> resolve =
+      BKE_paint_layers_source_resolve(*layered);
+  ASSERT_TRUE(resolve != nullptr);
+  EXPECT_EQ(resolve->channels[PAINT_MATERIAL_CHANNEL_NORMAL], ChannelResolution::Baked)
+      << "the flip is a node in the chain, so the Normal channel is a render, not the map";
+  EXPECT_EQ(resolve->reasons[PAINT_MATERIAL_CHANNEL_NORMAL], ChannelUnavailableReason::None);
+
+  /* The reader cannot sample that map as a plain image: it would read DirectX data as OpenGL. */
+  MaterialPaintLayer *reader = add_material_row(*layered);
+  ASSERT_NE(reader, nullptr);
+  const PaintLayerMaterialSource source = paint_layer_material_channel_source(
+      *ma, *reader, PAINT_MATERIAL_CHANNEL_NORMAL);
+  EXPECT_NE(source.kind, PaintLayerMaterialSourceKind::LiveImage)
+      << "an encoded map with a convention the reader cannot know must never be read raw";
+}
 
 }  // namespace blender::bke::tests

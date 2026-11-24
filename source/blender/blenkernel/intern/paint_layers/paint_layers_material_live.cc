@@ -134,8 +134,11 @@ bool paint_layer_material_source_group_channel(const Material &ma,
                                                const int channel)
 {
   /* A canvas row has no live group: its maps are the render it was made from, whatever the source's
-   * graph could wrap (see #BKE_paint_layers_material_row_is_canvas). */
-  if (BKE_paint_layers_material_row_is_canvas(row)) {
+   * graph could wrap (see #BKE_paint_layers_material_row_is_canvas). A narrowed row has no live
+   * group either, in both modes: the source group would copy the whole material, not the one row
+   * the reference names, so its channels come from the row-result render instead. */
+  if (BKE_paint_layers_material_row_reads_render(row))
+  {
     return false;
   }
   if (!paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_SOURCE) || row.material == nullptr ||
@@ -145,23 +148,24 @@ bool paint_layer_material_source_group_channel(const Material &ma,
   {
     return false;
   }
-  /* A normal not made by a Normal Map is not a property of the surface when evaluated live, so the
-   * row shows the map rendered from it. */
-  if (channel == PAINT_MATERIAL_CHANNEL_NORMAL &&
-      !bke::paint_layers::source_group_normal_live(*row.material))
-  {
-    return false;
-  }
   const std::shared_ptr<const MaterialSourceResolve> resolve = BKE_paint_layers_source_resolve(
       *row.material);
   switch (resolve->channels[channel]) {
     case ChannelResolution::Baked:
-      return true;
+      break;
     case ChannelResolution::Image:
-      return !live_image_usable(resolve->images[channel], channel == PAINT_MATERIAL_CHANNEL_ALPHA);
+      if (live_image_usable(resolve->images[channel], channel == PAINT_MATERIAL_CHANNEL_ALPHA)) {
+        return false;
+      }
+      break;
     default:
       return false;
   }
+  /* The wrapper only carries an output the source's own tree feeds: a channel reached through
+   * another Group node (or by nothing the copy keeps) has no output, so it is not shown live --
+   * the map rendered from it stands in, and this is what keeps that map rendered. The Normal's
+   * rule (a Normal Map alone) is the same check for its channel. */
+  return bke::paint_layers::source_group_channel_live(*row.material, channel);
 }
 
 PaintLayerMaterialSource paint_layer_material_channel_source(const Material &ma,
@@ -177,8 +181,11 @@ PaintLayerMaterialSource paint_layer_material_channel_source(const Material &ma,
     return out;
   }
   /* A canvas row resolves to its maps alone: the render it was made from is all it lays, before
-   * and after the first one (see #BKE_paint_layers_material_bake_render_row). */
-  if (BKE_paint_layers_material_row_is_canvas(row)) {
+   * and after the first one (see #BKE_paint_layers_material_bake_render_row). A narrowed row does
+   * the same in both modes: its maps are the referenced row rendered whole, the only form that
+   * carries the row's mask and effects. */
+  if (BKE_paint_layers_material_row_reads_render(row))
+  {
     Image *baked = nullptr;
     if (paint_layer_row_material_map(ma, row, channel, &baked)) {
       out.kind = PaintLayerMaterialSourceKind::Baked;
@@ -233,8 +240,10 @@ PaintLayerMaterialCoverage paint_layer_material_coverage_source(const Material &
     return out;
   }
   /* A canvas row's coverage is its own maps': the render hands its content coverage back, and
-   * nothing of the source's transparency is resolved here. */
-  if (BKE_paint_layers_material_row_is_canvas(row)) {
+   * nothing of the source's transparency is resolved here. A narrowed row's render is the
+   * referenced row whole, mask included, so its coverage comes back the same way in both modes. */
+  if (BKE_paint_layers_material_row_reads_render(row))
+  {
     if (paint_layer_row_material_shown(ma, row) && row.bake->coverage != nullptr) {
       out.kind = PaintLayerMaterialCoverageKind::Baked;
       out.image = row.bake->coverage;
@@ -338,9 +347,10 @@ bool paint_layer_correction_reads_source(const Material &ma,
   }
   /* A canvas correction's coverage is the map its render made, not the source's transparency
    * resolved live: it lays where its bake holds a coverage, reading like a Fill correction's own
-   * map does (see #paint_layer_material_coverage_source). */
+   * map does (see #paint_layer_material_coverage_source). A narrowed correction reads its render
+   * in both modes, so the same rule covers it. */
   return coverage.kind == PaintLayerMaterialCoverageKind::Baked &&
-         BKE_paint_layers_material_row_is_canvas(effect);
+         BKE_paint_layers_material_row_reads_render(effect);
 }
 
 int paint_layer_mask_source_channel(const MaterialPaintLayer &item)
@@ -374,9 +384,10 @@ bool paint_layer_mask_reads_source(const Material &ma, const MaterialPaintLayer 
     return true;
   }
   /* A canvas mask item reads the grey its bake holds, with the coverage the same bake made: it
-   * lays where its bake holds both (see #paint_layer_material_coverage_source). */
+   * lays where its bake holds both (see #paint_layer_material_coverage_source). A narrowed mask
+   * item reads its render in both modes, so the same rule covers it. */
   return coverage.kind == PaintLayerMaterialCoverageKind::Baked &&
-         BKE_paint_layers_material_row_is_canvas(item);
+         BKE_paint_layers_material_row_reads_render(item);
 }
 
 bool BKE_paint_layers_material_channel_needs_render(const Material &ma,
@@ -397,14 +408,17 @@ bool BKE_paint_layers_material_channel_needs_render(const Material &ma,
   }
   /* A canvas row renders every channel it takes part in: its content is rendered whatever the
    * source's graph resolves there, and its coverage comes along from the same render rather than
-   * an Alpha map of its own. Where that render runs decides how the alpha arrives: a narrowed
-   * row's synchronous render folds the coverage out of the channels it renders
+   * an Alpha map of its own. A narrowed row renders that way in both modes -- Live UV reads the
+   * same render at the row's UV, and Canvas puts it on a canvas -- because the render is what
+   * carries the referenced row's mask and effects. Where that render runs decides how the alpha
+   * arrives: a narrowed row's synchronous render folds the coverage out of the channels it renders
    * (#BKE_paint_layers_material_bake_render_row), so the alpha needs no map of its own; a FULL row
    * renders through the source-graph job, whose alpha target is the row's coverage map. */
+  if (BKE_paint_layers_material_row_narrowed(row)) {
+    return channel != PAINT_MATERIAL_CHANNEL_ALPHA;
+  }
   if (BKE_paint_layers_material_row_is_canvas(row)) {
-    return BKE_paint_layers_material_row_narrowed(row) ?
-               channel != PAINT_MATERIAL_CHANNEL_ALPHA :
-               true;
+    return true;
   }
   const std::shared_ptr<const MaterialSourceResolve> resolve = BKE_paint_layers_source_resolve(
       *row.material);
@@ -453,11 +467,13 @@ uint64_t paint_layer_material_live_signature(const Material &ma, const MaterialP
 {
   uint64_t h = 1469598103934665603ull;
   const auto mix = [&](const uint64_t value) { h = h * 1000003u ^ value; };
-  if (BKE_paint_layers_material_row_is_canvas(row)) {
-    /* A canvas row lays only its maps: its group has no source shape to follow, so the signature
-     * names the scope and the reference alone. The subtree's content moves the row's source hash
-     * instead, which re-renders the maps; the graph reads them through the same images, so a
-     * rebuild would wire the same nodes back in.
+  if (BKE_paint_layers_material_row_reads_render(row))
+  {
+    /* A canvas row and a narrowed row lay only their maps: their group has no source shape to
+     * follow, so the signature names the scope, the reference and the mode alone -- the mode
+     * decides the map read (projection and canvas wiring), so switching it is a rebuild. The
+     * subtree's content moves the row's source hash instead, which re-renders the maps; the graph
+     * reads them through the same images, so a rebuild would wire the same nodes back in.
      *
      * Why the content hash of the reference is not folded in and this is still complete: a source
      * edit fans out over every layered material in #bmain
@@ -466,11 +482,12 @@ uint64_t paint_layer_material_live_signature(const Material &ma, const MaterialP
      * canvas rows from #bmain -- whether or not any evaluated copy of the consumer is alive. A
      * consumer nobody evaluates gets its maps made fresh the moment something asks for one, since
      * the render path never consults a depsgraph. No shape move can ride along on a content move
-     * either: the channel set a canvas row's group reads is the same whatever the source
-     * supplies (every channel but the alpha renders), and the maps it reads are the same
-     * datablocks re-filled in place, so the group the generator builds is the group it had. */
+     * either: the channel set such a row's group reads is the same whatever the source supplies
+     * (every channel but the alpha renders), and the maps it reads are the same datablocks
+     * re-filled in place, so the group the generator builds is the group it had. */
     mix(0x5100u + uint64_t(row.material_scope));
     mix(UUID(row.material_row_marker).hash());
+    mix(uint64_t(BKE_paint_layers_material_row_is_canvas(row)));
     if (row.bake != nullptr && row.bake->coverage != nullptr) {
       /* The coverage map is read through a node the keyed map sync does not cover (the sync writes
        * the colour maps' pointers, not the coverage one). A coverage map replaced by a render -- a

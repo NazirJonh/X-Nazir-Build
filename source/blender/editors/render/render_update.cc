@@ -311,6 +311,11 @@ static void material_changed(Main *bmain, Material *ma)
     Vector<Material *> consumers;
     BKE_paint_layers_source_material_consumers(*bmain, *ma, consumers);
     for (Material *consumer : consumers) {
+      /* The consumer's UI reads this material's stack live at draw -- the row picker's label, the
+       * status words, the search popup's items -- but its panels only redraw on a notifier naming
+       * it. Name the consumer here, so an edit made in the source's stack or nodes refreshes the
+       * material that reads it without the user touching it first. */
+      WM_main_add_notifier(NC_MATERIAL | ND_SHADING, consumer);
       /* A row that follows its source manually is left to the Update Now button: the edit marks it
        * stale at the next scene update, and no render is armed for it here. A material whose rows
        * all wait is not armed at all, so its tick never finds nothing to do. */

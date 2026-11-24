@@ -151,10 +151,15 @@ struct PaintLayerImportResult {
  * Each copied row gets a marker of its own, its maps travel by \a params' image policy (a copy with
  * its pixels by default; an external map may be shared by reference, and a painted map may be left
  * behind as the record's flat value), its anchor point readers are remapped to the copied points,
- * and a reader that named a point outside the imported set loses the reference. A Material row brings a local copy of the material
- * it reads, the same way an ordinary duplicate does, so the asset does not depend on the source
- * file's material staying loaded. Object masks are per object and keyed by the old marker, so they
- * are not imported; the copied row still keeps the mesh/UV-tiles mode but carries no exclusions.
+ * and a reader that named a point outside the imported set loses the reference.
+ *
+ * A Material row imported or duplicated this way brings a local copy of the material it reads
+ * (#paint_layer_material_duplicate, also run by #BKE_paint_layers_duplicate), so neither the copy
+ * nor the asset depends on the source material's own settings staying the same. An ordinary Add
+ * (#BKE_paint_layers_add_with_policy, #PaintLayerAddKind::Material) is different: it reads the
+ * material itself, not a copy, so rows added to that material afterwards are seen by the row.
+ * Object masks are per object and keyed by the old marker, so they are not imported; the copied
+ * row still keeps the mesh/UV-tiles mode but carries no exclusions.
  *
  * \return false when the import is refused (no rows, a foreign row, a missing mask, an invalid
  * anchor); \a dst is left untouched in that case.

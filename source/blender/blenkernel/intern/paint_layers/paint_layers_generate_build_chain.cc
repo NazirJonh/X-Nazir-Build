@@ -2449,11 +2449,12 @@ KindEmitResult PaintLayersTreeBuilder::material_source_emit(const RowEmitContext
       source_nodes.append(map);
       /* Which map this node shows, so a re-render of the canvas is a pointer write
        * (#paint_layers_maps_sync) rather than a rebuild: a canvas row's maps are the same
-       * datablocks re-filled in place whenever the canvas keeps its shape. Only a canvas row is
-       * keyed: the sync resolves a Material row's map through its canvas (#paint_layer_material_canvas_image),
-       * and a live row has no record for its baked map either, so a key on a live row would make
-       * the sync fail instead of following the map. */
-      if (BKE_paint_layers_material_row_is_canvas(ctx.layer)) {
+       * datablocks re-filled in place whenever the canvas keeps its shape. A narrowed Live row
+       * reads the same rendered result, so it is keyed too; both resolve through
+       * #paint_layer_material_canvas_image. A FULL live row has no record for its baked map, so a
+       * key there would make the sync fail instead of following the map. */
+      if (BKE_paint_layers_material_row_reads_render(ctx.layer))
+      {
         map_node_key_set(*map, ctx.layer, ctx.channel);
       }
       bNodeSocket *color_out = socket_out(*map, "Color");

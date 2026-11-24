@@ -823,6 +823,16 @@ static void bake_collect_row_tree_maps(const Material &ma,
   }
 }
 
+void BKE_paint_layers_bake_collect_row_tree_images(const Material &ma,
+                                                   const MaterialPaintLayer &row,
+                                                   Vector<Image *> &r_images)
+{
+  /* A fresh visited set per call: the walk is the caller's whole picture, and an anchor reader's
+   * slice is followed once per call the way #bake_collect_slice_images expects. */
+  Vector<bUUID> visited;
+  bake_collect_row_tree_maps(ma, row, r_images, visited);
+}
+
 /**
  * The maps \a reader's slice reads: the source row's channels and corrections above the marker,
  * its mask items above the marker, its children, and the maps of nested readers (recursively).
@@ -919,28 +929,22 @@ void BKE_paint_layers_bake_collect_source_images(const Material &ma,
   }
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
     if (BKE_paint_layers_material_row_narrowed(layer)) {
-      /* Only a narrowed row's render reads another bake's maps: it renders the referenced row's
-       * content out of them, so a pixel edit of the source's decal lands here as a change of these
-       * images, with the rectangle it touched. The source's own node-tree images are not what the
-       * render reads. A FULL row stays on the branch below whatever its canvas mode says: a canvas
-       * FULL row renders the source's graph, which reads the source's own images the way a live
-       * one does. */
-      if (scope != PaintLayerBakeScope::Child && layer.material != nullptr) {
+      /* The narrowed render describes the referenced row whole from its live stack -- mask, effects
+       * and children included -- so the maps a pixel edit can land in are the ones a whole-row bake
+       * of that row reads. The row-tree walk collects exactly those: the row's channels, its maps,
+       * its bake and everything hanging on it. It also holds when the row is itself a Material row
+       * or an Anchor Point reader, whose own collector stops at what it reads. A FULL row stays on
+       * the branch below whatever its canvas mode says: a canvas FULL row renders the source's
+       * graph, which reads the source's own images the way a live one does. */
+      if (scope != PaintLayerBakeScope::Child && layer.material != nullptr &&
+          /* A hand-made file can encode a material cycle; the walk below would then visit the same
+           * rows forever. A legitimate graph never has it (the assign poll refuses). */
+          !BKE_paint_layers_material_depends_on(*layer.material, ma))
+      {
         if (const MaterialPaintLayer *referenced = BKE_paint_layers_source_row_find(
                 *layer.material, layer.material_row_marker))
         {
-          if (referenced->bake != nullptr) {
-            for (Image *image : referenced->bake->images) {
-              if (image != nullptr && !r_images.contains(image)) {
-                r_images.append(image);
-              }
-            }
-            if (referenced->bake->coverage != nullptr &&
-                !r_images.contains(referenced->bake->coverage))
-            {
-              r_images.append(referenced->bake->coverage);
-            }
-          }
+          BKE_paint_layers_bake_collect_row_tree_images(*layer.material, *referenced, r_images);
         }
       }
     }

@@ -121,10 +121,11 @@ class PaintLayersUiTest(unittest.TestCase):
                 marker=layer.marker, channel='COAT', enable=True)
         self.assertEqual(result, {'FINISHED'})
         self.assertEqual(self.channel_record(layer, 'COAT').state, 'ENABLED')
-        # A new channel takes part with its own settings entry: inherit and full opacity.
+        # A new channel takes part with its own settings entry: inherit and full opacity. Opacity is
+        # stored as a percentage in RNA, like the row's own opacity, so full is 100.
         settings = next(c for c in layer.channel_settings if c.channel == 'COAT')
         self.assertEqual(settings.blend_type, 'INHERIT')
-        self.assertEqual(settings.opacity, 1.0)
+        self.assertEqual(settings.opacity, 100.0)
 
     def test_extended_blend_modes_round_trip(self):
         layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
@@ -208,8 +209,11 @@ class PaintLayersUiTest(unittest.TestCase):
 
     def test_channel_add_and_remove_accept_ao_emission_specular(self):
         layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
+        # AO is part of the built-in channel set, so a fresh row already carries its record and
+        # adding it is the idempotent case; the other two are added fresh. Both ends of the pair
+        # have to work: add returns the record, remove takes it away.
+        self.assertIn('AO', {record.channel for record in layer.channels})
         for channel_id in ('AO', 'EMISSION', 'SPECULAR'):
-            self.assertNotIn(channel_id, {record.channel for record in layer.channels})
             record = layer.channel_add(channel=channel_id)
             self.assertIsNotNone(record, channel_id)
             self.assertEqual(record.channel, channel_id)
@@ -319,7 +323,9 @@ class PaintLayersUiTest(unittest.TestCase):
 
         layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
         layout = _MockLayout()
-        draw_material_layer_channels(layout, None, self.material, layer)
+        # A headless draw reads the paint mode from the context (the row's colour channels), so the
+        # real context is passed instead of None: bpy.context has tool_settings even in background.
+        draw_material_layer_channels(layout, bpy.context, self.material, layer)
         ids = layout.operator_ids()
         self.assertTrue(ids)
         self.assertTrue(
@@ -333,18 +339,23 @@ class PaintLayersUiTest(unittest.TestCase):
         layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
         self.material.paint_layers_channels = {'BASE_COLOR', 'SPECULAR'}
         layout = _MockLayout()
-        draw_material_layer_channels(layout, None, self.material, layer)
+        # A headless draw reads the paint mode from the context (the row's colour channels), so the
+        # real context is passed instead of None: bpy.context has tool_settings even in background.
+        draw_material_layer_channels(layout, bpy.context, self.material, layer)
         self.assertEqual(len(layout.operator_ids()), 2)
 
     def test_channel_set_widget_draws_a_checkbox_per_channel(self):
         from bl_ui.properties_material_paint_layers import draw_material_channel_set
+        from bl_ui.properties_paint_common import _MATERIAL_PAINT_CHANNEL_UI_ORDER
 
         self.material.paint_layers.new(source='IMAGE', name="Layer")
         layout = _MockLayout()
         draw_material_channel_set(layout, self.material)
         drawn = [call[1][2] for call in layout.calls if call[0] == "prop_enum"]
-        self.assertEqual(drawn, ['BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'NORMAL', 'HEIGHT',
-                                 'ALPHA', 'AO', 'EMISSION', 'SPECULAR'])
+        # One checkbox per supported channel, in the vocabulary's order: the test names the rule,
+        # not a copy of the list, so a channel that joins the vocabulary is drawn without an edit
+        # here (the vocabulary is the one the add menu and the widgets share).
+        self.assertEqual(drawn, list(_MATERIAL_PAINT_CHANNEL_UI_ORDER))
 
 
 class PaintLayersMaskUiTest(unittest.TestCase):

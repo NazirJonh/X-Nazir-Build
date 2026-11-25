@@ -83,9 +83,10 @@ class TexturePool {
 /* The VRAM each GPU context's texture pool may park for reuse, in bytes; 0 (the default) keeps
  * the pools unlimited. The one value every pool reads, but it bounds each pool separately: a pool
  * lives per GPU context, so N contexts may park up to N times the budget together. A release that
- * would push a pool's parked total over the budget evicts its largest parked textures first and,
- * if the texture still cannot fit, frees it instead of parking it; `reset()` evicts the same way.
- * The budget only bounds *parked* textures: textures a pass still holds are untouched. Gives the
+ * would push a pool's parked total over the budget evicts its largest parked allocations first and,
+ * if the texture still cannot fit, frees it instead of parking it; `reset()` enforces the same
+ * order again (the Vulkan pool, whose unit is a whole unused allocation, only acts there). The
+ * budget only bounds *parked* textures: textures a pass still holds are untouched. Gives the
  * pool a ceiling so heavy viewport scratch (a 4K paint stack's effect buffers) cannot park
  * gigabytes for `max_unused_cycles` frames after the pass that used them. */
 void GPU_texture_pool_set_budget(uint64_t bytes);

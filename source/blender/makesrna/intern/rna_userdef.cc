@@ -424,7 +424,7 @@ static void rna_userdef_sculpt_history_limit_update(Main *bmain, Scene *scene, P
  * one applies from their next eviction, and a raise cannot bring evicted entries back. */
 static void rna_userdef_paint_layers_cache_budget_update(Main *bmain, Scene *scene, PointerRNA *ptr)
 {
-  BKE_paint_layers_cache_budgets_sync_from_userdef();
+  /* The material entry point applies the whole budget table, paint layers included. */
   BKE_paint_material_cache_budgets_sync_from_userdef();
   rna_userdef_update(bmain, scene, ptr);
 }
@@ -7133,8 +7133,8 @@ static void rna_def_userdef_system(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop,
       "GPU Texture Pool Budget",
-      "The VRAM each GPU context's texture pool may park for reuse, in MiB; parked textures beyond "
-      "it are evicted largest-first instead of kept for the next redraw. 0 keeps the pools "
+      "The VRAM each GPU context's texture pool may park for reuse, in MiB; parked memory beyond "
+      "it is evicted largest-first instead of kept for the next redraw. 0 keeps the pools "
       "unlimited, which lets heavy viewport scratch (a 4K paint stack's effect buffers) park "
       "gigabytes after use");
   RNA_def_property_update(prop, 0, "rna_userdef_texture_pool_budget_update");

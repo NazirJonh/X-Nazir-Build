@@ -14,6 +14,37 @@
 namespace blender::gpu {
 
 /**
+ * The VRAM a texture allocation holds, mip chain and array layers included. Shared by the pools
+ * that park individual textures (TexturePoolImpl, GLTexturePool, MTLTexturePool); the Vulkan pool
+ * budgets whole unused allocations instead and measures those by `allocation_info.size`.
+ */
+size_t texture_pool_allocation_bytes(const Texture *tex);
+
+/**
+ * Whether `BLENDER_PAINT_MEM_LOG` is set, read once. Gates the per-reset `PAINT_MEM texpool` probe
+ * of every pool; a no-op without the variable.
+ */
+bool texture_pool_mem_log_enabled();
+
+/** Last `PAINT_MEM texpool` sample of one pool, so an unchanged reset logs nothing. */
+struct TexturePoolLogState {
+  uint64_t parked_bytes = 0;
+  uint64_t budget_bytes = 0;
+  int64_t pool_count = -1;
+  bool valid = false;
+};
+
+/**
+ * Print one `PAINT_MEM texpool` line for \a pool when the sample changed since the last call, or
+ * on the first sample. A no-op without `BLENDER_PAINT_MEM_LOG`.
+ */
+void texture_pool_log_sample(TexturePoolLogState &state,
+                             const char *pool,
+                             uint64_t parked_bytes,
+                             uint64_t budget_bytes,
+                             int64_t pool_count);
+
+/**
  * TexturePool base class, which connects `acquire_texture_*` variants to
  * virtual `acquire_texture_impl` which backend implementations implement.
  */
@@ -129,6 +160,8 @@ class TexturePoolImpl : public TexturePoolBase {
   /* VRAM of every texture in `pool_`, kept in step with the append/remove/reuse paths so the budget
    * is checked in O(1) instead of re-walking every parked mip chain per release. */
   size_t parked_bytes_ = 0;
+  /** Last diagnostic sample, so a reset that changes nothing logs nothing. */
+  TexturePoolLogState log_state_;
 
   /* Free the largest parked textures until `parked_bytes_ + incoming_bytes` fits the live budget.
    * The same order `reset()` uses; leaves `parked_bytes_` honest, never touches `incoming`. */

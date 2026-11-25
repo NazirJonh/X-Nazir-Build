@@ -1750,8 +1750,8 @@ struct UserDef {
   char _pad_essentials_brush_set[6] = {};
 
   /**
-   * The VRAM each GPU context's texture pool may park for reuse, in MiB; parked textures beyond it
-   * are evicted largest-first instead of kept for the next redraw. Zero keeps the pools unlimited,
+   * The VRAM each GPU context's texture pool may park for reuse, in MiB; parked memory beyond it is
+   * evicted largest-first instead of kept for the next redraw. Zero keeps the pools unlimited,
    * which is what heavy viewport scratch (a 4K paint stack's effect buffers) makes worth bounding.
    *
    * Declared here, after every struct-typed member, so the field cannot shift a member's

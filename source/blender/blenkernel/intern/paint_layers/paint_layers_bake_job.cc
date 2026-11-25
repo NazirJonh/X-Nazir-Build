@@ -403,6 +403,10 @@ static bool bake_effect_channel_result_build(const Material &ma,
   r_result.rect[0] = r_result.rect[1] = r_result.rect[2] = r_result.rect[3] = 0;
   r_result.stored_rect[0] = r_result.stored_rect[1] = r_result.stored_rect[2] =
       r_result.stored_rect[3] = 0;
+  /* The buffers are part of the state too: an empty band leaves them empty rather than holding the
+   * previous compute's pixels. */
+  r_result.color = Vector<float>();
+  r_result.color_bytes = Vector<uchar>();
   const int channel = int(info.channel);
   const MaterialPaintLayer *row = BKE_paint_layers_correction_owner(ma, effect);
   const rcti *region = (compute_region != nullptr && had_map) ? compute_region : nullptr;
@@ -453,6 +457,12 @@ static bool bake_effect_channel_result_build(const Material &ma,
   const int band_height = r_result.rect[3] - r_result.rect[1];
   const bool cropped = regional_band && band_width > 0 && band_height > 0;
   r_result.stored_cropped = cropped;
+  if (regional_band && !cropped) {
+    /* The band maps to no map texel: the map keeps every pixel it had. Store nothing rather than
+     * the whole canvas, which holds none of the compute's answer outside the band; the commit
+     * skips the write when both buffers are empty. */
+    return true;
+  }
   if (cropped) {
     r_result.stored_rect[0] = r_result.rect[0];
     r_result.stored_rect[1] = r_result.rect[1];
@@ -600,7 +610,9 @@ static void bake_job_owned_effects_gpu_precompute(Material &ma, PaintLayersBakeJ
       continue;
     }
     effect_num++;
-    for (const PaintLayersBakeJob::EffectResult::QueuedChannel &wanted : queued.wanted_channels) {
+    for (const int64_t wanted_index : queued.wanted_channels.index_range()) {
+      const PaintLayersBakeJob::EffectResult::QueuedChannel &wanted =
+          queued.wanted_channels[wanted_index];
       const int channel = wanted.channel;
       channel_num++;
       /* The budget bounds what the job *keeps*, not the provider's transient read-back: after
@@ -672,7 +684,9 @@ static void bake_job_owned_effects_gpu_precompute(Material &ma, PaintLayersBakeJ
       job.precomputed_effects.append(std::move(entry));
       if (retained_bytes > budget_bytes) {
         /* This channel is kept -- its work is already done -- but the rest of the queue is left to
-         * the worker's CPU path, the same fallback a refused provider takes. */
+         * the worker's CPU path, the same fallback a refused provider takes. Count the channels of
+         * this effect that were not dispatched. */
+        skipped_num += int(queued.wanted_channels.size() - wanted_index - 1);
         budget_spent = true;
         break;
       }
@@ -1548,14 +1562,24 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
           stored_rect = channel.stored_rect;
           stored_width = channel.stored_rect[2] - channel.stored_rect[0];
         }
-        bake_write_stored_image(
-            *color_image,
-            channel.stored_float,
-            channel.stored_float ? static_cast<const void *>(channel.color.data()) :
-                                   static_cast<const void *>(channel.color_bytes.data()),
-            stored_rect,
-            object.tile_number,
-            stored_width);
+        if (!bake_write_stored_image(
+                *color_image,
+                channel.stored_float,
+                channel.stored_float ? static_cast<const void *>(channel.color.data()) :
+                                       static_cast<const void *>(channel.color_bytes.data()),
+                stored_rect,
+                object.tile_number,
+                stored_width))
+        {
+          /* The image or its buffer was not available: the map is blank/unchanged, so the row is
+           * not baked. Zero the hash and let the next plan render it whole. */
+          layer->bake->hash[0] = 0;
+          layer->bake->hash[1] = 0;
+          channel.color = Vector<float>();
+          channel.color_bytes = Vector<uchar>();
+          all_objects = false;
+          break;
+        }
         channel.color = Vector<float>();
         channel.color_bytes = Vector<uchar>();
         if (!written_channels.contains(channel.channel)) {
@@ -1683,15 +1707,15 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
       }
       /* The band the worker's compute answered for, when the creation had a region for the effect
        * and the map that stood then is still the one #bake_service_image just returned. A map it
-       * replaced is fresh and blank outside the band. A regional result is held packed in the band
-       * alone (#stored_cropped, the crop a regional row render stores), so a replaced map cannot
-       * take it: the effect is invalid and the next plan queues it whole. A standing map takes the
-       * band, read packed when the buffer is the band and with the canvas stride when the whole
-       * canvas stands (the GPU read-back is still whole -- see
+       * replaced is fresh and blank outside the band. A regional result is the compute's answer for
+       * the band alone (packed, or empty when the band covers no map texel), so a replaced map
+       * cannot take it: the effect is invalid and the next plan queues it whole. A standing map
+       * takes the band, read packed when the buffer is the band and with the canvas stride when the
+       * whole canvas stands (the GPU read-back is still whole -- see
        * #bake_job_owned_effects_gpu_precompute). */
       int rect[4] = {channel.rect[0], channel.rect[1], channel.rect[2], channel.rect[3]};
       const bool regional = channel.regional && color_image->id.session_uid == channel.map_uid;
-      if (channel.stored_cropped && !regional) {
+      if (channel.regional && !regional) {
         effect_invalidated = true;
         break;
       }
@@ -1714,14 +1738,26 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
         stored_rect = rect;
         stored_width = channel.stored_cropped ? channel.rect[2] - channel.rect[0] : 0;
       }
-      bake_write_stored_image(
-          *color_image,
-          channel.stored_float,
-          channel.stored_float ? static_cast<const void *>(channel.color.data()) :
-                                 static_cast<const void *>(channel.color_bytes.data()),
-          stored_rect,
-          0,
-          stored_width);
+      /* An empty band holds no pixels: the map keeps its previous content, and there is no buffer
+       * for the writer to read. */
+      if (!channel.color.is_empty() || !channel.color_bytes.is_empty()) {
+        if (!bake_write_stored_image(
+                *color_image,
+                channel.stored_float,
+                channel.stored_float ? static_cast<const void *>(channel.color.data()) :
+                                       static_cast<const void *>(channel.color_bytes.data()),
+                stored_rect,
+                0,
+                stored_width))
+        {
+          /* The image or its buffer was not available: nothing was laid, so the effect is invalid
+           * and the next plan renders it whole rather than trust a blank map. */
+          effect_invalidated = true;
+          channel.color = Vector<float>();
+          channel.color_bytes = Vector<uchar>();
+          break;
+        }
+      }
       channel.color = Vector<float>();
       channel.color_bytes = Vector<uchar>();
       written_channels.append(channel.channel);

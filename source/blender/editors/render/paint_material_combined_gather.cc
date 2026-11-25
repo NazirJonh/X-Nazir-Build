@@ -1157,7 +1157,12 @@ std::shared_ptr<ImBuf> CombinedGpuFrame::read_back(gpu::Texture *texture) const
   }
   /* The read lands in the buffer the ImBuf owns: an intermediate read of the whole canvas (256 MiB
    * at 4K) followed by a copy into it doubled the transient peak of every bake and mask read-back
-   * for one memcpy's worth of nothing. */
+   * for one memcpy's worth of nothing.
+   *
+   * Contract: the frame's result texture is float RGBA, 16 bytes per texel, so the ImBuf's
+   * four-float buffer is exactly the read size. The four-argument read returns void -- a backend
+   * failure is a driver fault, not a recoverable refusal -- so there is no error path here to take;
+   * the CPU fallback is decided by the provider before it calls this. */
   GPU_texture_read(texture, GPU_DATA_FLOAT, 0, ibuf->float_data_for_write());
   return std::shared_ptr<ImBuf>(ibuf, [](ImBuf *buffer) { IMB_freeImBuf(buffer); });
 }
@@ -2435,7 +2440,10 @@ bool combined_row_render_gpu(const Material &ma,
 
   GPU_finish();
   /* The read lands in the caller's buffer, and the alpha the channel does not keep is set over it
-   * in place: no intermediate whole-canvas copy is made (256 MiB at 4K, once per channel). */
+   * in place: no intermediate whole-canvas copy is made (256 MiB at 4K, once per channel). The
+   * four-argument read returns void, so a backend error is indistinguishable from success; the
+   * buffer then keeps the previous channel's pixels (or its initial value on the first channel).
+   * That is the accepted limit of the in-place API: a driver fault, not a recoverable refusal. */
   GPU_texture_read(capture_color, GPU_DATA_FLOAT, 0, r_rgba);
   const int64_t pixels_num = int64_t(size) * size;
   /* A channel that tracks no content alpha stays opaque, as in the CPU render; its transparency is

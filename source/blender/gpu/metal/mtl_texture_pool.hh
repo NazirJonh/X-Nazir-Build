@@ -64,6 +64,13 @@ class MTLTexturePool : public TexturePoolBase {
   /* Output usage data to debug log. Called on `--debug-gpu` */
   void log_usage_data() const;
 
+  /* The VRAM the parked allocations hold, kept in step with `pool_` so a release costs one size
+   * calculation rather than a walk over every parked mip chain. */
+  uint64_t parked_bytes_ = 0;
+  /** Last diagnostic sample, so a reset that changes nothing logs nothing. */
+  TexturePoolLogState log_state_;
+  void enforce_pool_budget(uint64_t incoming_bytes);
+
  protected:
   Texture *acquire_texture_impl(int3 extent,
                                 int mip_len,

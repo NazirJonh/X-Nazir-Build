@@ -558,7 +558,7 @@ static void wm_init_userdef(Main *bmain)
 
   /* The paint layer caches scale from their own preference, the way the general cache limit above
    * does. */
-  BKE_paint_layers_cache_budgets_sync_from_userdef();
+  /* The material entry point applies the whole budget table, paint layers included. */
   BKE_paint_material_cache_budgets_sync_from_userdef();
 
   /* The viewport texture pool bounds its parked scratch the same way. */

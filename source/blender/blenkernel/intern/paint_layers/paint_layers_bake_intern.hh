@@ -474,7 +474,11 @@ void bake_pixel_store_byte(const float rgba[4],
                            bool is_color,
                            const ColorSpace *colorspace,
                            uchar r_store[4]);
-void bake_write_stored_image(Image &image,
+/**
+ * Write a stored map buffer, or only \a rect of it. Returns false when the image or its pixel
+ * buffer cannot be acquired, so the caller must not treat the channel as written.
+ */
+bool bake_write_stored_image(Image &image,
                              bool stored_float,
                              const void *stored,
                              const int *rect,

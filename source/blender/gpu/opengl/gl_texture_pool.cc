@@ -51,7 +51,9 @@ static TextureFormat get_compatible_texture_format(TextureFormat format)
 
 GLTexturePool::~GLTexturePool()
 {
-  for (const TextureHandle &handle : acquired_) {
+  /* `release_texture` removes from `acquired_`, so walk a snapshot rather than the live set. */
+  const Set<TextureHandle> acquired = acquired_;
+  for (const TextureHandle &handle : acquired) {
     release_texture(wrap(handle.view));
   }
   for (AllocationHandle &handle : pool_) {
@@ -101,6 +103,7 @@ Texture *GLTexturePool::acquire_texture_impl(int3 extent,
   /* Acquire the compatible texture, or create a new one as a last resort. */
   if (match_index != -1) {
     texture_handle.texture = pool_[match_index].texture;
+    parked_bytes_ -= texture_pool_allocation_bytes(texture_handle.texture);
     pool_.remove_and_reorder(match_index);
     /* Override the usage. It doesn't really apply to OpenGL in practice, but `GPU_texture_usage`
      * callers may still rely on it. */
@@ -222,10 +225,26 @@ void GLTexturePool::release_texture(Texture *tex)
     current_usage_data_.usage_count--;
   }
 
+  /* Park the allocation only if the parked total still fits the budget; a release that would push
+   * it over evicts the largest parked allocations first and, if even an empty pool cannot take this
+   * one, frees it instead. The view is always destroyed here. */
+  const uint64_t budget = GPU_texture_pool_budget_get();
+  const size_t bytes = texture_pool_allocation_bytes(texture_handle.texture);
+  if (budget != 0) {
+    enforce_pool_budget(bytes);
+    if (parked_bytes_ + uint64_t(bytes) > budget) {
+      GPU_texture_free(texture_handle.view);
+      acquired_.remove(texture_handle);
+      GPU_texture_free(texture_handle.texture);
+      return;
+    }
+  }
+
   /* Move allocation back to `pool_`. */
   AllocationHandle allocation_handle;
   allocation_handle.texture = texture_handle.texture;
   pool_.append(allocation_handle);
+  parked_bytes_ += bytes;
 
   /* Destroy view and handle, if a view was created. */
   GPU_texture_free(texture_handle.view);
@@ -239,6 +258,31 @@ void GLTexturePool::offset_users_count(Texture *tex, int offset)
   TextureHandle texture_handle = acquired_.lookup_key({unwrap(tex), {}, 1});
   texture_handle.users_count += offset;
   acquired_.add_overwrite(texture_handle);
+}
+
+void GLTexturePool::enforce_pool_budget(const uint64_t incoming_bytes)
+{
+  const uint64_t budget = GPU_texture_pool_budget_get();
+  if (budget == 0) {
+    return;
+  }
+  while (parked_bytes_ + incoming_bytes > budget) {
+    int64_t largest = -1;
+    uint64_t largest_bytes = 0;
+    for (const int64_t i : pool_.index_range()) {
+      const uint64_t bytes = texture_pool_allocation_bytes(pool_[i].texture);
+      if (bytes > largest_bytes) {
+        largest_bytes = bytes;
+        largest = i;
+      }
+    }
+    if (largest == -1) {
+      break;
+    }
+    parked_bytes_ -= largest_bytes;
+    GPU_texture_free(pool_[largest].texture);
+    pool_.remove_and_reorder(largest);
+  }
 }
 
 void GLTexturePool::reset(bool force_free)
@@ -257,6 +301,7 @@ void GLTexturePool::reset(bool force_free)
   for (int i = pool_.size() - 1; i >= 0; i--) {
     AllocationHandle &handle = pool_[i];
     if (handle.unused_cycles_count >= max_unused_cycles_ || force_free) {
+      parked_bytes_ -= texture_pool_allocation_bytes(handle.texture);
       GPU_texture_free(handle.texture);
       pool_.remove_and_reorder(i);
     }
@@ -264,6 +309,14 @@ void GLTexturePool::reset(bool force_free)
       handle.unused_cycles_count++;
     }
   }
+
+  /* Enforce the budget through the same largest-first eviction a release uses, so the two paths
+   * cannot disagree about what is given up first. */
+  enforce_pool_budget(0);
+
+  /* One probe per reset, like every other pool, and only when the sample changed. */
+  texture_pool_log_sample(
+      log_state_, "gl", parked_bytes_, GPU_texture_pool_budget_get(), int64_t(pool_.size()));
 
   if (G.debug & G_DEBUG_GPU) {
     /* Log debug usage if it differs from the last reset. */

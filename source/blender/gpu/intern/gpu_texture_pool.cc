@@ -28,15 +28,10 @@ namespace blender::gpu {
 /** The parked-texture budget every pool reads; 0 (the default) keeps them unlimited. */
 static std::atomic<uint64_t> g_texture_pool_budget_bytes = 0;
 
-/** The VRAM a parked texture holds; defined below, needed by the acquire path too. */
-static size_t pooled_texture_bytes(const Texture *tex);
-
-namespace {
-
-/** `BLENDER_PAINT_MEM_LOG`, read once; the pool's `PAINT_MEM texpool` probe is a no-op without
- * it. */
-bool paint_mem_log_enabled()
+bool texture_pool_mem_log_enabled()
 {
+  /* Read once: the switch cannot change under a running Blender, and every pool's reset probes it.
+   */
   static const bool enabled = []() {
     const char *value = getenv("BLENDER_PAINT_MEM_LOG");
     return value != nullptr && value[0] != '\0';
@@ -44,7 +39,29 @@ bool paint_mem_log_enabled()
   return enabled;
 }
 
-}  // namespace
+void texture_pool_log_sample(TexturePoolLogState &state,
+                             const char *pool,
+                             const uint64_t parked_bytes,
+                             const uint64_t budget_bytes,
+                             const int64_t pool_count)
+{
+  if (!texture_pool_mem_log_enabled()) {
+    return;
+  }
+  /* A frame's reset usually changes nothing: log only a new sample, not every draw. */
+  if (state.valid && state.parked_bytes == parked_bytes && state.budget_bytes == budget_bytes &&
+      state.pool_count == pool_count)
+  {
+    return;
+  }
+  state = {parked_bytes, budget_bytes, pool_count, true};
+  fprintf(stderr,
+          "PAINT_MEM texpool pool=%s parked_bytes=%lld budget_bytes=%lld pool_count=%lld\n",
+          pool,
+          (long long)parked_bytes,
+          (long long)budget_bytes,
+          (long long)pool_count);
+}
 
 TexturePool &TexturePool::get()
 {
@@ -108,7 +125,7 @@ Texture *TexturePoolImpl::acquire_texture_impl(int3 extent,
   if (match_index != -1) {
     TextureHandle handle = {pool_[match_index].texture};
     acquired_.add(handle);
-    parked_bytes_ -= pooled_texture_bytes(handle.texture);
+    parked_bytes_ -= texture_pool_allocation_bytes(handle.texture);
     pool_.remove_and_reorder(match_index);
     return handle.texture;
   }
@@ -152,12 +169,13 @@ Texture *TexturePoolImpl::acquire_texture_impl(int3 extent,
 }  // namespace blender::gpu
 
 /** The VRAM a parked texture holds, mip chain and array layers included. */
-static size_t pooled_texture_bytes(const Texture *tex)
+size_t texture_pool_allocation_bytes(const Texture *tex)
 {
   const GPUTextureType type = tex->type_get();
   const int width = std::max(1, tex->width_get());
   /* A 1D texture has no height, and a 1D array's layers sit in the height; a 2D array's in the
-   * depth. Cube faces are six per layer. */
+   * depth. A cubemap's depth already counts its six faces per layer (see `Texture::init_cubemap`),
+   * so it must not be multiplied by six again. */
   int height = std::max(1, tex->height_get());
   int layers = std::max(1, tex->depth_get());
   if (type == GPU_TEXTURE_1D) {
@@ -171,7 +189,7 @@ static size_t pooled_texture_bytes(const Texture *tex)
     layers = 6;
   }
   else if (type == GPU_TEXTURE_CUBE_ARRAY) {
-    layers = std::max(1, tex->depth_get()) * 6;
+    layers = std::max(1, tex->depth_get());
   }
   /* `to_bytesize(TextureFormat)` is the uncompressed texel size: the pool's transient scratch is
    * an uncompressed render target, so a block-compressed format would be counted wrong -- keep the
@@ -186,6 +204,10 @@ static size_t pooled_texture_bytes(const Texture *tex)
     bytes += size_t(mip_width) * size_t(mip_height) * size_t(layers) * texel_bytes;
     mip_width = std::max(1, mip_width >> 1);
     mip_height = std::max(1, mip_height >> 1);
+    /* A 3D texture's mip chain halves its depth too; an array's layers stay whole. */
+    if (type == GPU_TEXTURE_3D) {
+      layers = std::max(1, layers >> 1);
+    }
   }
   return bytes;
 }
@@ -204,7 +226,7 @@ void TexturePoolImpl::enforce_pool_budget(const size_t incoming_bytes)
     int64_t largest = -1;
     size_t largest_bytes = 0;
     for (const int64_t i : pool_.index_range()) {
-      const size_t bytes = pooled_texture_bytes(pool_[i].texture);
+      const size_t bytes = texture_pool_allocation_bytes(pool_[i].texture);
       if (bytes > largest_bytes) {
         largest_bytes = bytes;
         largest = i;
@@ -228,10 +250,12 @@ void TexturePoolImpl::release_texture(Texture *tex)
   /* Park the texture only if the parked total still fits the budget; a release that would push it
    * over evicts the largest parked textures first and, if even an empty pool cannot take this one,
    * frees it instead, so a pass's scratch does not outlive the pass that used it. */
-  const size_t bytes = pooled_texture_bytes(tex);
+  const size_t bytes = texture_pool_allocation_bytes(tex);
   const uint64_t budget = g_texture_pool_budget_bytes.load(std::memory_order_relaxed);
   if (budget != 0) {
     enforce_pool_budget(bytes);
+    /* Soft limit: a concurrent budget change can land between the enforcement and this check, and
+     * `reset()` enforces the new value again. */
     if (parked_bytes_ + bytes > budget) {
       GPU_texture_free(tex);
       return;
@@ -266,7 +290,7 @@ void TexturePoolImpl::reset(bool force_free)
   for (int i = pool_.size() - 1; i >= 0; i--) {
     TextureHandle &tex = pool_[i];
     if (tex.unused_cycles_count >= max_unused_cycles_ || force_free) {
-      parked_bytes_ -= pooled_texture_bytes(tex.texture);
+      parked_bytes_ -= texture_pool_allocation_bytes(tex.texture);
       GPU_texture_free(tex.texture);
       pool_.remove_and_reorder(i);
     }
@@ -279,15 +303,14 @@ void TexturePoolImpl::reset(bool force_free)
    * cannot disagree about what is given up first (see #113024). */
   enforce_pool_budget(0);
 
-  /* One probe per reset (a draw's / a frame's boundary), not per release: logging every parked
-   * texture would flood a 4K session with thousands of lines a frame. */
-  if (paint_mem_log_enabled()) {
-    fprintf(stderr,
-            "PAINT_MEM texpool parked_bytes=%lld budget_bytes=%lld pool_count=%lld\n",
-            (long long)parked_bytes_,
-            (long long)g_texture_pool_budget_bytes.load(std::memory_order_relaxed),
-            (long long)pool_.size());
-  }
+  /* One probe per reset (a draw's / a frame's boundary), not per release, and only when the sample
+   * changed: logging every parked texture would flood a 4K session with thousands of lines a
+   * frame. */
+  texture_pool_log_sample(log_state_,
+                          "impl",
+                          parked_bytes_,
+                          g_texture_pool_budget_bytes.load(std::memory_order_relaxed),
+                          int64_t(pool_.size()));
 }
 
 }  // namespace blender::gpu

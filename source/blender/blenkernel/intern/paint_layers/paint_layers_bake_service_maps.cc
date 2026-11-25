@@ -448,8 +448,12 @@ void bake_write_image(Image &image,
  * \param stored_width: when positive, \a stored holds only \a rect, tightly packed row by row with
  *        this row width (the crop a regional row render stores); zero reads \a stored as the whole
  *        image buffer, indexed by the image's own width.
+ *
+ * \return false when the image or its pixel buffer cannot be acquired: a caller must then leave the
+ *         channel out of its written set and invalidate the bake, rather than let a blank map look
+ *         finished. An empty \a rect is a successful no-op once the image is acquired.
  */
-void bake_write_stored_image(Image &image,
+bool bake_write_stored_image(Image &image,
                              const bool stored_float,
                              const void *stored,
                              const int *rect,
@@ -461,13 +465,18 @@ void bake_write_stored_image(Image &image,
   void *lock = nullptr;
   ImBuf *ibuf = BKE_image_acquire_ibuf(&image, tile_number > 0 ? &iuser : nullptr, &lock);
   if (ibuf == nullptr) {
-    return;
+    return false;
   }
   const int width = ibuf->x;
   const int x0 = rect != nullptr ? clamp_i(rect[0], 0, width) : 0;
   const int x1 = rect != nullptr ? clamp_i(rect[2], 0, width) : width;
   const int y0 = rect != nullptr ? clamp_i(rect[1], 0, ibuf->y) : 0;
   const int y1 = rect != nullptr ? clamp_i(rect[3], 0, ibuf->y) : ibuf->y;
+  if (x0 >= x1 || y0 >= y1) {
+    /* Nothing to write: the map is acquired, but the rectangle covers no texel. */
+    BKE_image_release_ibuf(&image, ibuf, lock);
+    return true;
+  }
   /* The index of the stored texel for the image texel (x, y): the cropped buffer's rows start at
    * the rectangle's first column, every other buffer is the image's own. */
   const auto stored_index = [&](const int x, const int y) {
@@ -475,24 +484,31 @@ void bake_write_stored_image(Image &image,
                               int64_t(y) * width + x;
   };
   if (stored_float) {
-    if (float *floats = (ibuf->byte_buffer.data == nullptr && ibuf->float_buffer.data != nullptr) ?
-                            ibuf->float_data_for_write() :
-                            nullptr)
-    {
-      const float *values = static_cast<const float *>(stored);
-      for (int y = y0; y < y1; y++) {
-        for (int x = x0; x < x1; x++) {
-          const int64_t i = int64_t(y) * width + x;
-          const int64_t s = stored_index(x, y);
-          floats[i * 4 + 0] = values[s * 4 + 0];
-          floats[i * 4 + 1] = values[s * 4 + 1];
-          floats[i * 4 + 2] = values[s * 4 + 2];
-          floats[i * 4 + 3] = values[s * 4 + 3];
-        }
+    float *floats = (ibuf->byte_buffer.data == nullptr && ibuf->float_buffer.data != nullptr) ?
+                        ibuf->float_data_for_write() :
+                        nullptr;
+    if (floats == nullptr) {
+      BKE_image_release_ibuf(&image, ibuf, lock);
+      return false;
+    }
+    const float *values = static_cast<const float *>(stored);
+    for (int y = y0; y < y1; y++) {
+      for (int x = x0; x < x1; x++) {
+        const int64_t i = int64_t(y) * width + x;
+        const int64_t s = stored_index(x, y);
+        floats[i * 4 + 0] = values[s * 4 + 0];
+        floats[i * 4 + 1] = values[s * 4 + 1];
+        floats[i * 4 + 2] = values[s * 4 + 2];
+        floats[i * 4 + 3] = values[s * 4 + 3];
       }
     }
   }
-  else if (uchar *pixels = ibuf->byte_data_for_write()) {
+  else {
+    uchar *pixels = ibuf->byte_data_for_write();
+    if (pixels == nullptr) {
+      BKE_image_release_ibuf(&image, ibuf, lock);
+      return false;
+    }
     const uchar *values = static_cast<const uchar *>(stored);
     for (int y = y0; y < y1; y++) {
       for (int x = x0; x < x1; x++) {
@@ -507,6 +523,7 @@ void bake_write_stored_image(Image &image,
   }
   bake_image_pixels_changed(image, *ibuf, tile_number, rect);
   BKE_image_release_ibuf(&image, ibuf, lock);
+  return true;
 }
 
 /** The coverage map keeps its grey in all three colour channels and is opaque. */

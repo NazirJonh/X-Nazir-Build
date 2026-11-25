@@ -4742,6 +4742,11 @@ size_t paint_layer_effect_cache_budget()
 
 int64_t BKE_paint_layers_cache_budget_bytes(const int64_t default_bytes)
 {
+  /* An unknown cache (or one deliberately sized zero) stays zero: the floor below is for a real
+   * cache's share of a positive preference, not for turning "no such cache" into 1 MiB. */
+  if (default_bytes <= 0) {
+    return default_bytes;
+  }
   const int pref_mb = U.paint_layers_cache_budget_mb;
   if (pref_mb <= 0) {
     return default_bytes;

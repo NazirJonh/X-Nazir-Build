@@ -202,7 +202,8 @@ void BKE_paint_layers_cache_budgets_sync_from_userdef();
  * Print every paint cache's used and budget bytes to stderr, one `PAINT_MEM caches` line each and
  * a `PAINT_MEM caches_total` sum, when `BLENDER_PAINT_MEM_LOG` is set; a no-op otherwise. \a where
  * names the caller (the bake commit, a manual probe) and is echoed on each line. For diagnosing
- * the 4K texture-memory footprint, never on a pixel path.
+ * the 4K texture-memory footprint, never on a pixel path. Main thread only: the sizes are read
+ * without the caches' locks, so a probe must not run on a bake worker.
  */
 void BKE_paint_layers_cache_debug_log(const char *where);
 

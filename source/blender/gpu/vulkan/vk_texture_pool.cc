@@ -494,6 +494,44 @@ void VKTexturePool::offset_users_count(Texture *texture, int offset)
   acquired_.add_overwrite(texture_handle);
 }
 
+void VKTexturePool::enforce_pool_budget()
+{
+  const uint64_t budget = GPU_texture_pool_budget_get();
+  if (budget == 0) {
+    return;
+  }
+  /* A VK allocation is a whole 64 MiB chunk shared by several images, so the budget can only give
+   * back chunks no acquired texture still holds a segment of. */
+  for (;;) {
+    VkDeviceSize total = 0;
+    for (const AllocationHandle &handle : allocations_) {
+      total += handle.allocation_info.size;
+    }
+    if (uint64_t(total) <= budget) {
+      return;
+    }
+    std::optional<AllocationHandle> largest;
+    for (const AllocationHandle &handle : allocations_) {
+      if (!handle.is_unused()) {
+        continue;
+      }
+      if (!largest || handle.allocation_info.size > largest->allocation_info.size) {
+        largest = handle;
+      }
+    }
+    if (!largest) {
+      return;
+    }
+    if (image_cache_) {
+      image_cache_->discard_all_of(largest->allocation);
+    }
+    /* Remove before freeing: the set key compares the allocation handle, and a future `free()`
+     * zeroing it would make the lookup miss and leave a freed allocation in the set. */
+    allocations_.remove(*largest);
+    largest->free();
+  }
+}
+
 void VKTexturePool::reset(bool force_free)
 {
   /* Iterate acquired textures. */
@@ -535,6 +573,20 @@ void VKTexturePool::reset(bool force_free)
   if (image_cache_) {
     image_cache_->reset();
   }
+
+  /* Bound the memory parked in whole allocations. Only allocations with no acquired segment may
+   * go; a budget smaller than the working set is a soft limit, as it is for every pool. */
+  enforce_pool_budget();
+
+  VkDeviceSize parked_bytes = 0;
+  for (const AllocationHandle &handle : allocations_) {
+    parked_bytes += handle.allocation_info.size;
+  }
+  texture_pool_log_sample(log_state_,
+                          "vk",
+                          parked_bytes,
+                          GPU_texture_pool_budget_get(),
+                          int64_t(allocations_.size()));
 
   /* Log debug usage data if it differs from the last `::reset()`. */
   if (G.debug & G_DEBUG_GPU) {

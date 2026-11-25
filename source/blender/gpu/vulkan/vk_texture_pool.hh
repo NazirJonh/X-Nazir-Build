@@ -166,6 +166,12 @@ class VKTexturePool : public TexturePoolBase {
   /* Output usage data to debug log. Called on `--debug-gpu` */
   void log_usage_data();
 
+  /** Last diagnostic sample, so a reset that changes nothing logs nothing. */
+  TexturePoolLogState log_state_;
+
+  /* Evict the largest fully-unused allocations until the parked total fits the budget. */
+  void enforce_pool_budget();
+
  protected:
   Texture *acquire_texture_impl(int3 extent,
                                 int mip_len,

@@ -20,6 +20,7 @@
 #include "ED_material_combined.hh"
 #include "ED_paint_layers_bake.hh"
 
+#include "paint_layers_shader_bake_backend_intern.hh"
 #include "render_material_bake_intern.hh"
 
 #include "BLI_index_range.hh"
@@ -571,6 +572,91 @@ TEST_F(MaterialBakeTest, a_source_in_the_root_tree_attaches_without_an_assert)
     }
   }
   EXPECT_EQ(aovs, int(requests.size()));
+}
+
+/**
+ * The material the shader-bake builds for a node-group filter wires the convention by name: the
+ * definition names its sockets `Input` and `Result`, and the instance's identifiers are the
+ * generated `Socket_<n>`, so the resolver has to reach the name fallback the identifier-first
+ * lookup takes. The links are read off the built material -- the input image feeds the instance's
+ * `Input`, and the instance's `Result` lands on the Principled's Base Color -- the real wiring,
+ * not a copy of the lookup. Without the name fallback both sockets are found by nothing and the
+ * ask renders the black fallback instead.
+ */
+TEST_F(MaterialBakeTest, node_group_filter_wires_the_convention_by_name)
+{
+  /* The definition the row would read: one Color `Input` and one Color `Result`, whose instance
+   * identifiers are the generated `Socket_<n>`, not the names. */
+  bNodeTree *tree = bke::node_tree_add_tree(bmain, "NG Filter Bake", "ShaderNodeTree");
+  ASSERT_NE(tree, nullptr);
+  tree->tree_interface.add_socket(
+      "Input", "", "NodeSocketColor", NODE_INTERFACE_SOCKET_INPUT, nullptr);
+  tree->tree_interface.add_socket(
+      "Result", "", "NodeSocketColor", NODE_INTERFACE_SOCKET_OUTPUT, nullptr);
+
+  const float blank[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *input_image = BKE_image_add_generated(
+      bmain, 8, 8, "NG Filter Input", 32, false, IMA_GENTYPE_BLANK, blank, false, false, false);
+  ASSERT_NE(input_image, nullptr);
+
+  PaintLayerShaderBakeRequest request;
+  request.tree = tree;
+  float pixels[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  PaintLayerShaderBakeOutput output;
+  output.channel = -1;
+  output.pixels = pixels;
+  Material *built = blender::ed::render::paint_layers_shader_bake_backend_material_build(
+      *bmain, request, input_image, Span<const PaintLayerShaderBakeOutput>(&output, 1));
+  ASSERT_NE(built, nullptr);
+  ASSERT_NE(built->nodetree, nullptr);
+
+  /* The instance is the only group node the temporary material carries; its sockets are the
+   * definition's interface, named `Input` and `Result`, identified `Socket_<n>`. */
+  bNode *instance = nullptr;
+  for (bNode &node : built->nodetree->nodes) {
+    if (node.is_group()) {
+      instance = &node;
+    }
+  }
+  ASSERT_NE(instance, nullptr);
+  built->nodetree->ensure_topology_cache();
+
+  const bNodeSocket *input_in = nullptr;
+  for (const bNodeSocket *socket : instance->input_sockets()) {
+    if (blender::StringRef(socket->name) == "Input") {
+      input_in = socket;
+    }
+  }
+  ASSERT_NE(input_in, nullptr);
+  EXPECT_TRUE(input_in->is_directly_linked()) << "the input image feeds the instance's `Input`";
+
+  const bNodeSocket *result_out = nullptr;
+  for (const bNodeSocket *socket : instance->output_sockets()) {
+    if (blender::StringRef(socket->name) == "Result") {
+      result_out = socket;
+    }
+  }
+  ASSERT_NE(result_out, nullptr);
+
+  /* The one-answer contract lands `Result` on the Base Color: the ask carries no alpha, so the
+   * link is the straight one, not a Compose carrier, and the black fallback stays unused. */
+  const bNode *principled = nullptr;
+  for (const bNode &node : built->nodetree->nodes) {
+    if (node.type_legacy == SH_NODE_BSDF_PRINCIPLED) {
+      principled = &node;
+    }
+  }
+  ASSERT_NE(principled, nullptr);
+  const bNodeSocket *base_color = bke::node_find_socket(*principled, SOCK_IN, "Base Color"_ustr);
+  ASSERT_NE(base_color, nullptr);
+  ASSERT_TRUE(base_color->is_directly_linked()) << "the black fallback must not be used";
+  const bNodeLink &link = *base_color->directly_linked_links()[0];
+  EXPECT_EQ(link.fromnode, instance);
+  EXPECT_EQ(link.fromsock, result_out);
+
+  /* The built material holds a user on the definition and on the input image; free it here so the
+   * users drop before the fixture's main is freed. */
+  BKE_id_free(bmain, built);
 }
 
 }  // namespace blender::ed::material_bake::tests

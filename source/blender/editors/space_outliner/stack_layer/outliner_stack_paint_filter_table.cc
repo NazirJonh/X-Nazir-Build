@@ -177,6 +177,9 @@ static PaintKindLook paint_filter_look(const int16_t filter)
     case MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK:
       /* The mask modifier's icon names what the grey the normal rebuilds into is: a mask. */
       return {ICON_MOD_MASK, 0};
+    case MA_PAINT_LAYER_FILTER_NODE_GROUP:
+      /* The node editor's icon names what the filter's kernel is: the user's own group. */
+      return {ICON_NODETREE, 0};
   }
   return {ICON_ARROW_LEFTRIGHT, 0};
 }

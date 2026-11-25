@@ -18,19 +18,25 @@
 #include "BKE_blender.hh"
 #include "BKE_global.hh"
 #include "BKE_gtest_base.hh"
+#include "BKE_idprop.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
+#include "BKE_node.hh"
+#include "BKE_node_tree_interface.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
+#include "BKE_paint_layers_generator_registry.hh"
 
 #include "RNA_access.hh"
 #include "RNA_prototypes.hh"
 
 #include "BLI_index_range.hh"
 #include "BLI_set.hh"
+#include "BLI_string_ref.hh"
 #include "BLI_uuid.h"
 
 #include "DNA_material_types.h"
+#include "DNA_node_types.h"
 
 #include <array>
 #include <string>
@@ -1678,6 +1684,106 @@ TEST_F(PaintLayersFilterKindsTest, the_spreading_kinds_carry_the_result_alpha)
   {
     EXPECT_FALSE(has_result_alpha(filter)) << "filter " << int(filter);
   }
+}
+
+TEST_F(PaintLayersFilterKindsTest, node_group_filter_kind_is_a_dynamic_schema_operator)
+{
+  Material *ma = BKE_material_add(bmain, "NodeGroupFilterKindMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+
+  /* The node-group filter: a correction and a mask item, computed through the effect cache, its
+   * schema the dynamic one. Without a definition the schema is empty and the kind reads -- the
+   * way a kind a newer build registered reads, minus the silent no-op. */
+  MaterialPaintLayer *group = BKE_paint_layers_filter_add(*ma, row,
+                                                          MA_PAINT_LAYER_FILTER_NODE_GROUP);
+  ASSERT_NE(group, nullptr);
+  EXPECT_TRUE(paint_layer_kind_has_flag(*group, PAINT_LAYER_KIND_NEEDS_BAKE));
+  EXPECT_TRUE(paint_layer_kind_has_flag(*group, PAINT_LAYER_KIND_MASK_NEEDS_LUMA));
+  EXPECT_TRUE(paint_layer_kind_has_flag(*group, PAINT_LAYER_KIND_DYNAMIC_SCHEMA));
+  EXPECT_FALSE(paint_layer_kind_has_flag(*group, PAINT_LAYER_KIND_GPU_COMPUTED));
+  /* The alpha of the result is the definition's answer, not the static entry's: without a tree
+   * the kind stays colour-only, whatever a tree assigned later exposes. */
+  EXPECT_FALSE(paint_layer_kind_has_flag(*group, PAINT_LAYER_KIND_RESULT_HAS_ALPHA));
+  group->role = MA_PAINT_LAYER_ROLE_EFFECT;
+  EXPECT_TRUE(paint_layer_kind_role_allowed(*group));
+  group->role = MA_PAINT_LAYER_ROLE_MASK_ITEM;
+  EXPECT_TRUE(paint_layer_kind_role_allowed(*group));
+  group->role = MA_PAINT_LAYER_ROLE_LAYER;
+  EXPECT_FALSE(paint_layer_kind_role_allowed(*group));
+  group->role = MA_PAINT_LAYER_ROLE_EFFECT;
+}
+
+/** A shader tree whose interface exposes an \a input_type `Input` and an \a output_type `Result`:
+ * the smallest definition a filter kind can be offered. */
+static bNodeTree *node_group_filter_tree_make(Main *bmain,
+                                              const char *name,
+                                              const char *input_type,
+                                              const char *output_type)
+{
+  bNodeTree *tree = bke::node_tree_add_tree(bmain, name, "ShaderNodeTree");
+  if (tree == nullptr) {
+    return nullptr;
+  }
+  tree->tree_interface.add_socket(
+      "Result", "", output_type, NODE_INTERFACE_SOCKET_OUTPUT, nullptr);
+  tree->tree_interface.add_socket(
+      "Input", "", input_type, NODE_INTERFACE_SOCKET_INPUT, nullptr);
+  return tree;
+}
+
+TEST_F(PaintLayersFilterKindsTest, node_group_filter_validator_requires_color_input_and_result)
+{
+  /* The required sockets are colors, the way the kernel reads them: the contract's type rule,
+   * beside the names and directions the shape scan checks. */
+  bNodeTree *tree = node_group_filter_tree_make(
+      bmain, "NG Color Filter", "NodeSocketColor", "NodeSocketColor");
+  ASSERT_NE(tree, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_node_group_supports_filter(tree));
+}
+
+TEST_F(PaintLayersFilterKindsTest, node_group_filter_validator_refuses_a_non_color_input)
+{
+  bNodeTree *tree = node_group_filter_tree_make(
+      bmain, "NG Float Input", "NodeSocketFloat", "NodeSocketColor");
+  ASSERT_NE(tree, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_node_group_supports_filter(tree));
+}
+
+TEST_F(PaintLayersFilterKindsTest, node_group_filter_validator_refuses_a_non_color_result)
+{
+  bNodeTree *tree = node_group_filter_tree_make(
+      bmain, "NG Float Result", "NodeSocketColor", "NodeSocketFloat");
+  ASSERT_NE(tree, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_node_group_supports_filter(tree));
+}
+
+TEST_F(PaintLayersFilterKindsTest, node_group_filter_refusal_keeps_the_definition)
+{
+  Material *ma = BKE_material_add(bmain, "NG Filter Set Mat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  MaterialPaintLayer *group = BKE_paint_layers_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_NODE_GROUP);
+  ASSERT_NE(group, nullptr);
+
+  bNodeTree *valid = node_group_filter_tree_make(
+      bmain, "NG Set Valid", "NodeSocketColor", "NodeSocketColor");
+  ASSERT_NE(valid, nullptr);
+  bNodeTree *refused = node_group_filter_tree_make(
+      bmain, "NG Set Refused", "NodeSocketFloat", "NodeSocketColor");
+  ASSERT_NE(refused, nullptr);
+
+  /* The valid definition is adopted: the setter takes the user the row reads the tree by. */
+  EXPECT_TRUE(BKE_paint_layers_kind_tree_set(*ma, group, valid));
+  ASSERT_EQ(group->kind_tree, valid);
+  const int valid_users = valid->id.us;
+
+  /* A Float `Input` breaks the contract: the refusal changes nothing -- the row keeps the
+   * definition it reads, with the user it holds on it. */
+  EXPECT_FALSE(BKE_paint_layers_kind_tree_set(*ma, group, refused));
+  EXPECT_EQ(group->kind_tree, valid);
+  EXPECT_EQ(valid->id.us, valid_users);
 }
 
 }  // namespace blender::bke::tests

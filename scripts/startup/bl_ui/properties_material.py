@@ -31,6 +31,7 @@ from bl_ui.properties_material_paint_layers import (
     draw_material_layer_height,
     draw_material_mask_coverage_item,
     draw_material_mask_item,
+    draw_material_node_group_slot,
     draw_material_smart_asset_expose,
     draw_material_smart_asset_rows,
     draw_material_effect_image_slot,
@@ -955,6 +956,7 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
                 self._draw_opacity_lock(layout, item)
                 layout.prop(item, "mask_contrast", text="Contrast", slider=True)
                 layout.separator()
+                draw_material_node_group_slot(layout, item)
                 if item.is_map_coverage:
                     draw_material_mask_coverage_item(layout, context, item)
                 elif item.reads_image_slot:
@@ -1049,6 +1051,7 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
         # A filter has no map or channel records: what it is told is the parameters of its kind.
         if layer.source == 'FILTER':
             layout.separator()
+            draw_material_node_group_slot(layout, layer)
             if layer.is_transform_effect:
                 # A transform effect keeps its mapping as its parameter set: the Mapping panel and
                 # the gizmo edit it, and there is nothing else on the row to draw.

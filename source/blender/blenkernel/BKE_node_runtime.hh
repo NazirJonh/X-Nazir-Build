@@ -142,6 +142,18 @@ class bNodeTreeRuntime : NonCopyable, NonMovable {
    */
   uint32_t previews_refresh_state = 0;
 
+  /**
+   * A monotonically increasing revision of the tree's contents, raised by the tree update when the
+   * tree carried a change tag (a node value, a link, an interface item, or a nested group's answer
+   * reaching it). It is the paint layer stack's own edit signal, kept apart from
+   * #previews_refresh_state -- which belongs to the preview system -- because the node-group
+   * definition caches (`paint_layers_kind_dynamic.cc`) key their memos and their bake identity on
+   * it: an edit inside a tree must retire every cached answer of the rows that read it, and a
+   * refactor of the preview flag must not silently stop that from happening. The readers fold the
+   * nested group trees' revisions in by their own recursion, the way they fold the topology hash.
+   */
+  uint32_t content_revision = 0;
+
   /** Allows logging zone graphs purely for debugging purposes. */
   std::unique_ptr<LoggedZoneGraphs> logged_zone_graphs;
 

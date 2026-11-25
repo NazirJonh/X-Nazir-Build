@@ -19,6 +19,8 @@
 
 /** u00B0: `°`. */
 #define BLI_STR_UTF8_DEGREE_SIGN "\xc2\xb0"
+/** u00B7: `·` */
+#define BLI_STR_UTF8_MIDDLE_DOT "\xc2\xb7"
 /** u00B2: `²` */
 #define BLI_STR_UTF8_SUPERSCRIPT_2 "\xc2\xb2"
 /** u00B3: `³` */

@@ -2437,8 +2437,55 @@ static bool bake_subtree_projects_in_decal_space(const MaterialPaintLayer &node,
   return false;
 }
 
+/**
+ * Whether \a node is a node-group filter correction: the kind whose kernel renders through the
+ * shader-bake hooks rather than from its own math.
+ */
+static bool bake_node_is_node_group_filter(const MaterialPaintLayer &node)
+{
+  return node.source == MA_PAINT_LAYER_SOURCE_FILTER &&
+         node.kind_subtype == MA_PAINT_LAYER_FILTER_NODE_GROUP;
+}
+
+/**
+ * Whether anything in \a layer's subtree is a node-group filter. Its kernel asks the shader-bake
+ * backend for the pixels, and the backend refuses an ask from a worker thread (the EEVEE material
+ * bake and the temporary datablocks it builds are main-thread work). A heavy row is handed to the
+ * bake job, so such a row must stay on the main thread: otherwise the filter would silently drop
+ * out of the baked map, which is worse than the synchronous bake it costs.
+ */
+static bool bake_subtree_has_node_group_filter(const MaterialPaintLayer &layer)
+{
+  if (bake_node_is_node_group_filter(layer)) {
+    return true;
+  }
+  for (const MaterialPaintLayer &effect : layer.effects) {
+    if (bake_subtree_has_node_group_filter(effect)) {
+      return true;
+    }
+  }
+  for (const MaterialPaintLayer &item : layer.mask_stack) {
+    if (bake_subtree_has_node_group_filter(item)) {
+      return true;
+    }
+  }
+  for (const MaterialPaintLayer &child : layer.children) {
+    if (bake_subtree_has_node_group_filter(child)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool BKE_paint_layers_bake_is_heavy(const Material &ma, const MaterialPaintLayer &layer)
 {
+  if (bake_subtree_has_node_group_filter(layer)) {
+    /* A node-group filter's kernel renders on the main thread: the bake job's worker ask is
+     * refused by the backend, and a heavy row would then bake without the filter and without a
+     * message. The synchronous path is the correct one until the render moves off the main thread
+     * with a GPU context of its own. */
+    return false;
+  }
   if (bake_subtree_has_decal_frame_effect(layer)) {
     /* The Decal map and its inverse are cached per object and built from the evaluated mesh, which
      * only the main thread may read: the worker job gets the rasterized surface and nothing else.

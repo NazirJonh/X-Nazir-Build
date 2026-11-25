@@ -23,17 +23,25 @@
 #include "MEM_guardedalloc.h"
 
 #include "BLI_listbase.h"
+#include "BLI_math_base.h"
 #include "BLI_math_color.h"
+#include "BLI_math_constants.h"
+#include "BLI_memory_utils.hh"
 #include "BLI_rect.h"
 #include "BLI_ustring.hh"
 #include "BLI_uuid.h"
 
 #include "paint_layers_generate_test_fixture.hh"
 
+#include "BKE_colorband.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
+#include "BKE_node_tree_update.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_edit.hh"
+#include "BKE_paint_layers_generator.hh"
+#include "BKE_paint_layers_node_group.hh"
+#include "BKE_paint_layers_shader_bake.hh"
 #include "BKE_wm_runtime.hh"
 
 #include "BLI_set.hh"
@@ -7595,4 +7603,433 @@ TEST_F(PaintLayersEffectTest, a_laid_correction_refuses_the_row_source_footprint
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Node Group Filter (the precomputed result)
+ *
+ * The user's node-group filter is a CPU-computed kind with no GPU branch: the GPU Combined preview
+ * serves it from the CPU effect cache's buffer instead of an effect pass, so the buffer the public
+ * getter hands over is the whole test surface. The backend is stubbed here the way the editors
+ * register theirs, with a render that moves with the definition, so the cache's keying on the
+ * definition hash is observable end to end.
+ * \{ */
+
+/**
+ * A stub shader-bake backend: the answer scales the input's colour by one step per input socket
+ * the definition's interface exposes, alpha carried through. A deterministic function of the tree
+ * and the pixels, so a definition edit that moves the hash moves the answer with it.
+ *
+ * A #PAINT_LAYER_KIND_RESULT_HAS_ALPHA ask (a tree whose interface exposes an `Alpha` output) is
+ * answered the way the real backend answers one: a straight layer of its own -- the gain-scaled
+ * red the tree's `Result` stands for, at the fixed alpha the tree's `Alpha` output stands for --
+ * premultiplied before it lands in the caller's buffer, the form the backend's copy leaves the
+ * answer in. The fixed red and the half alpha are the stub's stand-in for the tree's own answer:
+ * unlike the input-following colour branch, they show on the empty half of a map, which is what
+ * the alpha's coverage raise is about.
+ */
+static bool node_group_filter_stub_render(const PaintLayerShaderBakeRequest &request,
+                                          MutableSpan<PaintLayerShaderBakeOutput> outputs)
+{
+  if (request.tree == nullptr || request.input_pixels == nullptr || outputs.is_empty()) {
+    return false;
+  }
+  MutableSpan<float> r_pixels(outputs.first().pixels,
+                              size_t(request.width) * size_t(request.height) * 4);
+  int input_sockets = 0;
+  request.tree->tree_interface.root_panel.foreach_item(
+      [&](const bNodeTreeInterfaceItem &item) {
+        if (item.item_type != NodeTreeInterfaceItemType::Socket) {
+          return true;
+        }
+        const bNodeTreeInterfaceSocket &socket = reinterpret_cast<const bNodeTreeInterfaceSocket &>(item);
+        if ((socket.flag & NODE_INTERFACE_SOCKET_INPUT) != 0) {
+          input_sockets++;
+        }
+        return true;
+      });
+  const float gain = 1.0f + 0.25f * float(input_sockets);
+  const int64_t count = r_pixels.size() / 4;
+  if (request.result_has_alpha) {
+    /* Straight red at the half alpha, then the backend's own premultiply. */
+    constexpr float alpha = 0.5f;
+    for (const int64_t i : IndexRange(count)) {
+      r_pixels[i * 4 + 0] = gain * alpha;
+      r_pixels[i * 4 + 1] = 0.0f;
+      r_pixels[i * 4 + 2] = 0.0f;
+      r_pixels[i * 4 + 3] = alpha;
+    }
+    return true;
+  }
+  for (const int64_t i : IndexRange(count)) {
+    r_pixels[i * 4 + 0] = request.input_pixels[i * 4 + 0] * gain;
+    r_pixels[i * 4 + 1] = request.input_pixels[i * 4 + 1] * gain;
+    r_pixels[i * 4 + 2] = request.input_pixels[i * 4 + 2] * gain;
+    r_pixels[i * 4 + 3] = request.input_pixels[i * 4 + 3];
+  }
+  return true;
+}
+
+/** Install the stub for the scope of a test; the default cleared back is the no-backend state. */
+class ScopedShaderBakeStub {
+ public:
+  ScopedShaderBakeStub(Main &bmain)
+  {
+    BKE_paint_layers_shader_bake_hooks_set({node_group_filter_stub_render, &bmain});
+  }
+  ~ScopedShaderBakeStub()
+  {
+    BKE_paint_layers_shader_bake_hooks_set({});
+  }
+};
+
+/* The three tests below read the combined preview's precomputed-result API
+ * (#BKE_paint_layers_effect_buffer_result, #BKE_paint_layers_effect_node_group_can_compute,
+ * #paint_layer_effect_is_precomputed_result, #paint_layer_filter_is_precomputed_result), which the
+ * `06_combined_preview` patch of the custom-effects series adds. Disabled until that patch is
+ * integrated, so this build's test binary compiles. */
+#if 0
+TEST_F(PaintLayersEffectTest, the_node_group_filter_result_is_the_kernel_answer)
+{
+  /* The stub lives for the test only: the hooks are process state, and a later test must start
+   * from the no-backend state every build ships in. */
+  ScopedShaderBakeStub stub(*bmain);
+
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  MaterialPaintLayer *group = add_effect(*row, MA_PAINT_LAYER_FILTER_NODE_GROUP);
+  ASSERT_NE(group, nullptr);
+  /* The definition the row names: one content input and the result output, plus a scalar the
+   * dynamic schema exposes as its parameter. */
+  bNodeTree *tree = make_tree("NG Filter Result");
+  ASSERT_NE(tree, nullptr);
+  tree->tree_interface.add_socket(
+      "Result", "", "NodeSocketColor", NODE_INTERFACE_SOCKET_OUTPUT, nullptr);
+  tree->tree_interface.add_socket(
+      "Input", "", "NodeSocketColor", NODE_INTERFACE_SOCKET_INPUT, nullptr);
+  tree->tree_interface.add_socket(
+      "Fac", "", "NodeSocketFloat", NODE_INTERFACE_SOCKET_INPUT, nullptr);
+  group->kind_tree = tree;
+  clear_active();
+
+  /* The answer the CPU composite reads: the input the effect is computed on, the kernel over it.
+   * Both sides run the same describe, the same evaluator and the same kernel -- the getter is
+   * parity by construction, and this is the check that it hands out what it computed. */
+  PaintMaterialCompositeImageLayer entry;
+  ASSERT_TRUE(BKE_paint_layers_effect_input_describe(
+      *ma, *row, *group, int(kColor), false, false, entry));
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(BKE_paint_material_composite_stack_dimensions(
+      Span<PaintMaterialCompositeImageLayer>(&entry, 1), width, height));
+  ImBuf *expected = IMB_allocImBuf(width, height, ImBufFlags::FloatData);
+  ASSERT_NE(expected, nullptr);
+  ASSERT_NE(expected->float_data_for_write(), nullptr);
+  Vector<float> coverage(int64_t(width) * height);
+  ASSERT_TRUE(BKE_paint_material_composite_eval_row_content(
+      entry, expected->float_data_for_write(), coverage.data(), nullptr, int(kColor), width, height));
+  paint_layer_effect_kernel_apply(*expected, *group, /*for_mask=*/false, PAINT_TILE_NUMBER_BASE);
+
+  int got_width = 0;
+  int got_height = 0;
+  std::shared_ptr<ImBuf> result = BKE_paint_layers_effect_buffer_result(
+      *ma, *group, int(kColor), PAINT_TILE_NUMBER_BASE, got_width, got_height);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(got_width, width);
+  EXPECT_EQ(got_height, height);
+  ASSERT_NE(result->float_data(), nullptr);
+  const int64_t total = int64_t(width) * height * 4;
+  for (const int64_t i : IndexRange(total)) {
+    EXPECT_NEAR(result->float_data()[i], expected->float_data()[i], 0.0f)
+        << "the getter is the kernel's own answer, texel " << i / 4 << " component " << i % 4;
+  }
+  IMB_freeImBuf(expected);
+}
+
+TEST_F(PaintLayersEffectTest, the_node_group_filter_cache_keys_on_the_definition)
+{
+  ScopedShaderBakeStub stub(*bmain);
+
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  MaterialPaintLayer *group = add_effect(*row, MA_PAINT_LAYER_FILTER_NODE_GROUP);
+  ASSERT_NE(group, nullptr);
+  bNodeTree *tree = make_tree("NG Filter Keys");
+  ASSERT_NE(tree, nullptr);
+  tree->tree_interface.add_socket(
+      "Result", "", "NodeSocketColor", NODE_INTERFACE_SOCKET_OUTPUT, nullptr);
+  tree->tree_interface.add_socket(
+      "Input", "", "NodeSocketColor", NODE_INTERFACE_SOCKET_INPUT, nullptr);
+  group->kind_tree = tree;
+  clear_active();
+
+  int width = 0;
+  int height = 0;
+  std::shared_ptr<ImBuf> first = BKE_paint_layers_effect_buffer_result(
+      *ma, *group, int(kColor), PAINT_TILE_NUMBER_BASE, width, height);
+  ASSERT_NE(first, nullptr);
+  /* The definition folds the interface and the graph, so a tree on the row gives a nonzero
+   * fingerprint: the hash the effect cache key carries beside the parameters. */
+  const uint64_t hash_before = BKE_paint_layers_node_group_definition_hash(*group);
+  EXPECT_NE(hash_before, 0ull);
+
+  /* The second ask is the same entry: a hit, not a recompute -- the same buffer object, which is
+   * the key stability the GPU preview's upload relies on when it keys its own texture beside it. */
+  int again_width = 0;
+  int again_height = 0;
+  std::shared_ptr<ImBuf> second = BKE_paint_layers_effect_buffer_result(
+      *ma, *group, int(kColor), PAINT_TILE_NUMBER_BASE, again_width, again_height);
+  EXPECT_EQ(second.get(), first.get()) << "the same key answers the same buffer";
+  EXPECT_EQ(again_width, width);
+  EXPECT_EQ(again_height, height);
+
+  /* An interface edit is a definition edit: the fingerprint moves, and with it the key -- the
+   * next ask recomputes and the stub's new answer lands. The forget is what an RNA edit of the
+   * interface calls, so the interface memo does not answer with the old hash. */
+  tree->tree_interface.add_socket(
+      "Extra", "", "NodeSocketFloat", NODE_INTERFACE_SOCKET_INPUT, nullptr);
+  BKE_paint_layers_node_group_forget(tree);
+  const uint64_t hash_after = BKE_paint_layers_node_group_definition_hash(*group);
+  EXPECT_NE(hash_after, hash_before) << "an interface socket moves the definition hash";
+
+  int moved_width = 0;
+  int moved_height = 0;
+  std::shared_ptr<ImBuf> moved = BKE_paint_layers_effect_buffer_result(
+      *ma, *group, int(kColor), PAINT_TILE_NUMBER_BASE, moved_width, moved_height);
+  ASSERT_NE(moved, nullptr);
+  EXPECT_NE(moved.get(), first.get()) << "a moved key is not served the old buffer";
+  /* The stub answers one shade step per input socket: one more socket, one step more, over the
+   * same input pixels the cache re-rendered. */
+  const float *before = first->float_data();
+  const float *after = moved->float_data();
+  ASSERT_NE(before, nullptr);
+  ASSERT_NE(after, nullptr);
+  bool differs = false;
+  for (const int64_t i : IndexRange(int64_t(width) * height * 4)) {
+    if (std::abs(after[i] - before[i]) > 1e-6f) {
+      differs = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(differs) << "the recomputed answer carries the new definition";
+}
+
+TEST_F(PaintLayersEffectTest, the_node_group_filter_refusal_follows_the_backend)
+{
+  /* No backend is registered (this fixture ships none): the kernel would leave its buffer
+   * unchanged, so the GPU path must refuse the job and the CPU preview answers -- which reads the
+   * same no-op buffer it always has. The refusal is the effect stage's, not the reason
+   * function's, which reads the description alone. */
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *group = add_effect(*row, MA_PAINT_LAYER_FILTER_NODE_GROUP);
+  ASSERT_NE(group, nullptr);
+  bNodeTree *tree = make_tree("NG Filter Refusal");
+  ASSERT_NE(tree, nullptr);
+  group->kind_tree = tree;
+  clear_active();
+
+  EXPECT_TRUE(paint_layer_effect_is_precomputed_result(*group));
+  EXPECT_TRUE(paint_layer_filter_is_precomputed_result(int16_t(MA_PAINT_LAYER_FILTER_NODE_GROUP)));
+  EXPECT_FALSE(BKE_paint_layers_effect_node_group_can_compute(*group))
+      << "no backend, no answer: the GPU path refuses the job";
+  {
+    MaterialPaintLayer *blur = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR);
+    ASSERT_NE(blur, nullptr);
+    EXPECT_FALSE(paint_layer_effect_is_precomputed_result(*blur))
+        << "a GPU-computed kind keeps its own pass";
+    EXPECT_TRUE(paint_layer_effect_is_gpu_computed(*blur));
+  }
+
+  /* The backend alone is not the answer either: the kernel runs over the row's own definition, and
+   * a row that lost it has nothing to render. */
+  ScopedShaderBakeStub stub(*bmain);
+  EXPECT_TRUE(BKE_paint_layers_effect_node_group_can_compute(*group));
+  group->kind_tree = nullptr;
+  EXPECT_FALSE(BKE_paint_layers_effect_node_group_can_compute(*group))
+      << "no definition, no answer";
+  group->kind_tree = tree;
+
+  /* The content-correction form passes the stack refusal whatever the backend is: the effect stage
+   * asks the backend question, and refusing here would keep the whole stack off the GPU even for
+   * the CPU preview's own describe. */
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(*ma, kColor, layers, /*describe_only=*/true));
+  ASSERT_FALSE(layers.is_empty());
+  EXPECT_EQ(BKE_paint_layers_gpu_unsupported_reason(layers[0], false), nullptr)
+      << "a node-group filter correction rides the GPU stage";
+
+  /* The mask-item form stays refused: the mask pass has no result texture to read, so a node-group
+   * grey in a mask keeps the whole stack with the CPU. */
+  MaterialPaintLayer *mask_item = BKE_paint_layers_mask_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_NODE_GROUP, nullptr);
+  ASSERT_NE(mask_item, nullptr);
+  Vector<PaintMaterialCompositeImageLayer> mask_layers;
+  ASSERT_TRUE(
+      BKE_paint_layers_composite_image_layers(*ma, kColor, mask_layers, /*describe_only=*/true));
+  ASSERT_FALSE(mask_layers.is_empty());
+  const char *reason = BKE_paint_layers_gpu_unsupported_reason(mask_layers[0], false);
+  ASSERT_NE(reason, nullptr);
+  EXPECT_STREQ(reason, "a Node Group correction is read")
+      << "the mask item keeps the CPU-computed refusal";
+}
+#endif
+
+TEST_F(PaintLayersEffectTest, a_node_group_filter_alpha_answer_lays_a_premultiplied_layer)
+{
+  /* The Drop Shadow kernel's contract, carried by the user's tree: a filter whose tree exposes an
+   * `Alpha` output is a #PAINT_LAYER_KIND_RESULT_HAS_ALPHA kind, the backend hands its answer back
+   * premultiplied (the stub mirrors it), and the kernel copies the whole answer over the buffer. */
+  ScopedShaderBakeStub stub(*bmain);
+
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  MaterialPaintLayer *group = add_effect(*row, MA_PAINT_LAYER_FILTER_NODE_GROUP);
+  ASSERT_NE(group, nullptr);
+  /* The definition: `Result`, the alpha it covers by, and the one content input (the stub's gain
+   * reads one step per input socket). */
+  bNodeTree *tree = make_tree("NG Filter Alpha");
+  ASSERT_NE(tree, nullptr);
+  tree->tree_interface.add_socket(
+      "Result", "", "NodeSocketColor", NODE_INTERFACE_SOCKET_OUTPUT, nullptr);
+  tree->tree_interface.add_socket(
+      "Alpha", "", "NodeSocketFloat", NODE_INTERFACE_SOCKET_OUTPUT, nullptr);
+  tree->tree_interface.add_socket(
+      "Input", "", "NodeSocketColor", NODE_INTERFACE_SOCKET_INPUT, nullptr);
+  group->kind_tree = tree;
+  clear_active();
+
+  /* The shape scan answers the kind: the flag the composite, the graph and the bake reads is the
+   * descriptor's, without a branch of the consumers' own. */
+  EXPECT_TRUE(paint_layer_kind_result_has_alpha(*group));
+
+  /* A white square stroke on the left half, nothing on the right: the input the kernel is laid
+   * over, the same shape the Drop Shadow kernel test hands its shadow. */
+  constexpr int size = 8;
+  ImBuf *input = IMB_allocImBuf(size, size, ImBufFlags::FloatData);
+  ASSERT_NE(input, nullptr);
+  float *pixels = input->float_data_for_write();
+  for (const int y : IndexRange(size)) {
+    for (const int x : IndexRange(size)) {
+      float *p = pixels + (int64_t(y) * size + x) * 4;
+      const float covered = x < size / 2 ? 1.0f : 0.0f;
+      p[0] = covered;
+      p[1] = covered;
+      p[2] = covered;
+      p[3] = covered;
+    }
+  }
+  paint_layer_effect_kernel_apply(*input, *group, /*for_mask=*/false, PAINT_TILE_NUMBER_BASE);
+
+  /* The stub's answer: straight red at the one-input gain, an alpha of one half, premultiplied.
+   * Every texel of the buffer is the layer -- the answer covers, it does not blend into the input
+   * the way a colour-only kernel's would. */
+  for (const int y : IndexRange(size)) {
+    for (const int x : IndexRange(size)) {
+      const float *p = pixels + (int64_t(y) * size + x) * 4;
+      EXPECT_NEAR(p[3], 0.5f, 1e-6f) << "alpha at " << x << "," << y;
+      EXPECT_NEAR(p[0], 0.625f, 1e-6f) << "premultiplied red at " << x << "," << y;
+      EXPECT_NEAR(p[1], 0.0f, 1e-6f) << "green at " << x << "," << y;
+      EXPECT_NEAR(p[2], 0.0f, 1e-6f) << "blue at " << x << "," << y;
+    }
+  }
+  IMB_freeImBuf(input);
+}
+
+TEST_F(PaintLayersEffectTest, a_node_group_filter_alpha_shows_on_the_map_around_a_stroke)
+{
+  /* The left half is an opaque white stroke, the right half has no alpha: the tree's alpha raises
+   * the coverage there, which a colour-only answer could never show -- the same walk the Drop
+   * Shadow composite test makes, through the CPU evaluator's alpha raise. */
+  ScopedShaderBakeStub stub(*bmain);
+
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0, false, 0));
+  MaterialPaintLayer *group = add_effect(*row, MA_PAINT_LAYER_FILTER_NODE_GROUP);
+  ASSERT_NE(group, nullptr);
+  bNodeTree *tree = make_tree("NG Filter Alpha Stack");
+  ASSERT_NE(tree, nullptr);
+  tree->tree_interface.add_socket(
+      "Result", "", "NodeSocketColor", NODE_INTERFACE_SOCKET_OUTPUT, nullptr);
+  tree->tree_interface.add_socket(
+      "Alpha", "", "NodeSocketFloat", NODE_INTERFACE_SOCKET_OUTPUT, nullptr);
+  tree->tree_interface.add_socket(
+      "Input", "", "NodeSocketColor", NODE_INTERFACE_SOCKET_INPUT, nullptr);
+  group->kind_tree = tree;
+  clear_active();
+
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  const auto texel = [&](const int x, const int y, const int channel) {
+    return pixels[(int64_t(y) * width + x) * 4 + channel];
+  };
+  /* The layer formula the evaluator runs, `f = opacity x alpha(map)` = one half, the colour read
+   * straightened out of the premultiplied buffer (`composite_decode_tile`, the read every has-alpha
+   * correction's buffer takes): on the stroke the coverage is whole already and the layer mixes
+   * over it by the share its alpha wins; on the empty half the alpha is the coverage the row gains,
+   * and the straight red it lays is the whole pixel before the empty bottom takes its share. */
+  EXPECT_NEAR(texel(1, 4, 0), 1.125f, 2e-3f) << "the layer mixes over the stroke";
+  EXPECT_NEAR(texel(1, 4, 1), 0.5f, 2e-3f);
+  EXPECT_NEAR(texel(1, 4, 2), 0.5f, 2e-3f);
+  for (const int x : {4, 5, 6}) {
+    EXPECT_NEAR(texel(x, 4, 0), 0.625f, 2e-3f) << "the alpha's red on the empty map at " << x;
+    EXPECT_NEAR(texel(x, 4, 1), 0.0f, 2e-3f) << "green at " << x;
+    EXPECT_NEAR(texel(x, 4, 2), 0.0f, 2e-3f) << "blue at " << x;
+  }
+}
+
+/* This test and its #ScopedFlatBakeStub come from the `02_node_group_source` patch of the
+ * custom-effects series: disabled here, since that patch adds both and the duplicate would not
+ * compile once it is integrated. */
+#if 0
+TEST_F(PaintLayersEffectTest, a_value_edit_inside_the_definition_tree_is_due)
+{
+  ScopedFlatBakeStub stub(*bmain);
+
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  MaterialPaintLayer *group = add_effect(*row, MA_PAINT_LAYER_FILTER_NODE_GROUP);
+  ASSERT_NE(group, nullptr);
+  bNodeTree *tree = make_tree("NG Filter Value Edit");
+  ASSERT_NE(tree, nullptr);
+  tree->tree_interface.add_socket(
+      "Result", "", "NodeSocketColor", NODE_INTERFACE_SOCKET_OUTPUT, nullptr);
+  tree->tree_interface.add_socket(
+      "Input", "", "NodeSocketColor", NODE_INTERFACE_SOCKET_INPUT, nullptr);
+  group->kind_tree = tree;
+  clear_active();
+
+  const PaintLayerTileContext tile{.painted_object = nullptr,
+                                   .tile_number = PAINT_TILE_NUMBER_BASE};
+  constexpr int size = 64;
+  /* A fresh row asks for its render, and a landed one stops asking. */
+  EXPECT_TRUE(BKE_paint_layers_shader_bake_due(*ma, *group, tile, size, size));
+  ASSERT_TRUE(BKE_paint_layers_shader_bake_compute(*bmain, *ma, *group, tile, size, size));
+  EXPECT_FALSE(BKE_paint_layers_shader_bake_due(*ma, *group, tile, size, size));
+
+  /* A value edit that moves neither the interface hash nor the output topology: a Mix node's
+   * unlinked factor inside the graph. The tree update raises the content revision the definition
+   * hash folds in, so the landed answer is stale and the render is due again -- a hash that
+   * ignored the values would serve the old answer forever. */
+  bNode *mix = bke::node_add_static_node(nullptr, tree, SH_NODE_MIX);
+  ASSERT_NE(mix, nullptr);
+  bNodeSocket *factor = nullptr;
+  LISTBASE_FOREACH (bNodeSocket *, socket, &mix->inputs) {
+    if (socket->type == SOCK_FLOAT) {
+      factor = socket;
+      break;
+    }
+  }
+  ASSERT_NE(factor, nullptr);
+  static_cast<bNodeSocketValueFloat *>(factor->default_value)->value = 0.75f;
+  BKE_ntree_update_tag_socket_property(tree, factor);
+  BKE_ntree_update_after_single_tree_change(*bmain, *tree);
+
+  EXPECT_TRUE(BKE_paint_layers_shader_bake_due(*ma, *group, tile, size, size))
+      << "the Mix factor edit retires the landed answer";
+}
+#endif
+
+/* The doc comment below belongs to `a_node_group_source_can_be_a_content_correction`, the test the
+ * `02_node_group_source` patch adds after this point; kept as the patch left it. */
+/**
+ * A node-group source is also a content correction: the row form lays the shader-bake's answer as
+ * the row's content, and the correction form lays the same answer over another row's colour. The
+ * add path makes a correction with no records of its own, the kind allows the effective role, and
+ * the composite carries the bake map.
+ */
 }  // namespace blender::bke::tests

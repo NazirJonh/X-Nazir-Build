@@ -1265,6 +1265,29 @@ static const PaintLayerKindInfo kinds[] = {
      /* #PaintLayerKindInfo::reads_channel, writes_only_colour_channels. */
      int8_t(PAINT_MATERIAL_CHANNEL_NORMAL),
      true},
+    /* A filter the user built as a node group (a #MaterialPaintLayer::kind_tree): the group
+     * answers `Result` for the `Input` the channel content (or the mask grey) feeds it, and every
+     * other input but `UV` and `Mask` is a parameter of the dynamic schema. A per-texel effect
+     * like the pointwise filters: the shader-bake computes it through the effect cache, so the
+     * bake and the composite read a result map like any other CPU-computed kind. Not
+     * #PAINT_LAYER_KIND_GPU_COMPUTED: the live graph has no branch that emits this kind's tree,
+     * which is what #PAINT_LAYER_KIND_NO_GPU_BRANCH refuses (the viewport does not instantiate
+     * the tree), and the CPU preview answers for that path. The combined preview is not refused
+     * by it: its refusal matrix exempts a precomputed result, and
+     * #combined_effect_bake_upload reads the CPU cache into the result texture, so the kind
+     * previews through that upload rather than through a pass of its own. Combined preview with
+     * #combined_effect_bake_upload is implemented in Patch 6 (combined_preview.patch); before
+     * that, the kind takes the CPU-only preview path. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_NODE_GROUP,
+     "Node Group",
+     PaintLayerKindCategory::Operator,
+     effect_or_mask_roles,
+     nullptr,
+     0,
+     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+              PAINT_LAYER_KIND_MASK_NEEDS_LUMA | PAINT_LAYER_KIND_NO_GPU_BRANCH |
+              PAINT_LAYER_KIND_DYNAMIC_SCHEMA)},
     /* The Height laid as a normal: the Sobel gradients of the row's Height, encoded as the
      * tangent-space normal. The one cross-channel effect that lays the channel it reads: it reads
      * the Height (READS_CHANNEL) and lays into the Normal channel, the only one it filters, which
@@ -1666,6 +1689,19 @@ const PaintLayerKindInfo *paint_layer_kind_find(const int8_t source, const int16
   return nullptr;
 }
 
+const PaintLayerKindInfo *paint_layer_kind_of(const MaterialPaintLayer &row)
+{
+  const PaintLayerKindInfo *info = paint_layer_kind_find(row.source, row.kind_subtype);
+  if (info == nullptr || (info->flags & PAINT_LAYER_KIND_DYNAMIC_SCHEMA) == 0) {
+    return info;
+  }
+  /* A dynamic kind reads its schema from the definition the row names: the tree's interface for
+   * the node-group kinds, the chain definition's members for a chain. The definition missing
+   * (a linked tree out of reach, a deleted asset) answers the static entry, whose empty schema is
+   * the truth a reader without a definition can state. */
+  return paint_layer_kind_dynamic_of(row);
+}
+
 bool paint_layer_kind_role_allowed(const MaterialPaintLayer &row)
 {
   const PaintLayerKindInfo *info = paint_layer_kind_of(row);
@@ -1748,6 +1784,7 @@ float paint_layer_kind_param_get(const MaterialPaintLayer &row, const int index)
   }
   if (ELEM(param->type,
            PaintLayerKindParamType::Color,
+           PaintLayerKindParamType::Vector,
            PaintLayerKindParamType::Ramp,
            PaintLayerKindParamType::Curves,
            PaintLayerKindParamType::ColorBalance,
@@ -1877,6 +1914,34 @@ static IDProperty *kind_param_ensure_color(MaterialPaintLayer &row,
   return prop;
 }
 
+/** The stored float[3] array of a Vector parameter, made at the schema default when it has none.
+ * The default rides in the first three slots of #PaintLayerKindParam::default_color, the way a
+ * Color's four ride there whole. */
+static IDProperty *kind_param_ensure_vector(MaterialPaintLayer &row,
+                                            const PaintLayerKindParam &param)
+{
+  IDProperty *group = kind_param_group_ensure(row);
+  IDProperty *existing = IDP_GetPropertyFromGroup(group, param.name);
+  IDProperty *prop = existing;
+  if (existing == nullptr || existing->type != IDP_ARRAY || existing->subtype != IDP_FLOAT ||
+      existing->len != 3)
+  {
+    const float default_vector[3] = {param.default_color[0],
+                                     param.default_color[1],
+                                     param.default_color[2]};
+    prop = bke::idprop::create(param.name, Span<float>(default_vector, 3)).release();
+    IDP_ReplaceInGroup(group, prop);
+  }
+  if (prop->ui_data == nullptr) {
+    IDPropertyUIDataFloat *ui_data = reinterpret_cast<IDPropertyUIDataFloat *>(
+        IDP_ui_data_ensure(prop));
+    ui_data->base.description = BLI_strdup(param.label);
+    ui_data->min = ui_data->soft_min = param.min;
+    ui_data->max = ui_data->soft_max = param.max;
+  }
+  return prop;
+}
+
 void paint_layer_kind_params_init(MaterialPaintLayer &row)
 {
   if (const PaintLayerKindInfo *info = paint_layer_kind_of(row)) {
@@ -1889,6 +1954,9 @@ void paint_layer_kind_params_init(MaterialPaintLayer &row)
           break;
         case PaintLayerKindParamType::Color:
           kind_param_ensure_color(row, param);
+          break;
+        case PaintLayerKindParamType::Vector:
+          kind_param_ensure_vector(row, param);
           break;
         case PaintLayerKindParamType::Ramp:
           BKE_paint_layers_ramp_ensure(row);
@@ -1977,6 +2045,42 @@ bool paint_layer_kind_param_color_set(MaterialPaintLayer &row,
   }
   IDProperty *prop = kind_param_ensure_color(row, *param);
   copy_v4_v4(IDP_array_float_get(prop), color);
+  return true;
+}
+
+/** The float[3] value of a Vector parameter \a index, or the schema default for an unknown one.
+ * The default rides in the schema's default_color, the way a Color's does. */
+void paint_layer_kind_param_vector_get(const MaterialPaintLayer &row,
+                                       const int index,
+                                       float r_vector[3])
+{
+  const PaintLayerKindParam *param = kind_param_find(row, index);
+  if (param == nullptr || param->type != PaintLayerKindParamType::Vector) {
+    zero_v3(r_vector);
+    return;
+  }
+  const IDProperty *prop = (row.system_properties != nullptr) ?
+                               IDP_GetPropertyFromGroup(row.system_properties, param->name) :
+                               nullptr;
+  if (prop == nullptr || prop->type != IDP_ARRAY || prop->subtype != IDP_FLOAT ||
+      prop->len != 3)
+  {
+    copy_v3_v3(r_vector, param->default_color);
+    return;
+  }
+  copy_v3_v3(r_vector, IDP_array_float_get(prop));
+}
+
+bool paint_layer_kind_param_vector_set(MaterialPaintLayer &row,
+                                       const int index,
+                                       const float vector[3])
+{
+  const PaintLayerKindParam *param = kind_param_find(row, index);
+  if (param == nullptr || param->type != PaintLayerKindParamType::Vector) {
+    return false;
+  }
+  IDProperty *prop = kind_param_ensure_vector(row, *param);
+  copy_v3_v3(IDP_array_float_get(prop), vector);
   return true;
 }
 

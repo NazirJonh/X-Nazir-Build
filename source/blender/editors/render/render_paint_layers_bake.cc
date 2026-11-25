@@ -41,6 +41,8 @@
 #include "BKE_material.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_node_group.hh"
+#include "BKE_paint_layers_shader_bake.hh"
 #include "BKE_paint_layers_source_graph.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
@@ -353,6 +355,15 @@ void paint_layers_blend_load_post(Main *bmain,
     return;
   }
   BKE_paint_layers_blend_load_post(*bmain);
+  /* The previous file's definitions and bake answers died with its Main: the cache entries hold
+   * raw pointers into it, so they are dropped (without touching the image users -- see
+   * #BKE_paint_layers_shader_bake_free_all) before anything can walk them against the new
+   * database. */
+  BKE_paint_layers_shader_bake_free_all();
+  BKE_paint_layers_node_group_forget_all();
+  /* A loaded file may have replaced `G_MAIN`: the backend's cached main is the previous file's
+   * database from here on, so the hook is re-registered against the new one. */
+  ED_paint_layers_shader_bake_backend_register();
   paint_layers_blend_timer_reset();
 }
 
@@ -365,6 +376,16 @@ void paint_layers_blend_undo_post(Main *bmain,
     return;
   }
   BKE_paint_layers_blend_undo_post(*bmain);
+  /* A memfile undo restores the older IDs, and the shader-bake cache's generated images are
+   * session-local ones the undo does not carry: entries keyed by a session uid survive it while
+   * their image pointers do not. The whole cache goes, and the rows re-bake -- a few passes, and
+   * the answer is the restored state's. */
+  BKE_paint_layers_shader_bake_free_all();
+  /* The memfile changed the definitions' identities (and dropped the runtime signals the memos
+   * key on), so the dynamic descriptors built from the pre-undo trees answer for a state that no
+   * longer exists. No reader can hold one at the undo post, the same reason the bake cache above
+   * goes whole. */
+  BKE_paint_layers_node_group_forget_all();
   paint_layers_blend_timer_reset();
 }
 
@@ -931,6 +952,10 @@ void paint_layers_bake_undo_callback_init()
   /* Registered from here so the blend tier is live wherever the paint-layer bake cleanup already
    * is -- this is the one editor-init entry point that runs after #BKE_callback_global_init. */
   paint_layers_blend_callbacks_init();
+  /* The shader-bake backend rides the same startup point: the node-group rows ask for their
+   * pixels from the first scene update on, and a hook registered later would answer null until
+   * then. */
+  ED_paint_layers_shader_bake_backend_register();
 }
 
 void paint_layers_blend_callbacks_init()

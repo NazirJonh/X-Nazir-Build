@@ -10,9 +10,11 @@
 #include "BLI_noise.hh"
 #include "BLI_rand.hh"
 #include "BLI_set.hh"
+#include "BLI_span.hh"
 #include "BLI_stack.hh"
 #include "BLI_string.h"
 #include "BLI_string_utf8_symbols.h"
+#include "BLI_vector.hh"
 #include "BLI_vector_set.hh"
 
 #include "DNA_anim_types.h"
@@ -31,6 +33,7 @@
 #include "BKE_node_runtime.hh"
 #include "BKE_node_tree_reference_lifetimes.hh"
 #include "BKE_node_tree_update.hh"
+#include "BKE_paint_layers_node_group.hh"
 
 #include "MOD_nodes.hh"
 
@@ -584,6 +587,11 @@ class NodeTreeMainUpdater {
     this->update_internal_links(ntree);
     this->update_generic_callback(ntree);
     this->make_node_previews_dirty(ntree);
+    /* The paint layer stack's definition memos key on this revision, so any tagged edit -- a node
+     * value, a link, an interface item -- retires the cached answers of the rows that read the
+     * tree. Raised once per update, like the preview state above: #update_tree only runs for trees
+     * that carried a tag, so a no-op update moves nothing. */
+    ntree.runtime->content_revision++;
 
     this->propagate_runtime_flags(ntree);
     if (ELEM(ntree.type, NTREE_GEOMETRY, NTREE_COMPOSIT, NTREE_SHADER)) {
@@ -2242,6 +2250,24 @@ void BKE_ntree_update(Main &bmain,
     updater.update();
   }
   is_updating = false;
+  /* The paint layer stack's node-group kinds read shader trees as definitions: an interface edit
+   * is a schema edit for every row that reads the tree, so the rows are re-seeded and their
+   * materials tagged once the update has settled. The shader-tree check inside keeps the walk to
+   * the trees the kinds can read. */
+  if (modified_trees.has_value()) {
+    Span<bNodeTree *> updated = *modified_trees;
+    Vector<bNodeTree *> shader_trees;
+    for (bNodeTree *tree : updated) {
+      if (tree != nullptr && tree->typeinfo != nullptr &&
+          tree->typeinfo->type == NTREE_SHADER)
+      {
+        shader_trees.append(tree);
+      }
+    }
+    if (!shader_trees.is_empty()) {
+      BKE_paint_layers_node_group_rows_resync(bmain, shader_trees);
+    }
+  }
 }
 
 void BKE_ntree_update_after_single_tree_change(Main &bmain,

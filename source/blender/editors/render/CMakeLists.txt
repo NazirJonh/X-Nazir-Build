@@ -27,6 +27,8 @@ set(SRC
   render_opengl.cc
   render_ops.cc
   render_paint_layers_bake.cc
+  paint_layers_shader_bake_backend.cc
+  paint_layers_shader_bake_backend_intern.hh
   render_preview.cc
   render_shading.cc
   render_texture_cache.cc

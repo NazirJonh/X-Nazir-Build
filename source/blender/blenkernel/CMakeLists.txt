@@ -285,8 +285,10 @@ set(SRC
   intern/paint_layers/paint_layers_convert.cc
   intern/paint_layers/paint_layers_blend_tier.cc
   intern/paint_layers/paint_layers_kind.cc
+  intern/paint_layers/paint_layers_kind_dynamic.cc
   intern/paint_layers/paint_layers_mask_effect.cc
   intern/paint_layers/paint_layers_material_live.cc
+  intern/paint_layers/paint_layers_node_group.cc
   intern/paint_layers/paint_layers_composite.cc
   intern/paint_layers/paint_layers_composite_height.cc
   intern/paint_layers/paint_layers_effect_gpu_cache.cc
@@ -324,6 +326,7 @@ set(SRC
   intern/paint_layers/paint_layers_projection.cc
   intern/paint_layers/paint_layers_curve_patch_object.cc
   intern/paint_layers/paint_layers_source_hash.cc
+  intern/paint_layers/paint_layers_shader_bake.cc
   intern/paint_layers/paint_layers_target.cc
   intern/paint_layers/paint_layers_text_decal.cc
   intern/paint_material_cache_common.cc
@@ -618,7 +621,9 @@ set(SRC
   BKE_paint_layers_gradient.hh
   BKE_paint_layers_graph_heal.hh
   BKE_paint_layers_import.hh
+  BKE_paint_layers_node_group.hh
   BKE_paint_layers_object_mask.hh
+  BKE_paint_layers_shader_bake.hh
   BKE_paint_layers_source_graph.hh
   BKE_paint_layers_target.hh
   BKE_paint_layers_tile.hh

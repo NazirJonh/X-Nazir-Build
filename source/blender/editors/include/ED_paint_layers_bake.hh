@@ -91,6 +91,26 @@ void paint_layers_bake_undo_callback_init();
 void paint_layers_owned_gpu_provider_ensure();
 
 /**
+ * Render the shader-bake answers that are due for \a ma's tree-reading rows: a node-group source
+ * or node-group generator (a stack row, or the same kinds laid as a correction or a mask item)
+ * whose definition's identity or values moved since the last render is computed here, on the main
+ * thread, through the registered backend (see `paint_layers_shader_bake_backend.cc`). The caller
+ * gates on the wanted policy (a material the user is looking at), so an unseen material keeps
+ * serving its stale answer the way every other cache does.
+ *
+ * The compute is a blocking EEVEE pass per due row; a row a sweep has just rendered answers false
+ * on `BKE_paint_layers_shader_bake_due`, so the steady state costs one identity check per row.
+ */
+void paint_layers_shader_bake_rows_ensure(Main &bmain, Material &ma);
+
+/**
+ * Install the shader-bake backend (the render hook and the main it renders in). Called once from
+ * the same startup entry point as #paint_layers_bake_undo_callback_init, before the first scene
+ * update could ask a node-group row for its pixels.
+ */
+void ED_paint_layers_shader_bake_backend_register();
+
+/**
  * Whether (\a owner, \a job_type) is the exact job named by \a exclude_owner / \a
  * exclude_job_type. Pure -- pointer and integer comparisons only, nothing dereferenced -- since it
  * is the one thing standing between a settle call made from a job's own free callback and

@@ -23,6 +23,7 @@
 #include "BKE_image_tile_buffer.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_material.hh"
+#include "BKE_node.hh"
 #include "BKE_paint_vector.hh"
 
 #include "IMB_imbuf.hh"
@@ -361,6 +362,18 @@ static void paint_layer_effect_image_duplicate(MaterialPaintLayer &dst,
 }
 
 /**
+ * The copy of a row shares its definition tree with the source: the definition is one object the
+ * instances read, so the copy takes its own user on it, as it does on a kind's image slot.
+ */
+static void paint_layer_kind_tree_duplicate(MaterialPaintLayer &dst, const MaterialPaintLayer &src)
+{
+  dst.kind_tree = src.kind_tree;
+  if (dst.kind_tree != nullptr) {
+    id_us_plus(&dst.kind_tree->id);
+  }
+}
+
+/**
  * Deep-copy \a src's projection payload onto \a dst and take the user of its controller. The frame
  * is plain sub-data; the object reference is an ID user like the row's maps.
  */
@@ -463,6 +476,7 @@ MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
   paint_layer_text_decal_duplicate(*item_copy, item);
   paint_layer_channels_duplicate(bmain, *item_copy, item, options);
   paint_layer_effect_image_duplicate(*item_copy, item);
+  paint_layer_kind_tree_duplicate(*item_copy, item);
   paint_layer_id_colors_duplicate(*item_copy, item);
   paint_layer_properties_duplicate(*item_copy, item);
   paint_layer_projection_duplicate(*item_copy, item);
@@ -527,6 +541,7 @@ void paint_layer_branch_duplicate(Main &bmain,
   paint_layer_text_decal_duplicate(dst, src);
   paint_layer_channels_duplicate(bmain, dst, src, options);
   paint_layer_effect_image_duplicate(dst, src);
+  paint_layer_kind_tree_duplicate(dst, src);
   paint_layer_id_colors_duplicate(dst, src);
   paint_layer_properties_duplicate(dst, src);
   BKE_paint_layers_gradient_copy(dst, src);

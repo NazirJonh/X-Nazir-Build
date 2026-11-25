@@ -413,8 +413,9 @@ static bool mask_effect_anchor_slice_input(const Material &ma,
  * The kernel of the mask item \a effect over the ready grey \a buffer: the GPU provider when it can
  * serve the kind on this thread and \a allow_gpu, the CPU kernel otherwise, then the grey normalize
  * (#mask_effect_grey_normalize) for the kinds the kind table flags. Returns "gpu" or "cpu" for the
- * caller's log -- the full compute and the regional patch share this, so the normalize and the
- * provider gates are one place.
+ * caller's log, or null when the CPU kernel answered false (see
+ * #paint_layer_effect_kernel_apply) -- the full compute and the regional patch share this, so the
+ * normalize and the provider gates are one place.
  *
  * \param allow_gpu: false for a cropped buffer (the regional patch). The mask provider builds its
  *        pass plan at the buffer's own size and some plans -- a flood, a distance field, a
@@ -447,7 +448,12 @@ static const char *mask_effect_kernel_apply(ImBuf &buffer,
     perf_gpu.note("kind=%d done=%s", int(effect.kind_subtype), gpu_done ? "yes" : "fallback");
   }
   if (!gpu_done) {
-    paint_layer_effect_kernel_apply(buffer, effect, /*for_mask=*/true, tile_number);
+    /* A kernel that answers false -- a node-group filter with no backend, or one asked off the
+     * main thread -- leaves no answer to cache: null tells the caller to keep the entry
+     * unrendered, so a bake worker's ask never files the grey back as the item's output. */
+    if (!paint_layer_effect_kernel_apply(buffer, effect, /*for_mask=*/true, tile_number)) {
+      return nullptr;
+    }
   }
   else {
     path = "gpu";
@@ -530,8 +536,14 @@ static bool paint_layer_mask_effect_compute(const Material &ma,
     mask_effect_transform_apply(*color, transform_step);
   }
   else {
-    compute_path = mask_effect_kernel_apply(
-        *color, effect, tile_number, /*allow_gpu=*/true);
+    /* The kernel reads the buffer the block above filled and leaves the alpha alone. A kernel
+     * that answers false -- a node-group filter with no backend, or one asked off the main
+     * thread -- leaves no answer to cache: the caller keeps the entry unrendered, so a bake
+     * worker's ask never files the grey back as the item's output. */
+    compute_path = mask_effect_kernel_apply(*color, effect, tile_number, /*allow_gpu=*/true);
+    if (compute_path == nullptr) {
+      return false;
+    }
   }
   /* The versions are taken after the render: an edit that landed while it ran is read next time. */
   Vector<Image *> images;
@@ -646,8 +658,11 @@ static bool mask_effect_region_compute(
   /* The whole kernel over the whole small buffer: the kind's own reading of the buffer's texel
    * grid is the local one the gate above vouched for, and the interior it writes is the interior
    * the copy below takes. The CPU kernel alone -- a cropped buffer has not the canvas the mask GPU
-   * provider builds its plan for (see #mask_effect_kernel_apply). */
-  mask_effect_kernel_apply(*small, effect, tile_number, /*allow_gpu=*/false);
+   * provider builds its plan for (see #mask_effect_kernel_apply). A kernel with no answer (a
+   * node-group filter without a backend) refuses the patch, and the caller runs the full compute. */
+  if (mask_effect_kernel_apply(*small, effect, tile_number, /*allow_gpu=*/false) == nullptr) {
+    return false;
+  }
 
   std::shared_ptr<ImBuf> patched = paint_layer_anchor_slice_buffer_clone(*cached);
   if (patched == nullptr) {

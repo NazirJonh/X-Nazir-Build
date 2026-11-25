@@ -33,6 +33,7 @@
 #include "BKE_image_partial_update.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
+#include "BKE_paint_layers_node_group.hh"
 #include "BKE_paint_material_composite.hh"
 
 #include "IMB_imbuf_types.hh"
@@ -292,6 +293,10 @@ static bool bake_region_has_coverage(Image &changed_image,
  */
 static EffectReach bake_coverage_effect_reach(const MaterialPaintLayer &effect)
 {
+  if (effect.kind_subtype == MA_PAINT_LAYER_FILTER_NODE_GROUP) {
+    return BKE_paint_layers_node_group_reaches_whole_map(effect) ? EffectReach::WholeMap :
+                                                                   EffectReach::Pointwise;
+  }
   float params[PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM] = {};
   paint_layer_effect_filter_params(effect, params);
   return BKE_paint_layers_effect_reach(eMaterialPaintLayerFilter(effect.kind_subtype), params);

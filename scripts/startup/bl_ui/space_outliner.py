@@ -299,11 +299,25 @@ class OUTLINER_MT_stack_layer_add(Menu):
         # vocabulary is the editor's kind registry, which folds the two roles of one effect into
         # the line the current target asks for, so a new effect needs no menu change.
         layout.menu_contents("OUTLINER_MT_stack_add_effects")
+        # The effects the user built themselves: a node group the row reads as its kernel. The
+        # entries make the template tree and the row in one go; the definition is edited in the
+        # Shader Editor afterwards.
+        layout.menu("OUTLINER_MT_stack_layer_node_group_add", text="Custom", icon='NODETREE')
+
+
+class OUTLINER_MT_stack_layer_node_group_add(Menu):
+    bl_label = "Custom (Node Group)"
+
+    def draw(self, _context):
+        layout = self.layout
+        props = layout.operator("outliner.stack_layer_node_group_add",
+                                text="New Node Group Filter", icon='NODETREE')
+        props.type = 'FILTER'
 
 
 class OUTLINER_MT_stack_layer_effect_add(Menu):
     """What the header's Add Effect dropdown offers: the pinned Favorites, the source's own effect
-    lists, and the search over the two.
+    lists, the user's own node-group effects, and the search over them.
 
     The root Add menu (OUTLINER_MT_stack_layer_add) is the wider one -- the quick layers, the
     procedural layers, the folder and the masks as well -- and is what Shift+A
@@ -316,12 +330,15 @@ class OUTLINER_MT_stack_layer_effect_add(Menu):
 
     def draw(self, _context):
         layout = self.layout
-        # The search over the two lists below, then the pinned kinds, as in the root menu: the
-        # shared helper sets the context and the menu it searches.
+        # The search over the lists below, then the pinned kinds, as in the root menu: the shared
+        # helper sets the context and the menu it searches.
         _stack_draw_search_and_favorites(layout, "OUTLINER_MT_stack_layer_effect_add")
         # The source's own effects, with a pin button beside every entry, drawn from the same C++
         # list the root menu inlines.
         layout.menu_contents("OUTLINER_MT_stack_add_effects")
+        # The effects the user built themselves, as in the root menu: the entry makes the template
+        # tree and the correction in one go, and the definition is edited in the Shader Editor.
+        layout.menu("OUTLINER_MT_stack_layer_node_group_add", text="Custom", icon='NODETREE')
 
 
 # The map-driven mask filters: they only exist in a mask, so the Add Mask menus offer them instead of
@@ -1280,6 +1297,7 @@ classes = (
     OUTLINER_MT_stack_layer_pattern_add,
     OUTLINER_MT_stack_layer_add,
     OUTLINER_MT_stack_layer_effect_add,
+    OUTLINER_MT_stack_layer_node_group_add,
     OUTLINER_MT_stack_layer_mask_add,
     OUTLINER_OT_stack_layer_mask_add,
     OUTLINER_MT_stack_layer_advanced,

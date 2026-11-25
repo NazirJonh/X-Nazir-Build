@@ -22,6 +22,7 @@
 #include "BLI_listbase_iterator.hh"
 #include "BLI_math_base.h"
 #include "BLI_span.hh"
+#include "BLI_string_ref.hh"
 #include "BLI_utildefines.h"
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
@@ -29,6 +30,8 @@
 #include "BKE_mesh_maps.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_import.hh"
+#include "BKE_paint_layers_node_group.hh"
+#include "BKE_paint_layers_shader_bake.hh"
 #include "BKE_paint_material_composite.hh"
 
 #include "paint_layers_kind.hh"
@@ -851,6 +854,29 @@ inline bool paint_layer_effect_is_cpu_computed(const MaterialPaintLayer &effect)
 void paint_layer_effect_filter_params(
     const MaterialPaintLayer &effect,
     float (&r_params)[PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM]);
+
+/**
+ * The storage key of one chain-instance parameter override: the definition member's marker,
+ * formatted as a UUID string, then the member schema's parameter name, joined by a colon.
+ *
+ * This is the contract between the three places that touch a chain's values: the dynamic
+ * descriptor names its aggregate parameters by the key (so the instance's panel and the typed
+ * accessors read and write it), the Smart Filter insert seeds the instance's values under it, and
+ * the composite unfolding reads the overrides back with it. One formatter, so none of the three can
+ * drift into a different spelling. Defined in `paint_layers_kind_dynamic.cc`, beside the builder
+ * that first established the format.
+ */
+std::string paint_layer_chain_member_param_key(const bUUID &member_marker,
+                                               const StringRefNull param_name);
+
+/**
+ * The number of descriptors the dynamic kind cache holds keyed and live (the retired ones its
+ * append-only model keeps for in-flight readers aside): a test's window into a cache that is
+ * otherwise `paint_layers_kind_dynamic.cc`'s own static. A freed definition must leave it where
+ * it found it -- the forget hooks retire its descriptors -- or the cache would grow with every
+ * material a session dropped.
+ */
+int paint_layer_kind_dynamic_descriptor_count();
 
 /**
  * Whether the CPU-computed \a effect of \a row owns the map of its result: a row that no bake of its
@@ -2066,11 +2092,25 @@ void paint_layer_effect_to_luminance(ImBuf &buffer);
  * that samples an image of its own (a Channel Split's slot) reads the same UDIM tile the buffer
  * was computed on. Callers name both explicitly: a tile defaulted to the base one would silently
  * read the wrong UDIM tile.
+ *
+ * \a parameters_override replaces #MaterialPaintLayer::system_properties as the parameters the
+ * node-group kernel reads: a Smart Filter chain member is not a row of the material the composite
+ * runs on, and the instance's exposed values are stored on the chain row under the member keys, so
+ * the unfolding hands the kernel the member's own properties with those overrides folded in
+ * (#composite_chain_member_parameters). Null -- every call but the chain member's -- reads the
+ * effect's own properties, exactly as the direct effect always has.
+ *
+ * \return whether the kernel answered. A kernel that reads no definition always does; a
+ * node-group filter whose backend is missing, or whose ask landed off the main thread, leaves
+ * \a buffer as it came and answers false -- and the caller must treat the buffer as no answer at
+ * all rather than a result, caching which would file the input back as if it were the effect's
+ * output.
  */
-void paint_layer_effect_kernel_apply(ImBuf &buffer,
+bool paint_layer_effect_kernel_apply(ImBuf &buffer,
                                      const MaterialPaintLayer &effect,
                                      bool for_mask,
-                                     int tile_number);
+                                     int tile_number,
+                                     const IDProperty *parameters_override = nullptr);
 
 /**
  * The image the \a effect's kind reads from the row's own slot (#MaterialPaintLayer::effect_image),

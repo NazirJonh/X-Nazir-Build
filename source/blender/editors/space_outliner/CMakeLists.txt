@@ -38,6 +38,7 @@ set(SRC
   stack_layer/outliner_stack_smart_asset.cc
   stack_layer/outliner_stack_layers.cc
   stack_layer/outliner_stack_layers_ops.cc
+  stack_layer/outliner_stack_node_group.cc
   stack_layer/outliner_stack_ui_state.cc
   stack_layer/outliner_stack_dragdrop.cc
   stack_layer/outliner_stack_drop_actions.cc

@@ -28,6 +28,8 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
+#include "BKE_paint_layers_node_group.hh"
+#include "BKE_paint_layers_shader_bake.hh"
 #include "BKE_paint_perf_debug.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_paint_material_resolve.hh"

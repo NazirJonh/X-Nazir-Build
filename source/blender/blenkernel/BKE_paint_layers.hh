@@ -48,6 +48,7 @@ using PaintChannelMask = uint32_t;
 struct Image;
 struct Depsgraph;
 struct Main;
+struct bNodeTree;
 struct Material;
 struct MaterialPaintLayer;
 struct MaterialPaintLayerText;
@@ -1369,6 +1370,19 @@ bool BKE_paint_layers_channel_set_image(Material &ma,
  * \return false when \a layer is not part of \a ma or its kind reads no slot.
  */
 bool BKE_paint_layers_effect_image_set(Material &ma, MaterialPaintLayer *layer, Image *image);
+
+/**
+ * Point \a layer's definition slot (#MaterialPaintLayer::kind_tree) at \a tree, or detach it with
+ * a null one. Only the node-group kinds (a NODE_GROUP source, a NODE_GROUP filter or a NODE_GROUP
+ * generator) hold one -- a chain reads its definition material, not a tree -- so the assignment is
+ * refused for every other row, and only a shader tree is
+ * taken: a geometry or a compositor tree answers nothing the stack could lay. The tree is shared
+ * by every instance of the definition -- the row is one of the users that keeps it alive -- and
+ * the dynamic kind descriptors built from the old tree are forgotten with it.
+ *
+ * \return false when \a layer is not part of \a ma or its kind reads no definition.
+ */
+bool BKE_paint_layers_kind_tree_set(Material &ma, MaterialPaintLayer *layer, bNodeTree *tree);
 
 /** What a specular map carries: what the specular converter reads out of it. */
 enum class PaintSpecularMapKind : int8_t {

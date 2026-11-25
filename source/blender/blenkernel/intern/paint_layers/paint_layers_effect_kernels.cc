@@ -30,6 +30,7 @@
 
 #include "BKE_paint.hh"
 #include "BKE_paint_layers_composite.hh"
+#include "BKE_paint_layers_shader_bake.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_paint_perf_debug.hh"
 
@@ -2414,11 +2415,26 @@ static void paint_layer_effect_normal_to_mask(ImBuf &buffer,
 
 /** \} */
 
-void paint_layer_effect_kernel_apply(ImBuf &buffer,
+bool paint_layer_effect_kernel_apply(ImBuf &buffer,
                                      const MaterialPaintLayer &effect,
                                      const bool for_mask,
-                                     const int tile_number)
+                                     const int tile_number,
+                                     const IDProperty *parameters_override)
 {
+  /* A Smart Filter chain member is not a row of the material the composite runs on: the instance's
+   * exposed values live on the chain row under the member keys, and the unfolding hands them over
+   * merged with the member's own properties. Every kind reads its parameters through
+   * #MaterialPaintLayer::system_properties (the schema accessors and the node-group kernel alike),
+   * so the merge is applied by walking the same kernel once more over a shallow row copy whose
+   * group is the merged one. The copy owns nothing -- every pointer stays the definition member's
+   * -- and lives for the synchronous call. */
+  if (parameters_override != nullptr) {
+    /* Shallow row copy: the DNA struct deletes the copy constructor, but every pointer here stays
+     * the definition member's -- a byte copy owns nothing and lives for the synchronous call. */
+    MaterialPaintLayer merged = dna::shallow_copy(effect);
+    merged.system_properties = const_cast<IDProperty *>(parameters_override);
+    return paint_layer_effect_kernel_apply(buffer, merged, for_mask, tile_number, nullptr);
+  }
   /* Timed apart from the input it is handed: this is the half an effect pass computes instead, so
    * the line stopping to print in `BLENDER_PBR_PERF` is what a covered kind bought. The region is
    * always the whole buffer -- a neighbourhood reads past an edited rectangle, and the cache has no
@@ -2531,6 +2547,48 @@ void paint_layer_effect_kernel_apply(ImBuf &buffer,
     case MA_PAINT_LAYER_FILTER_COLOR_MATCH:
       paint_layer_effect_color_match_apply(buffer, effect);
       break;
+    case MA_PAINT_LAYER_FILTER_NODE_GROUP: {
+      /* The user's node group is the kernel: the input the effect cache rendered is the `Input`
+       * texture, the answer comes back over the same pixels. The render goes through the hooks
+       * directly, with no cache of its own -- the effect cache is the cache, and its hash already
+       * folds the definition's. No backend (a test, a headless build), or an ask that landed off
+       * the main thread, is no answer at all: the caller must not file the untouched buffer back
+       * as the effect's output, which is what the false return is for. */
+      const PaintLayerShaderBakeHooks *hooks = BKE_paint_layers_shader_bake_hooks_get();
+      if (hooks == nullptr || hooks->render == nullptr || effect.kind_tree == nullptr) {
+        return false;
+      }
+      if (buffer.float_buffer.data == nullptr || buffer.x <= 0 || buffer.y <= 0) {
+        return false;
+      }
+      PaintLayerShaderBakeRequest request;
+      request.tree = effect.kind_tree;
+      /* The parameters the group reads: the chain member's caller hands the member's own properties
+       * with the instance's stored overrides folded in, so an exposed value edited on the instance
+       * reaches the kernel the way it reaches the packed schemas of the other kinds. Null reads the
+       * effect's own properties, the direct effect's answer. */
+      request.parameters = (parameters_override != nullptr) ? parameters_override :
+                                                              effect.system_properties;
+      request.input_pixels = buffer.float_buffer.data;
+      request.width = buffer.x;
+      request.height = buffer.y;
+      request.tile_number = tile_number;
+      /* A tree that exposes an `Alpha` output is a kind whose result is a layer with an alpha of
+       * its own (the descriptor carries #PAINT_LAYER_KIND_RESULT_HAS_ALPHA for it): the backend
+       * wires the output and returns the answer premultiplied by it, the buffer contract every
+       * reader of the flag expects. A mask item takes no part -- its grey carries no alpha, so
+       * the ask goes out without the flag and the answer stays straight. */
+      request.result_has_alpha = !for_mask && paint_layer_kind_result_has_alpha(effect);
+      Vector<float> answer(size_t(buffer.x) * size_t(buffer.y) * 4);
+      /* One answer under the one-channel contract: -1 is what the backend reads as "lay `Result`
+       * into the Base Color", whatever channel the effect works in. */
+      PaintLayerShaderBakeOutput output = {-1, answer.data()};
+      if (!hooks->render(request, MutableSpan<PaintLayerShaderBakeOutput>(&output, 1))) {
+        return false;
+      }
+      memcpy(buffer.float_data_for_write(), answer.data(), sizeof(float) * answer.size());
+      return true;
+    }
     case MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK: {
       /* The normal rebuilt into the field the mode names and cut by the threshold's ramp: the
        * typed read validates the mode into the range the kernel answers for, so a file that
@@ -2548,6 +2606,9 @@ void paint_layer_effect_kernel_apply(ImBuf &buffer,
     default:
       break;
   }
+  /* Every kind but the node-group one answers from its own math, whatever the parameters: the
+   * false return is the node-group kernel's alone. */
+  return true;
 }
 
 }  // namespace blender

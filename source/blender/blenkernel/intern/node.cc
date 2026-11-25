@@ -76,6 +76,7 @@
 #include "BKE_node_tree_interface.hh"
 #include "BKE_node_tree_reference_lifetimes.hh"
 #include "BKE_node_tree_update.hh"
+#include "BKE_paint_layers_node_group.hh"
 #include "BKE_preview_image.hh"
 #include "BKE_type_conversions.hh"
 #include "NOD_geometry_nodes_bundle.hh"
@@ -262,6 +263,18 @@ static void ntree_copy_data(Main * /*bmain*/,
 static void ntree_free_data(ID *id)
 {
   bNodeTree *ntree = reinterpret_cast<bNodeTree *>(id);
+
+  /* A tree a paint-layer row reads as its definition is a memo key: the interface hash and the
+   * dynamic kind descriptors built from it answer for a tree that is going away, so they go
+   * first, while the tree's identity still stands. The rows the tree served read as
+   * definition-less from here on, the way a newer build's kind does.
+   *
+   * An evaluated copy shares the original's session uid, and the depsgraph frees one on every
+   * relation rebuild: forgetting on a copy would retire the live descriptor of the tree still in
+   * #Main, so the copy is skipped the way the material's cache frees skip it. */
+  if ((id->tag & ID_TAG_COPIED_ON_EVAL) == 0) {
+    BKE_paint_layers_node_group_forget(ntree);
+  }
 
   /* XXX hack! node trees should not store execution graphs at all.
    * This should be removed when old tree types no longer require it.

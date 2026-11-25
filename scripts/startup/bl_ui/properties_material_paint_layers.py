@@ -444,6 +444,23 @@ def draw_material_kind_params(layout, params):
         _draw_kind_param(layout, param)
 
 
+def draw_material_node_group_slot(layout, item):
+    """The definition tree a node-group filter reads, drawn above the parameters it exposes.
+
+    One tree is shared by every row that names it (the definition/instance model), so the slot is
+    the row's own pointer, not a copy: picking another tree re-points this row alone. Returns
+    whether the field was drawn; a mask item draws the same slot as a row.
+    """
+    if item.source != 'FILTER' or item.filter_type != 'NODE_GROUP':
+        return False
+    line = layout.row(align=True)
+    line.template_ID(item, "kind_tree", text="Node Group")
+    if item.kind_tree is None:
+        layout.label(text="No node group: the filter lays nothing", icon='INFO')
+    layout.separator()
+    return True
+
+
 def draw_material_color_balance(layout, balance):
     """The balance a Color Balance filter reads: the method as two buttons, then its three colors.
 
@@ -663,8 +680,8 @@ def _draw_kind_param(layout, param):
     """One parameter of a row's kind, drawn as its type asks.
 
     A float draws as a slider, an integer as a number field, an enum as a menu, a color as a
-    picker, a boolean as a checkbox; the value is whichever property of the parameter carries its
-    type.
+    picker, a boolean as a checkbox, a vector as three number fields; the value is whichever
+    property of the parameter carries its type.
     """
     if param.type == 'ENUM':
         layout.prop(param, "enum_value", text=param.label)
@@ -674,6 +691,8 @@ def _draw_kind_param(layout, param):
         layout.prop(param, "int_value", text=param.label)
     elif param.type == 'COLOR':
         layout.prop(param, "color_value", text=param.label)
+    elif param.type == 'VECTOR':
+        layout.prop(param, "vector_value", text=param.label)
     else:
         layout.prop(param, "value", text=param.label, slider=True)
 

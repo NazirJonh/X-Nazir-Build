@@ -79,6 +79,8 @@
 #include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_gradient.hh"
+#include "BKE_paint_layers_node_group.hh"
+#include "BKE_paint_layers_shader_bake.hh"
 #include "BKE_paint_layers_source_graph.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_combined.hh"
@@ -629,6 +631,15 @@ static void material_free_data(ID *id)
     /* The GPU effect cache is keyed on the session UID the same way and its entries own textures,
      * so a freed material's results would otherwise sit in VRAM until the budget evicted them. */
     BKE_paint_layers_effect_gpu_cache_free_material(*material);
+    /* The shader-bake's cache images are keyed on the session UID like the caches above, and they
+     * are session-local datablocks a freed material keeps referenced; they die with it. */
+    BKE_paint_layers_shader_bake_free_material(material->id.session_uid);
+    /* The chain descriptors are keyed on the session UID the same way: the definition material
+     * is gone, so its aggregate schema could only be missed lookups for the rest of the session.
+     * No LRU on that cache -- the entries are small and bounded by the session's definition
+     * edits, and an eviction that could free under a reader is the hazard its append-only model
+     * exists to rule out; the whole cache drops on the file-load post. */
+    BKE_paint_layers_node_group_forget_chain(material->id.session_uid);
     /* Legitimate from here because the Combined cache lives in this module too. */
     BKE_paint_material_combined_cache_free_material(*material);
     /* The shared canvas-wide selection owner is keyed on the session UID like the caches above,

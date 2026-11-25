@@ -35,6 +35,8 @@
 #include "BLI_math_constants.h"
 #include "BLI_math_vector.h"
 #include "BLI_rect.h"
+#include "BLI_string.h"
+#include "BLI_string_ref.hh"
 #include "BLI_task.hh"
 #include "BLI_threads.h"
 #include "BLI_time.h"
@@ -42,12 +44,16 @@
 #include "BLI_vector.hh"
 
 #include "BKE_image.hh"
+#include "BKE_idprop.hh"
+#include "BKE_main.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_generator_registry.hh"
 #include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_layers_gradient_surface.hh"
+#include "BKE_paint_layers_node_group.hh"
+#include "BKE_paint_layers_shader_bake.hh"
 #include "BKE_paint_layers_source_graph.hh"
 #include "BKE_paint_material_decal_map.hh"
 #include "BKE_paint_perf_debug.hh"
@@ -444,6 +450,20 @@ template<size_t N> static void composite_filter_params(const MaterialPaintLayer 
         for (const int c : IndexRange(3)) {
           if (pos + c < int(N)) {
             r_params[pos + c] = color[c];
+          }
+        }
+        pos += 3;
+        continue;
+      }
+      if (kind->params[i].type == PaintLayerKindParamType::Vector) {
+        /* Three consecutive floats, the way a Color widens (see #PaintLayerKindParamType::Vector):
+         * a consumer reading by schema index finds the vector where the layout puts it instead of
+         * a zero in its first slot and a shifted tail. */
+        float vector[3];
+        paint_layer_kind_param_vector_get(row, i, vector);
+        for (const int c : IndexRange(3)) {
+          if (pos + c < int(N)) {
+            r_params[pos + c] = vector[c];
           }
         }
         pos += 3;
@@ -3025,14 +3045,53 @@ uint64_t paint_layer_effect_hash(const MaterialPaintLayer &effect, const int cha
    * colour edit still retires the cached result either way. */
   if (const PaintLayerKindInfo *kind = paint_layer_kind_of(effect)) {
     for (const int i : IndexRange(kind->params_num)) {
-      if (kind->params[i].type == PaintLayerKindParamType::Color) {
-        float color[4];
-        paint_layer_kind_param_color_get(effect, i, color);
+      if (ELEM(kind->params[i].type,
+               PaintLayerKindParamType::Color,
+               PaintLayerKindParamType::Vector))
+      {
+        /* The fourth slot stays zero for a vector (three rides the packing, no fourth), so the
+         * fold is stable whatever the stack frame held. */
+        float color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        if (kind->params[i].type == PaintLayerKindParamType::Color) {
+          paint_layer_kind_param_color_get(effect, i, color);
+        }
+        else {
+          paint_layer_kind_param_vector_get(effect, i, color);
+        }
         for (const float component : color) {
           mix_float(component);
         }
       }
     }
+    /* The fold above reads the packed layout, which is a fixed
+     * #PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM slots. A dynamic schema has no such bound, so a
+     * scalar parameter past the window would never move the key and the cache would serve the old
+     * pixels after its edit. Fold the dynamic kind's whole schema; the colors and vectors were
+     * already folded above and are skipped here. */
+    if ((kind->flags & PAINT_LAYER_KIND_DYNAMIC_SCHEMA) != 0) {
+      for (const int i : IndexRange(kind->params_num)) {
+        const PaintLayerKindParamType type = kind->params[i].type;
+        if (ELEM(type,
+                 PaintLayerKindParamType::Color,
+                 PaintLayerKindParamType::Vector,
+                 PaintLayerKindParamType::Ramp,
+                 PaintLayerKindParamType::Curves,
+                 PaintLayerKindParamType::ColorBalance,
+                 PaintLayerKindParamType::ChannelMixer))
+        {
+          continue;
+        }
+        mix_float(paint_layer_kind_param_get(effect, i));
+      }
+    }
+  }
+  /* A dynamic kind's definition is part of its answer: an edit of the tree (a node-group filter's
+   * interface or graph, a chain definition's members) retires every result the old definition
+   * made. Zero for every kind that answers from its own schema. */
+  const uint64_t definition_hash = BKE_paint_layers_node_group_definition_hash(effect);
+  if (definition_hash != 0) {
+    mix_u32(uint32_t(definition_hash));
+    mix_u32(uint32_t(definition_hash >> 32));
   }
   /* The kind's own slot (a Channel Split's image) is the one map the kernel samples itself, so its
    * identity joins the hash: assigning another image makes a key the old entry never answers. The
@@ -3198,8 +3257,13 @@ static bool paint_layer_effect_compute(const Material &ma,
   }
   /* The kernel reads the buffer the block above filled and leaves the alpha alone -- unless the kind
    * lays a layer of its own (#PAINT_LAYER_KIND_RESULT_HAS_ALPHA); the scope ends before it, so the
-   * two halves of the recompute are not timed together. */
-  paint_layer_effect_kernel_apply(*color, effect, /*for_mask=*/false, tile_number);
+   * two halves of the recompute are not timed together. A kernel that answers false -- a node-group
+   * filter with no backend, or one asked off the main thread -- leaves no answer to cache: the
+   * caller above keeps the entry unrendered, so a bake worker's ask never files the input back as
+   * the effect's output. */
+  if (!paint_layer_effect_kernel_apply(*color, effect, /*for_mask=*/false, tile_number)) {
+    return false;
+  }
   /* The versions are taken after the render: an edit that landed while it ran is read next time.
    * The kind's own slot joins the input's maps: the kernel samples it directly, so an edit of its
    * pixels must reach the entry the same way an edit of the input's maps does. */
@@ -3369,7 +3433,12 @@ static bool paint_layer_effect_region_compute(
   /* The whole kernel over the whole small buffer: the kind's own reading of the buffer's texel
    * grid is the local one the gate above vouched for, and the interior it writes is the interior
    * the copy below takes. */
-  paint_layer_effect_kernel_apply(*small, effect, /*for_mask=*/false, tile_number);
+  if (!paint_layer_effect_kernel_apply(*small, effect, /*for_mask=*/false, tile_number)) {
+    /* The kernel refused the render (a kind whose backend cannot answer on this path), so the
+     * small buffer holds no trustworthy answer: refuse the patch rather than copy its texels into
+     * the cache, which would serve them as a rendered result. */
+    return false;
+  }
 
   std::shared_ptr<ImBuf> patched = paint_layer_anchor_slice_buffer_clone(*cached);
   if (patched == nullptr) {
@@ -3519,7 +3588,11 @@ static bool paint_layer_effect_partial_compute(
     {
       return false;
     }
-    paint_layer_effect_kernel_apply(*small, effect, /*for_mask=*/false, tile_number);
+    if (!paint_layer_effect_kernel_apply(*small, effect, /*for_mask=*/false, tile_number)) {
+      /* The kernel refused the render, so the cropped buffer holds no trustworthy answer: refuse
+       * the partial compute and let the caller fall back to the full one. */
+      return false;
+    }
     r_effect_origin[0] = region_small.xmin;
     r_effect_origin[1] = region_small.ymin;
     r_color = std::move(small);

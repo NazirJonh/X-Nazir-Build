@@ -636,6 +636,12 @@ static const EnumPropertyItem rna_enum_material_paint_layer_filter_items[] = {
      "Mirror",
      "Fold the UV the row's content is read at about a center, per axis: what either side of the "
      "center shows, both sides show"},
+    {MA_PAINT_LAYER_FILTER_NODE_GROUP,
+     "NODE_GROUP",
+     0,
+     "Node Group",
+     "A filter from one of your node groups: Input in, Result out, every other input a parameter "
+     "of its own"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -648,6 +654,7 @@ enum rna_MaterialPaintLayerKindParamType {
   KIND_PARAM_TYPE_ENUM = 2,
   KIND_PARAM_TYPE_COLOR = 3,
   KIND_PARAM_TYPE_BOOL = 4,
+  KIND_PARAM_TYPE_VECTOR = 5,
 };
 
 static const EnumPropertyItem rna_enum_material_paint_layer_kind_param_type_items[] = {
@@ -656,6 +663,7 @@ static const EnumPropertyItem rna_enum_material_paint_layer_kind_param_type_item
     {KIND_PARAM_TYPE_ENUM, "ENUM", 0, "Enum", "A choice from the parameter's list"},
     {KIND_PARAM_TYPE_COLOR, "COLOR", 0, "Color", "An RGBA colour"},
     {KIND_PARAM_TYPE_BOOL, "BOOL", 0, "Boolean", "An on/off checkbox"},
+    {KIND_PARAM_TYPE_VECTOR, "VECTOR", 0, "Vector", "A float 3-vector"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -4468,6 +4476,9 @@ static int rna_MaterialPaintLayerKindParam_type_get(PointerRNA *ptr)
   if (prop->type == IDP_ARRAY && prop->subtype == IDP_FLOAT && prop->len == 4) {
     return KIND_PARAM_TYPE_COLOR;
   }
+  if (prop->type == IDP_ARRAY && prop->subtype == IDP_FLOAT && prop->len == 3) {
+    return KIND_PARAM_TYPE_VECTOR;
+  }
   return KIND_PARAM_TYPE_FLOAT;
 }
 
@@ -4592,6 +4603,43 @@ static void rna_MaterialPaintLayerKindParam_color_value_set(PointerRNA *ptr, con
     stored[i] = values[i];
   }
   /* The colour is an input of the row's group: a value edit, never a different graph. */
+  if (Material *ma = reinterpret_cast<Material *>(ptr->owner_id)) {
+    BKE_paint_layers_tag_value_edited(*ma);
+  }
+}
+
+/** Whether \a prop stores a Vector parameter: an array of three floats, like a color's four. */
+static bool rna_MaterialPaintLayerKindParam_vector_prop(const IDProperty *prop)
+{
+  return prop->type == IDP_ARRAY && prop->subtype == IDP_FLOAT && prop->len == 3;
+}
+
+static void rna_MaterialPaintLayerKindParam_vector_value_get(PointerRNA *ptr, float *values)
+{
+  const IDProperty *prop = static_cast<const IDProperty *>(ptr->data);
+  if (!rna_MaterialPaintLayerKindParam_vector_prop(prop)) {
+    for (int i = 0; i < 3; i++) {
+      values[i] = 0.0f;
+    }
+    return;
+  }
+  const float *stored = IDP_array_float_get(const_cast<IDProperty *>(prop));
+  for (int i = 0; i < 3; i++) {
+    values[i] = stored[i];
+  }
+}
+
+static void rna_MaterialPaintLayerKindParam_vector_value_set(PointerRNA *ptr, const float *values)
+{
+  IDProperty *prop = static_cast<IDProperty *>(ptr->data);
+  if (!rna_MaterialPaintLayerKindParam_vector_prop(prop)) {
+    return;
+  }
+  float *stored = IDP_array_float_get(prop);
+  for (int i = 0; i < 3; i++) {
+    stored[i] = values[i];
+  }
+  /* The vector is an input of the row's group: a value edit, never a different graph. */
   if (Material *ma = reinterpret_cast<Material *>(ptr->owner_id)) {
     BKE_paint_layers_tag_value_edited(*ma);
   }
@@ -5706,6 +5754,35 @@ static void rna_MaterialPaintLayer_effect_image_set(PointerRNA *ptr,
                RPT_ERROR,
                "Cannot assign the image: the paint layer is not part of this material, or its "
                "kind reads no image slot");
+  }
+}
+
+static bool rna_MaterialPaintLayer_kind_tree_poll(PointerRNA * /*ptr*/, PointerRNA value)
+{
+  /* The setter refuses a tree that is not a shader one anyway; the poll keeps the ID picker from
+   * offering what the refusal would bounce, so everything it lists can take. A null value stays
+   * pickable: assigning it is how the definition is cleared. */
+  const bNodeTree *tree = static_cast<const bNodeTree *>(value.data);
+  return tree == nullptr ||
+         (tree->typeinfo != nullptr && tree->typeinfo->type == NTREE_SHADER);
+}
+
+static void rna_MaterialPaintLayer_kind_tree_set(PointerRNA *ptr,
+                                                 PointerRNA value,
+                                                 ReportList *reports)
+{
+  Material *ma = reinterpret_cast<Material *>(ptr->owner_id);
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (ma == nullptr || layer == nullptr) {
+    return;
+  }
+  /* The BKE call keeps the users, forgets the descriptors of the old definition and refuses a row
+   * outside the stack, a kind that reads no definition, and a tree that is not a shader tree. */
+  if (!BKE_paint_layers_kind_tree_set(*ma, layer, static_cast<bNodeTree *>(value.data))) {
+    BKE_report(reports,
+               RPT_ERROR,
+               "Cannot assign the node group: the paint layer is not part of this material, its "
+               "kind reads no definition, or the tree is not a shader node tree");
   }
 }
 
@@ -6941,6 +7018,15 @@ static void rna_def_material_paint_layer_kind_param(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Color", "Value of a color parameter");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
+  prop = RNA_def_property(srna, "vector_value", PROP_FLOAT, PROP_XYZ);
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayerKindParam_vector_value_get",
+                               "rna_MaterialPaintLayerKindParam_vector_value_set",
+                               nullptr);
+  RNA_def_property_ui_text(prop, "Vector", "Value of a vector parameter");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
   prop = RNA_def_property(srna, "exposed", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayerKindParam_exposed_get", nullptr);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
@@ -8111,6 +8197,20 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
                            "Image",
                            "The image the row's kind reads from its own slot, or none while no "
                            "image is assigned");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "kind_tree", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "kind_tree");
+  RNA_def_property_struct_type(prop, "NodeTree");
+  RNA_def_property_pointer_funcs(
+      prop, nullptr, "rna_MaterialPaintLayer_kind_tree_set", nullptr,
+      "rna_MaterialPaintLayer_kind_tree_poll");
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_ID_REFCOUNT);
+  RNA_def_property_ui_text(
+      prop,
+      "Node Group",
+      "The node group the row's kind reads its answer from, or none while no definition is "
+      "assigned (a Node Group source, filter or generator)");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "enabled", PROP_BOOLEAN, PROP_NONE);

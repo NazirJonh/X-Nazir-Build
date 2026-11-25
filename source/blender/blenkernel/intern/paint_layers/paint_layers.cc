@@ -16,6 +16,7 @@
 #include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_gradient.hh"
+#include "BKE_paint_layers_node_group.hh"
 #include "BKE_paint_layers_source_graph.hh"
 
 #include <algorithm>
@@ -37,6 +38,7 @@
 #include "BKE_library.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
+#include "BKE_node.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_blend.hh"
 #include "BKE_paint_material_composite.hh"
@@ -1043,6 +1045,11 @@ static void paint_layer_release_users(MaterialPaintLayer &layer)
   }
   if (layer.effect_image != nullptr) {
     id_us_min(&layer.effect_image->id);
+  }
+  /* The node-group definition is a shared ID the row keeps alive; removing the row drops its
+   * user, leaving the tree in `Main` for the other instances. */
+  if (layer.kind_tree != nullptr) {
+    id_us_min(&layer.kind_tree->id);
   }
   for (const int i : IndexRange(layer.channels_num)) {
     if (layer.channels[i].image != nullptr) {
@@ -3043,6 +3050,87 @@ bool BKE_paint_layers_effect_image_set(Material &ma,
   return true;
 }
 
+/** Whether \a tree exposes the sockets the row's node-group kind reads: the assignment's contract,
+ * checked before a definition is adopted. A tree that answers nothing for its kind is refused
+ * here, so a row can never point at a definition its kernel would read empty. */
+static bool paint_layer_node_group_tree_serves(const MaterialPaintLayer &row, const bNodeTree &tree)
+{
+  if (row.source == MA_PAINT_LAYER_SOURCE_NODE_GROUP) {
+    return BKE_paint_layers_node_group_supports_source(&tree);
+  }
+  if (row.kind_subtype == MA_PAINT_LAYER_FILTER_NODE_GROUP) {
+    return BKE_paint_layers_node_group_supports_filter(&tree);
+  }
+  if (row.kind_subtype == MA_PAINT_LAYER_GENERATOR_NODE_GROUP) {
+    return BKE_paint_layers_node_group_supports_generator(&tree);
+  }
+  return false;
+}
+
+/**
+ * Let go of \a layer's definition tree: the row stops reading it, so its user and the descriptors
+ * built from it go. Null-safe. The forget runs before the user can be the last one, so a memo
+ * never outlives the identity it keys on.
+ */
+static void paint_layer_kind_tree_clear(MaterialPaintLayer &layer)
+{
+  bNodeTree *tree = layer.kind_tree;
+  if (tree == nullptr) {
+    return;
+  }
+  layer.kind_tree = nullptr;
+  BKE_paint_layers_node_group_forget(tree);
+  id_us_min(&tree->id);
+}
+
+bool BKE_paint_layers_kind_tree_set(Material &ma,
+                                    MaterialPaintLayer *layer,
+                                    bNodeTree *tree)
+{
+  if (!paint_layer_owned(ma, layer)) {
+    return false;
+  }
+  /* A chain reads its definition material (#MaterialPaintLayer::material), not a tree; a tree on a
+   * chain row would be one nothing reads. */
+  /* The subtype names a kind only inside its source: a Threshold filter is subtype 10, the number
+   * a node-group generator uses, so both halves of the key are read here. */
+  const bool is_kind = layer->source == MA_PAINT_LAYER_SOURCE_NODE_GROUP ||
+                       (layer->source == MA_PAINT_LAYER_SOURCE_FILTER &&
+                        layer->kind_subtype == MA_PAINT_LAYER_FILTER_NODE_GROUP) ||
+                       (layer->source == MA_PAINT_LAYER_SOURCE_GENERATOR &&
+                        layer->kind_subtype == MA_PAINT_LAYER_GENERATOR_NODE_GROUP);
+  if (!is_kind) {
+    /* A kind that reads no definition holds no tree: the assignment would be one nothing reads. */
+    return false;
+  }
+  if (tree != nullptr && tree->typeinfo != nullptr && tree->typeinfo->type != NTREE_SHADER) {
+    /* The kinds read shader trees: a geometry or a compositor tree answers nothing the stack
+     * could lay. */
+    return false;
+  }
+  if (tree != nullptr && !paint_layer_node_group_tree_serves(*layer, *tree)) {
+    /* The convention's required sockets are the assignment's contract: a filter tree without an
+     * `Input` would leave the kernel sampling nothing, a generator without a `Coordinate` would
+     * index nothing. The RNA setter reports the refusal, so the user sees why. */
+    return false;
+  }
+  if (layer->kind_tree != nullptr) {
+    /* Forget the old definition before the user count can free it: the row may be its only user
+     * (the operator drops the creation user), and the memo key reads the tree's identity. */
+    paint_layer_kind_tree_clear(*layer);
+  }
+  layer->kind_tree = tree;
+  if (tree != nullptr) {
+    /* Shared by every instance of the definition: the tree is the one object the rows read. */
+    id_us_plus(&tree->id);
+    /* The schema is the new tree's interface: seed the row's parameters at once, so the panel
+     * lists them and a value can be written before the next draw. */
+    paint_layer_kind_params_init(*layer);
+  }
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
 MaterialPaintLayerChannel *BKE_paint_layers_channel_add(Material &ma,
                                                         MaterialPaintLayer *layer,
                                                         const eMaterialPaintChannel channel)
@@ -4434,6 +4522,10 @@ bool BKE_paint_layers_set_source(Material &ma,
   if (layer->source == source) {
     return true;
   }
+  /* A row that reads a definition tree cannot carry it into a source the node-group kinds do not
+   * name: the assignment setter refuses a row that is no longer a kind, so the tree's user would
+   * be one nothing ever releases and the definition would stay in the file as if still read. */
+  paint_layer_kind_tree_clear(*layer);
   /* The cache describes the old source: a row switched to a generator (or away from one) must not
    * keep showing it. */
   if (layer->bake != nullptr) {

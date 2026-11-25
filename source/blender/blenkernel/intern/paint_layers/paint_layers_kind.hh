@@ -74,6 +74,13 @@ enum class PaintLayerDependencyKind : uint8_t {
    * the generated graph, and it is never a stroke target.
    */
   TextDecalCoverage = 7,
+  /**
+   * The node tree a node-group kind reads as its definition: a shader tree shared by every
+   * instance of the definition. The row is one of its users, the pointer is remapped on file read
+   * and a copy takes its own user; an edit of the tree is topology, since the interface is the
+   * row's parameter schema.
+   */
+  DefinitionTree = 8,
 };
 
 /** What a change to the dependency invalidates. */
@@ -144,6 +151,12 @@ enum class PaintLayerKindParamType : uint8_t {
   ColorBalance,
   /** A #MaterialPaintLayerChannelMixer, kept in #MaterialPaintLayer::channel_mixer. */
   ChannelMixer,
+  /**
+   * A float 3-vector (an offset, a direction, a location), stored as an array property like a
+   * #Color is. The parameter packing widens it to three consecutive slots the way a Color is
+   * widened, so a consumer that reads by schema index needs no new case.
+   */
+  Vector,
 };
 
 /**
@@ -350,6 +363,16 @@ enum PaintLayerKindFlag : uint32_t {
    * reasoning.
    */
   PAINT_LAYER_KIND_EFFECT_REGION_EXACT = 1 << 17,
+  /**
+   * The kind's parameter schema lives on the definition the row reads rather than in the registry
+   * table: a node-group kind's parameters are its tree's interface sockets, a chain's are the
+   * exposed parameters of the definition's members. The static entry carries the flags, roles and
+   * name that are true of every instance; the schema comes from #paint_layer_kind_of reading
+   * #MaterialPaintLayer::kind_tree (or #MaterialPaintLayer::material for a chain) through the
+   * dynamic descriptor. A caller that holds no row -- the add menus, the RNA enum tables -- sees
+   * the static entry's empty schema, which is the truth it can state.
+   */
+  PAINT_LAYER_KIND_DYNAMIC_SCHEMA = 1 << 18,
 };
 
 struct PaintLayerKindInfo {
@@ -1141,6 +1164,18 @@ bool paint_layer_kind_param_color_set(MaterialPaintLayer &row,
                                       int index,
                                       const float color[4]);
 
+/**
+ * The float[3] value of a Vector parameter \a index, or the schema default for an unknown one.
+ * The storage is an array property like a Color's; the packing widens it to three consecutive
+ * slots the way a Color is widened, so the readers of the packed array need no new case.
+ */
+void paint_layer_kind_param_vector_get(const MaterialPaintLayer &row,
+                                       int index,
+                                       float r_vector[3]);
+bool paint_layer_kind_param_vector_set(MaterialPaintLayer &row,
+                                       int index,
+                                       const float vector[3]);
+
 /** Whether \a row's kind has a Ramp parameter (the Color Ramp filter). */
 bool paint_layer_kind_has_ramp_param(const MaterialPaintLayer &row);
 
@@ -1288,10 +1323,40 @@ const PaintLayerKindInfo *paint_layer_kind_find(int8_t source, int16_t subtype);
  */
 Span<const PaintLayerKindInfo> paint_layer_kind_generator_kinds();
 
-inline const PaintLayerKindInfo *paint_layer_kind_of(const MaterialPaintLayer &row)
-{
-  return paint_layer_kind_find(row.source, row.kind_subtype);
-}
+/**
+ * The eight placement entries every generator schema starts with, the DNA's order; the dynamic
+ * generator schema (a node-group pattern) opens its own schema with them. Defined in
+ * `paint_layers_kind_generators.cc`, beside the macro that spells them.
+ */
+Span<const PaintLayerKindParam> paint_layer_generator_placement_params();
+
+/**
+ * The ramp entry every generator schema ends with: the payload lives in
+ * #MaterialPaintLayer::ramp, so the entry carries no storage. Defined in
+ * `paint_layers_kind_generators.cc`.
+ */
+const PaintLayerKindParam *paint_layer_generator_ramp_param();
+
+/**
+ * The kind of \a row: #paint_layer_kind_find's static answer, except for the kinds flagged
+ * #PAINT_LAYER_KIND_DYNAMIC_SCHEMA, whose parameter schema lives on the definition the row reads
+ * (a node group's interface, a chain definition's members) rather than in the registry table.
+ * Those answer with the dynamic descriptor built from #MaterialPaintLayer::kind_tree (or
+ * #MaterialPaintLayer::material for a chain), cached and invalidated with the definition; a row
+ * whose definition is missing or malformed answers the static entry with its empty schema.
+ *
+ * Every parameter reader walks here, so a dynamic kind needs no branch beside it -- but a caller
+ * that only has (source, subtype), with no row to read a definition from, keeps answering from
+ * #paint_layer_kind_find. Defined in `paint_layers_kind_dynamic.cc`.
+ */
+const PaintLayerKindInfo *paint_layer_kind_of(const MaterialPaintLayer &row);
+
+/**
+ * The dynamic kind descriptor of \a row, or null when the row's kind is not a dynamic one or its
+ * definition is gone. The descriptor is built from the definition and cached; the caller treats it
+ * exactly like a static schema.
+ */
+const PaintLayerKindInfo *paint_layer_kind_dynamic_of(const MaterialPaintLayer &row);
 
 /** Whether \a row's kind may take the role the row has; false for an unknown kind. */
 bool paint_layer_kind_role_allowed(const MaterialPaintLayer &row);
@@ -1425,6 +1490,15 @@ inline void paint_layer_dependencies(MaterialPaintLayer &row,
       fn(dep);
     }
   }
+  /* The node-group kind's definition: the tree is a user the row keeps alive, and its interface is
+   * the parameter schema, so a different tree (or an edit of it) rebuilds the row. */
+  if (row.kind_tree != nullptr) {
+    PaintLayerDependency dep{reinterpret_cast<ID **>(&row.kind_tree),
+                             PaintLayerDependencyKind::DefinitionTree,
+                             PAINT_LAYER_DEP_TOPOLOGY | PAINT_LAYER_DEP_OWNERSHIP,
+                             -1};
+    fn(dep);
+  }
   /* The frame controller: its own transform is read by the generated Texture Coordinate node, so a
    * pointer change is topology and the object must stay alive while the row names it. */
   if (row.projection_object != nullptr) {
@@ -1529,6 +1603,7 @@ inline LibraryForeachIDCallbackFlag paint_layer_dependency_foreach_flag(const Pa
     case PaintLayerDependencyKind::ProjectionObject:
     case PaintLayerDependencyKind::TextDecalObject:
     case PaintLayerDependencyKind::TextDecalCoverage:
+    case PaintLayerDependencyKind::DefinitionTree:
       return IDWALK_CB_USER;
   }
   return IDWALK_CB_NOP;

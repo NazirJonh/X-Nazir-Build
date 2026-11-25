@@ -653,6 +653,22 @@ static const PaintLayerKindInfo generator_kinds[] = {
      false},
 };
 
+Span<const PaintLayerKindParam> paint_layer_generator_placement_params()
+{
+  static const PaintLayerKindParam placement_params[] = {GENERATOR_PLACEMENT_PARAMS(5.0f)};
+  static_assert(std::size(placement_params) == PAINT_LAYER_GEN_PLACEMENT_NUM);
+  return Span<const PaintLayerKindParam>(placement_params, PAINT_LAYER_GEN_PLACEMENT_NUM);
+}
+
+const PaintLayerKindParam *paint_layer_generator_ramp_param()
+{
+  /* The ramp payload is the one parameter a generator schema ends with; the value itself lives in
+   * #MaterialPaintLayer::ramp, so the entry carries no storage of its own. */
+  static const PaintLayerKindParam ramp_param = {
+      "ramp", "Ramp", 0.0f, 0.0f, 1.0f, PaintLayerKindParamType::Ramp};
+  return &ramp_param;
+}
+
 int paint_layer_generator_kind_of(const MaterialPaintLayer &row)
 {
   if (!paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_GENERATES)) {
@@ -706,6 +722,26 @@ bool paint_layer_generator_param_is_placement(const int index)
 
 const char *paint_layer_generator_param_socket(const MaterialPaintLayer &row, const int index)
 {
+  /* A node-group generator's interface parameters link to the group's own sockets: the dynamic
+   * schema stores each parameter's socket identifier as its name, so the identifier is the
+   * answer. The placement prefix has no group socket of its own (the placed coordinate rides the
+   * `Coordinate` input the emission links), the ramp is the tail's answer, not the group's, and a
+   * vector parameter is left to its socket default this pass -- the row's group input for it is
+   * made as a float, which a vector socket would refuse. */
+  if (row.source == MA_PAINT_LAYER_SOURCE_GENERATOR &&
+      row.kind_subtype == MA_PAINT_LAYER_GENERATOR_NODE_GROUP)
+  {
+    const PaintLayerKindInfo *schema = paint_layer_kind_of(row);
+    if (schema != nullptr && index >= PAINT_LAYER_GEN_PLACEMENT_NUM &&
+        index < schema->params_num)
+    {
+      const PaintLayerKindParamType type = schema->params[index].type;
+      if (type != PaintLayerKindParamType::Ramp && type != PaintLayerKindParamType::Vector) {
+        return schema->params[index].name;
+      }
+    }
+    return nullptr;
+  }
   Span<const GeneratorSocketParam> sockets;
   Span<const GeneratorConditionalSocketParam> conditional;
   generator_socket_tables(paint_layer_generator_kind_of(row), sockets, conditional);

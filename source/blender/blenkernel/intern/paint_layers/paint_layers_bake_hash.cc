@@ -24,11 +24,14 @@
 #include "BLI_string.h"
 #include "BLI_uuid.h"
 
+#include "BKE_material.hh"
+#include "BKE_mesh_maps.hh"
+#include "BKE_node.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_asset.hh"
 #include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_gradient.hh"
-#include "BKE_mesh_maps.hh"
+#include "BKE_paint_layers_node_group.hh"
 #include "BKE_paint_material_composite.hh"
 
 #include "DNA_ID.h"
@@ -463,6 +466,19 @@ static uint64_t bake_hash_layer(uint64_t h,
   /* A kind's parameters (a filter's, a coverage operator's) change the pixels. A ramp filter keeps
    * its stops outside the properties, in its own payload; a curves filter its Bézier points. */
   h = bake_hash_idprops(h, layer.system_properties);
+  /* A node-group kind (a source row or a filter effect) answers from the tree it reads: the
+   * definition's interface, the graph's topology and the tree's identity are what its pixels were
+   * made from, so an edit of the tree retires this bake. */
+  if (layer.kind_tree != nullptr) {
+    h = bake_hash_mix(h, uint64_t(layer.kind_tree->id.session_uid));
+    const uint64_t definition_hash = BKE_paint_layers_node_group_definition_hash(layer);
+    h = bake_hash_mix(h, uint32_t(definition_hash));
+    h = bake_hash_mix(h, uint32_t(definition_hash >> 32));
+  }
+  /* A chain's pixels are its definition's members: the definition's shape (its topology
+   * generation) and every member's own description -- a nested node-group's tree, a member's
+   * parameters and payloads -- are what the unfolded corrections were made from. The instance's
+   * stored overrides are in `system_properties`, hashed above. */
   if (layer.ramp != nullptr) {
     h = bake_hash_mix(h, paint_layer_ramp_hash(layer.ramp->band));
   }

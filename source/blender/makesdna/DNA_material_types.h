@@ -694,10 +694,18 @@ enum eMaterialPaintLayerSource : int8_t {
    */
   MA_PAINT_LAYER_SOURCE_MATERIAL = 2,
   /**
+   * A node group of the user's own, read through #MaterialPaintLayer::kind_tree: the row lays what
+   * the group's paint-channel outputs show, computed over the map by the shader-bake. The group's
+   * interface follows the node-group convention (`BKE_paint_layers_node_group.hh`): `Result` (or
+   * one output per paint channel) is the content, every other input but `UV` and `Mask` is a
+   * parameter of the row's dynamic kind schema. It owns channel records and no maps of its own.
+   * Numerically matches the reference's source table, which reserved 3 for this source.
+   */
+  MA_PAINT_LAYER_SOURCE_NODE_GROUP = 3,
+  /**
    * A folder: the row holds its stack in #MaterialPaintLayer::children and lays their isolated
    * result over what is below with its own blend, opacity and mask. It owns no channel records and
-   * no maps. Numerically matches the reference's source table: 3 is reserved for the Node Group
-   * source.
+   * no maps.
    */
   MA_PAINT_LAYER_SOURCE_STACK = 4,
   /**
@@ -715,7 +723,7 @@ enum eMaterialPaintLayerSource : int8_t {
   /**
    * An Anchor Point or an Anchor Point Reader: the marker publishes a slice of its row, the reader
    * lays that slice. The member is #MaterialPaintLayer::kind_subtype
-   * (#eMaterialPaintLayerAnchorPoint). 3 stays reserved for the Node Group source named above.
+   * (#eMaterialPaintLayerAnchorPoint).
    */
   MA_PAINT_LAYER_SOURCE_ANCHOR_POINT = 8,
   /**
@@ -967,6 +975,13 @@ enum eMaterialPaintLayerGenerator : int16_t {
    * a grunge layer needs four sliders rather than a sub-stack.
    */
   MA_PAINT_LAYER_GENERATOR_GRUNGE = 9,
+  /**
+   * A generator the user built as a node group (#MaterialPaintLayer::kind_tree): the group answers
+   * `Fac` (the ramp position) for the `Coordinate` the placement chain feeds it, and may answer
+   * `Color` where no ramp could express the answer. The parameters beside the placement schema are
+   * the group's own inputs, read by the dynamic kind schema.
+   */
+  MA_PAINT_LAYER_GENERATOR_NODE_GROUP = 10,
 };
 
 /**
@@ -1312,6 +1327,24 @@ enum eMaterialPaintLayerFilter : int16_t {
    * writes.
    */
   MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK = 45,
+  /**
+   * A filter the user built as a node group (#MaterialPaintLayer::kind_tree): the group answers
+   * `Result` for the `Input` the channel content (or the mask grey, as a mask item) feeds it, and
+   * every other input but `UV` and `Mask` is a parameter of the row's dynamic kind schema. A
+   * per-texel effect like the pointwise filters: the shader-bake computes it, the effect cache
+   * holds it, and its reach is Pointwise by construction (a graph of per-pixel node functions),
+   * WholeMap when the group reaches for a neighborhood node (Bevel, Ambient Occlusion).
+   */
+  MA_PAINT_LAYER_FILTER_NODE_GROUP = 46,
+  /**
+   * A chain of existing effects the user saved as one reusable definition (a Smart Filter, a
+   * material holding effect rows), read through #MaterialPaintLayer::material. The row stands for
+   * the chain: the composite unfolds the definition's effect rows in order, each carrying the
+   * instance's exposed parameter values, so every consumer -- the bake, the graph, the GPU pass
+   * plans -- sees the ordinary corrections it already accelerates. As a mask item the definition's
+   * mask filters unfold over the mask grey the same way.
+   */
+  MA_PAINT_LAYER_FILTER_CHAIN = 47,
 };
 
 /** #MaterialPaintLayerColorBalance::method */
@@ -2144,6 +2177,14 @@ struct MaterialPaintLayer {
   int16_t material_canvas_height = 0;
   /** Keep the struct size a multiple of 8 so an array of rows stays aligned. */
   char _pad_source[2] = {};
+  /**
+   * The node tree the row's kind reads its answer from (a NODE_GROUP source's content group, a
+   * NODE_GROUP filter's per-texel function, a NODE_GROUP generator's pattern), or null for every
+   * kind that answers from its own schema. Shared by every instance of the definition: copying a
+   * row copies the pointer, the tree stays one definition the instances read. Appended last so the
+   * offsets of the older fields do not move.
+   */
+  struct bNodeTree *kind_tree = nullptr;
 };
 
 /**

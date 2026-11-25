@@ -696,12 +696,7 @@ TEST_F(PaintLayersChainTest, chain_gpu_member_result_matches_the_manual_stack)
   /* The member's cache answer is the manual blur's own: the input the member computed from is the
    * chain's content with the Exposure folded in, which is the row's content with the Exposure
    * laid -- the same input the manual blur describes up to its marker -- and the kernel is the
-   * member's own, the same kind and parameters.
-   *
-   * Disabled until `06_combined_preview`, which adds
-   * #BKE_paint_layers_effect_buffer_result: the parity above already compares the laid frames, and
-   * this block only adds the buffer-level twin once that getter exists. */
-#if 0
+   * member's own, the same kind and parameters. */
   int manual_buffer_width = 0;
   int manual_buffer_height = 0;
   std::shared_ptr<ImBuf> manual_buffer = BKE_paint_layers_effect_buffer_result(
@@ -723,7 +718,6 @@ TEST_F(PaintLayersChainTest, chain_gpu_member_result_matches_the_manual_stack)
     EXPECT_NEAR(member_buffer->float_data()[i], manual_buffer->float_data()[i], 1e-6f)
         << "the member's answer is the manual blur's, texel " << i / 4;
   }
-#endif
 }
 
 /**

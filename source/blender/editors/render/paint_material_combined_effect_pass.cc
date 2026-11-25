@@ -81,6 +81,19 @@ bool combined_effect_jobs_render(const Material &ma,
       if (!job.needs_render) {
         continue;
       }
+      if (job.baked_result) {
+        /* A baked job runs no plan -- its passes are empty, so the ping-pong, the input render and
+         * the region arithmetic below are all bypassed: the CPU effect cache's buffer is the whole
+         * result, and it goes into the cache texture as one upload. The order still holds -- the
+         * jobs of a row were collected in order, so a later baked job's CPU compute (if its cache
+         * missed) reads the earlier effects' CPU answers the same way a plan job's input render
+         * would read their GPU ones. */
+        if (!combined_effect_bake_upload(ma, job, tile_number)) {
+          return false;
+        }
+        rendered++;
+        continue;
+      }
       /* The scratch of this job alone, returned to the pool when the job ends -- the pass results
        * the later effects read live in the GPU result cache, so nothing here has to outlive the
        * publish below, and the next job of the same size reuses the textures instead of the frame
@@ -371,16 +384,31 @@ bool combined_effect_jobs_render(const Material &ma,
 
       /* The versions are stamped after the render, so an edit that landed while it ran is newer than
        * this entry and costs one more update rather than a result that never clears. The hashes are
-       * the ones the entry was keyed on above. */
-      BKE_paint_layers_effect_gpu_cache_publish(ma,
-                                                *job.effect,
-                                                job.channel,
-                                                job.input_size.x,
-                                                job.input_size.y,
-                                                job.images,
-                                                PaintLayerEffectKeyExtras{job.chain_hash,
-                                                                          job.input_scalar_hash},
-                                                tile_number);
+       * the ones the entry was keyed on above -- a chain member's through the keyed form, its
+       * composite marker and instance-unique hash. */
+      if (job.correction->effect_member != nullptr) {
+        BKE_paint_layers_effect_gpu_cache_publish_keyed(ma,
+                                                        job.correction->effect_marker,
+                                                        job.correction->effect_hash,
+                                                        job.channel,
+                                                        job.input_size.x,
+                                                        job.input_size.y,
+                                                        job.images,
+                                                        PaintLayerEffectKeyExtras{job.chain_hash,
+                                                                                     job.input_scalar_hash},
+                                                        tile_number);
+      }
+      else {
+        BKE_paint_layers_effect_gpu_cache_publish(ma,
+                                                  *job.effect,
+                                                  job.channel,
+                                                  job.input_size.x,
+                                                  job.input_size.y,
+                                                  job.images,
+                                                  PaintLayerEffectKeyExtras{job.chain_hash,
+                                                                               job.input_scalar_hash},
+                                                  tile_number);
+      }
       rendered++;
       last_kind = int(job.correction->filter);
       last_radius = job.halo;

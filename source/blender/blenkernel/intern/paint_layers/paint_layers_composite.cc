@@ -5846,6 +5846,16 @@ bool BKE_paint_layers_effect_is_gpu_computed(const MaterialPaintLayer &effect)
   return paint_layer_effect_is_gpu_computed(effect);
 }
 
+bool BKE_paint_layers_effect_is_precomputed_result(const MaterialPaintLayer &effect)
+{
+  return paint_layer_effect_is_precomputed_result(effect);
+}
+
+bool BKE_paint_layers_effect_node_group_can_compute(const MaterialPaintLayer &effect)
+{
+  return paint_layer_effect_node_group_can_compute(effect);
+}
+
 const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialCompositeImageLayer &layer,
                                                     const bool mask_slice)
 {
@@ -5988,9 +5998,26 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
      * registry's #PAINT_LAYER_KIND_NEEDS_BAKE flag decides, so a new one needs no edit here -- except
      * for a kind the preview now computes on the GPU (#PAINT_LAYER_KIND_GPU_COMPUTED): the gather lays
      * an effect pass into the GPU result cache and reads the texture as a correction's map, which is
-     * the same picture the CPU cache holds. Gated on the opacity that decides the CPU lays it too. */
+     * the same picture the CPU cache holds. A node-group filter takes the third way out: it stays
+     * CPU-computed with no GPU branch, but its result is the CPU effect cache's own buffer, which
+     * the effect stage uploads as the cache texture -- the same parity, reached by publishing the
+     * CPU answer instead of recomputing it. Only the content-correction form is allowed here: a
+     * mask item's grey has no effect stage of its own (the mask pass has no result texture to
+     * read), so the mask-item loop above keeps refusing the kind. Whether the shader-bake backend
+     * that computes the answer is registered is not asked here -- this function reads the
+     * description only -- the effect stage refuses the job when it is not. Gated on the opacity
+     * that decides the CPU lays it too.
+     *
+     * A Smart Filter chain's GPU-computed member rides these clauses unchanged: its correction
+     * carries the member's own kind in #PaintMaterialCompositeCorrection::filter, so a Blur member
+     * is exempt by the GPU-computed clause and a node-group member by the precomputed one, exactly
+     * as a direct effect of the same kind is. A member the contract refuses (a NEEDS_BAKE kind
+     * with neither a GPU pass nor a precomputed answer) never reaches a description at all -- the
+     * unfolding skips it -- so there is nothing here to refuse; the stack previews without such a
+     * member, and the portability blocks the shape at save time. */
     if (correction.opacity > 0.0f && paint_layer_filter_is_cpu_computed(correction.filter) &&
-        !paint_layer_filter_is_gpu_computed(correction.filter))
+        !paint_layer_filter_is_gpu_computed(correction.filter) &&
+        !paint_layer_filter_is_precomputed_result(correction.filter))
     {
       const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER,
                                                              correction.filter);
@@ -5998,7 +6025,9 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
         return paint_layer_cpu_computed_reason(*kind);
       }
     }
-    if (correction.opacity > 0.0f && gpu_filter_lacks_branch(correction.filter)) {
+    if (correction.opacity > 0.0f && gpu_filter_lacks_branch(correction.filter) &&
+        !paint_layer_filter_is_precomputed_result(correction.filter))
+    {
       return "a correction filter the preview shader has no branch for is read";
     }
   }
@@ -6008,6 +6037,43 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
     return "an adjustment filter the preview shader has no branch for is read";
   }
   return nullptr;
+}
+
+std::shared_ptr<ImBuf> BKE_paint_layers_effect_buffer_result(const Material &ma,
+                                                             const MaterialPaintLayer &effect,
+                                                             const int channel,
+                                                             const int tile_number,
+                                                             int &r_width,
+                                                             int &r_height)
+{
+  r_width = 0;
+  r_height = 0;
+  /* A CPU-computed effect only: the GPU preview asks for the node-group filter, whose answer is
+   * this buffer verbatim, but every #PAINT_LAYER_KIND_NEEDS_BAKE kind is served by the same cache
+   * and the question is the same one #composite_effect_append_cpu_computed answers for the CPU
+   * composite. A GPU-computed-only or non-effect row has no buffer here to stand for. */
+  if (effect.role != MA_PAINT_LAYER_ROLE_EFFECT || !paint_layer_effect_is_cpu_computed(effect)) {
+    return {};
+  }
+  /* The effect reads the row it hangs on: the cache's key does not name it, but the input describe
+   * does (#BKE_paint_layers_effect_input_describe takes row and effect apart). The same lookup the
+   * GPU job walk does, so both callers resolve one marker to one row. */
+  const MaterialPaintLayer *row = BKE_paint_layers_correction_owner(ma, effect);
+  if (row == nullptr) {
+    return {};
+  }
+  /* The cached buffer, computed on a miss: the cache's mutex is never held while an effect
+   * computes, so the compute below may render nested slices and nested effects of its own. The
+   * preview's gather calls this on the main thread, the thread the bake computes on too, so the
+   * nested renders run under the same terms as every other effect compute. */
+  std::shared_ptr<ImBuf> buffer = paint_layer_effect_buffer_get(
+      ma, *row, effect, channel, tile_number, /*describe_only=*/false, nullptr, nullptr);
+  if (buffer == nullptr) {
+    return {};
+  }
+  r_width = buffer->x;
+  r_height = buffer->y;
+  return buffer;
 }
 
 bool BKE_paint_layers_chain_member_input_describe(const Material &ma,

@@ -398,6 +398,32 @@ void BKE_paint_layers_effect_input_images(const PaintMaterialCompositeImageLayer
                                           Vector<Image *> &r_images);
 
 /**
+ * The result of the CPU-computed \a effect on its row's content in \a channel, exactly as the CPU
+ * effect cache holds it for the composite and the bake: a premultiplied, scene-linear RGBA float
+ * buffer at the input's own size, the kernel's answer written over the input it rendered. The row
+ * the effect hangs on is found by its marker, the way the GPU preview's job walk does.
+ *
+ * This is the one public read of the CPU effect cache's buffer, so the GPU Combined preview can
+ * publish a CPU-computed kind's answer as a GPU result: uploading this buffer is parity by
+ * construction -- the pixels are the kernel's own output, not a re-computation of it.
+ *
+ * \param effect: an effect row (#MA_PAINT_LAYER_ROLE_EFFECT) a #PAINT_LAYER_KIND_NEEDS_BAKE kind
+ *        computes; anything else answers null, as does an effect no row of \a ma carries or whose
+ *        input cannot be rendered.
+ * \param r_width, r_height: the buffer's dimensions, the input's own.
+ * \return the cached buffer, computed on a miss. The cache's mutex is never held while an effect
+ *         computes, so the compute may render nested slices and nested effects of its own; a caller
+ *         on the main thread (the preview's gather runs there) is the safe one, matching the terms
+ *         the bake job computes under.
+ */
+std::shared_ptr<ImBuf> BKE_paint_layers_effect_buffer_result(const Material &ma,
+                                                             const MaterialPaintLayer &effect,
+                                                             int channel,
+                                                             int tile_number,
+                                                             int &r_width,
+                                                             int &r_height);
+
+/**
  * Describe the input of a Smart Filter chain's GPU-computed \a member: the chain's content up to
  * \a chain on \a row, with the definition members before \a member folded in (the prefix), and --
  * in \a describe_only -- the member's own correction named beside it. The GPU job's input render
@@ -486,6 +512,25 @@ bool BKE_paint_layers_slice_render(const Material &ma,
  * true for, so the refusal, the queue and the shader's own cases stay one rule.
  */
 bool BKE_paint_layers_effect_is_gpu_computed(const MaterialPaintLayer &effect);
+
+/**
+ * Whether the GPU Combined preview serves this CPU-computed \a effect from the CPU effect cache's
+ * buffer instead of an effect pass of its own (#BKE_paint_layers_effect_buffer_result hands the
+ * buffer over). The one CPU-computed kind accepted past #BKE_paint_layers_gpu_unsupported_reason's
+ * correction refusal and queued by the gather's effect stage, so the refusal, the queue and the
+ * kinds stay one rule. The node-group filter, whose kernel runs over the same described input the
+ * cache renders, is that kind.
+ */
+bool BKE_paint_layers_effect_is_precomputed_result(const MaterialPaintLayer &effect);
+
+/**
+ * Whether the precomputed \a effect can actually answer where it sits: the shader-bake backend is
+ * registered and the row still names its definition tree. Without either, the kernel leaves its
+ * buffer unchanged and an upload would publish a wrong "no-op" as the result, so the effect stage
+ * refuses the job and the CPU preview answers -- which skips the answer the same way. Pure: it
+ * reads the hooks' registration, not the GPU, so it is testable without a context.
+ */
+bool BKE_paint_layers_effect_node_group_can_compute(const MaterialPaintLayer &effect);
 
 /**
  * Why the GPU Combined preview cannot lay \a layer the way the CPU composite does, or null when it
@@ -1013,6 +1058,29 @@ PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get(const Material &m
                                                                int tile_number = PAINT_TILE_NUMBER_AUTO);
 
 /**
+ * The same cache, keyed explicitly: \a effect_marker and \a effect_hash name the key's effect half
+ * instead of the row's own marker and hash. The Smart Filter chain member a description carries as
+ * an effect correction is no DNA row of the material -- its key names the composite marker the
+ * unfolding built and the instance-unique hash the correction carries -- so the GPU job walk keys
+ * a member's entry through this form, with the values it read from the correction, and the CPU
+ * effect cache (which keyed the same member under the same marker and hash) and this one agree on
+ * what the member's answer is a function of.
+ */
+PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get_keyed(
+    const Material &ma,
+    const bUUID &effect_marker,
+    uint64_t effect_hash,
+    int channel,
+    int width,
+    int height,
+    Span<Image *> images,
+    const PaintLayerEffectKeyExtras &key_extras,
+    const PaintLayerEffectGpuHooks &hooks,
+    rcti *r_dirty_region,
+    void **r_resource,
+    int tile_number = PAINT_TILE_NUMBER_AUTO);
+
+/**
  * Record that the texture of this effect's entry now holds its result over \a images at the versions
  * they have now. Call it after the render, the way the CPU cache snapshots the sources afterwards: an
  * edit that landed while the pass ran is then seen as newer than the entry and costs one more update
@@ -1028,6 +1096,21 @@ void BKE_paint_layers_effect_gpu_cache_publish(const Material &ma,
                                                Span<Image *> images,
                                                const PaintLayerEffectKeyExtras &key_extras,
                                                int tile_number = PAINT_TILE_NUMBER_AUTO);
+
+/**
+ * The publish above, keyed explicitly: the pair a #BKE_paint_layers_effect_gpu_cache_get_keyed ask
+ * was keyed under, so a hit reads on identical content. A Smart Filter chain member's job publishes
+ * through this form, with the correction's composite marker and instance-unique hash.
+ */
+void BKE_paint_layers_effect_gpu_cache_publish_keyed(const Material &ma,
+                                                     const bUUID &effect_marker,
+                                                     uint64_t effect_hash,
+                                                     int channel,
+                                                     int width,
+                                                     int height,
+                                                     Span<Image *> images,
+                                                     const PaintLayerEffectKeyExtras &key_extras,
+                                                     int tile_number = PAINT_TILE_NUMBER_AUTO);
 
 /**
  * Drop every cached effect texture. The cache owns textures of its own, so it has to be emptied while

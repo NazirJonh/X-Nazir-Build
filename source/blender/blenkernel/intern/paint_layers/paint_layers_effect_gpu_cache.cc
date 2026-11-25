@@ -109,17 +109,21 @@ static void paint_layer_effect_gpu_entry_release(EffectGpuCacheEntry &entry)
   paint_layer_effect_gpu_release(entry.hooks, entry.resource);
 }
 
-PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get(const Material &ma,
-                                                              const MaterialPaintLayer &effect,
-                                                              const int channel,
-                                                              const int width,
-                                                              const int height,
-                                                              const Span<Image *> images,
-                                                              const PaintLayerEffectKeyExtras &key_extras,
-                                                              const PaintLayerEffectGpuHooks &hooks,
-                                                              rcti *r_dirty_region,
-                                                              void **r_resource,
-                                                              const int tile_number)
+/** The keyed body the two public asks share: the effect half of the key comes in by name, so a
+ * direct effect's row and a chain member's composite marker ask the same container the same way. */
+static PaintLayerEffectGpuState paint_layer_effect_gpu_cache_get_keyed(
+    const Material &ma,
+    const bUUID &effect_marker,
+    const uint64_t effect_hash,
+    const int channel,
+    const int width,
+    const int height,
+    const Span<Image *> images,
+    const PaintLayerEffectKeyExtras &key_extras,
+    const PaintLayerEffectGpuHooks &hooks,
+    rcti *r_dirty_region,
+    void **r_resource,
+    const int tile_number)
 {
   if (r_resource != nullptr) {
     *r_resource = nullptr;
@@ -131,10 +135,10 @@ PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get(const Material &m
     return PaintLayerEffectGpuState::Failed;
   }
   const EffectCacheKey key{ma.id.session_uid,
-                           effect.marker,
+                           effect_marker,
                            channel,
                            BKE_paint_layers_tile_resolve(tile_number, nullptr, nullptr),
-                           paint_layer_effect_hash(effect, channel),
+                           effect_hash,
                            key_extras};
   const size_t bytes = paint_layer_effect_gpu_entry_bytes(width, height);
 
@@ -223,21 +227,75 @@ PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get(const Material &m
   }
   return PaintLayerEffectGpuState::Render;
 }
+PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get(
+    const Material &ma,
+    const MaterialPaintLayer &effect,
+    const int channel,
+    const int width,
+    const int height,
+    const Span<Image *> images,
+    const PaintLayerEffectKeyExtras &key_extras,
+    const PaintLayerEffectGpuHooks &hooks,
+    rcti *r_dirty_region,
+    void **r_resource,
+    const int tile_number)
+{
+  return paint_layer_effect_gpu_cache_get_keyed(ma,
+                                                effect.marker,
+                                                paint_layer_effect_hash(effect, channel),
+                                                channel,
+                                                width,
+                                                height,
+                                                images,
+                                                key_extras,
+                                                hooks,
+                                                r_dirty_region,
+                                                r_resource,
+                                                tile_number);
+}
 
-void BKE_paint_layers_effect_gpu_cache_publish(const Material &ma,
-                                               const MaterialPaintLayer &effect,
-                                               const int channel,
-                                               const int width,
-                                               const int height,
-                                               const Span<Image *> images,
-                                               const PaintLayerEffectKeyExtras &key_extras,
-                                               const int tile_number)
+PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get_keyed(
+    const Material &ma,
+    const bUUID &effect_marker,
+    const uint64_t effect_hash,
+    const int channel,
+    const int width,
+    const int height,
+    const Span<Image *> images,
+    const PaintLayerEffectKeyExtras &key_extras,
+    const PaintLayerEffectGpuHooks &hooks,
+    rcti *r_dirty_region,
+    void **r_resource,
+    const int tile_number)
+{
+  return paint_layer_effect_gpu_cache_get_keyed(ma,
+                                                effect_marker,
+                                                effect_hash,
+                                                channel,
+                                                width,
+                                                height,
+                                                images,
+                                                key_extras,
+                                                hooks,
+                                                r_dirty_region,
+                                                r_resource,
+                                                tile_number);
+}
+static void paint_layer_effect_gpu_cache_publish_keyed(const Material &ma,
+                                                       const bUUID &effect_marker,
+                                                       const uint64_t effect_hash,
+                                                       const int channel,
+                                                       const int width,
+                                                       const int height,
+                                                       const Span<Image *> images,
+                                                       const PaintLayerEffectKeyExtras &key_extras,
+                                                       const int tile_number)
 {
   const EffectCacheKey key{ma.id.session_uid,
-                           effect.marker,
+                           effect_marker,
                            channel,
                            BKE_paint_layers_tile_resolve(tile_number, nullptr, nullptr),
-                           paint_layer_effect_hash(effect, channel),
+                           effect_hash,
                            key_extras};
   std::lock_guard<std::mutex> lock(g_paint_effect_gpu_cache_mutex);
   for (EffectGpuCacheEntry &entry : g_paint_effect_gpu_cache.entries) {
@@ -257,7 +315,47 @@ void BKE_paint_layers_effect_gpu_cache_publish(const Material &ma,
   /* The entry was evicted or dropped while the frame was rendering into its texture: nothing to
    * stamp, and the next frame asks again. */
 }
+void BKE_paint_layers_effect_gpu_cache_publish(const Material &ma,
+                                               const MaterialPaintLayer &effect,
+                                               const int channel,
+                                               const int width,
+                                               const int height,
+                                               const Span<Image *> images,
+                                               const PaintLayerEffectKeyExtras &key_extras,
+                                               const int tile_number)
+{
+  paint_layer_effect_gpu_cache_publish_keyed(ma,
+                                             effect.marker,
+                                             paint_layer_effect_hash(effect, channel),
+                                             channel,
+                                             width,
+                                             height,
+                                             images,
+                                             key_extras,
+                                             tile_number);
+}
 
+void BKE_paint_layers_effect_gpu_cache_publish_keyed(
+    const Material &ma,
+    const bUUID &effect_marker,
+    const uint64_t effect_hash,
+    const int channel,
+    const int width,
+    const int height,
+    const Span<Image *> images,
+    const PaintLayerEffectKeyExtras &key_extras,
+    const int tile_number)
+{
+  paint_layer_effect_gpu_cache_publish_keyed(ma,
+                                             effect_marker,
+                                             effect_hash,
+                                             channel,
+                                             width,
+                                             height,
+                                             images,
+                                             key_extras,
+                                             tile_number);
+}
 void BKE_paint_layers_effect_gpu_cache_free_all()
 {
   std::lock_guard<std::mutex> lock(g_paint_effect_gpu_cache_mutex);

@@ -10,8 +10,11 @@
  * target the caller names, and #combined_preview_gpu_effects_run runs the effects: the walk that
  * collects them in their rows' order, the GPU result cache's loop with each input's size, plan and
  * fingerprints, the input rendered whole at its own resolution, and the pass plan dispatched and
- * published. The dispatch order, the barriers and the texture releases are the ones the gather
- * established; nothing here changes them.
+ * published. A CPU-computed kind the GPU path serves from the CPU effect cache's buffer (the
+ * node-group filter) is the exception: no plan, no input render -- the buffer
+ * #BKE_paint_layers_effect_buffer_result hands over is uploaded whole into the cache texture
+ * (#combined_effect_bake_upload) and published like a dispatched result. The dispatch order, the
+ * barriers and the texture releases are the ones the gather established; nothing here changes them.
  */
 
 #include "paint_material_combined_effects.hh"
@@ -2004,6 +2007,146 @@ static const PaintLayerEffectGpuHooks effect_gpu_hooks = {
     effect_gpu_release,
 };
 
+/**
+ * Whether \a entry's pixels depend on the painted surface anywhere a CPU compute without the object
+ * describes differently: a projection on the row, a correction, a mask item or a nested child; a
+ * transform step in its own Decal frame (the only steps that carry one); a live Anchor Point reader
+ * or a baked one's coverage; or a gradient whose exact answer is keyed on the surface. The baked
+ * job's CPU answer (#BKE_paint_layers_effect_buffer_result) is computed with no object, and a
+ * projected read without one lays transparent rather than at the wrong UV -- uploading that would
+ * publish pixels the described input does not hold. The flat shapes a filter usually reads -- a
+ * painted map, a flat colour, a Material row's own bake maps, a plain transform step -- describe
+ * the same without a surface and stay on the fast path.
+ */
+static bool combined_effect_input_needs_surface(const PaintMaterialCompositeImageLayer &entry)
+{
+  if (entry.mapping.projection.present || !BLI_uuid_is_nil(entry.anchor_point_reader)) {
+    return true;
+  }
+  if (entry.gradient.enabled && entry.gradient.surface_key != 0) {
+    return true;
+  }
+  for (const PaintMaterialCompositeMapping &step : entry.input_transforms) {
+    if (step.projection.present) {
+      return true;
+    }
+  }
+  for (const PaintMaterialCompositeCorrection &correction : entry.content_corrections) {
+    if (correction.mapping.projection.present ||
+        !BLI_uuid_is_nil(correction.anchor_point_reader) ||
+        correction.anchor_point_coverage_image != nullptr ||
+        (correction.gradient.enabled && correction.gradient.surface_key != 0))
+    {
+      return true;
+    }
+  }
+  for (const PaintMaterialCompositeMaskItem &item : entry.mask_items) {
+    if (item.mapping.projection.present || item.coverage_mapping.projection.present ||
+        !BLI_uuid_is_nil(item.anchor_point_reader))
+    {
+      return true;
+    }
+  }
+  for (const PaintMaterialCompositeImageLayer &child : entry.children) {
+    if (combined_effect_input_needs_surface(child)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Fill the baked job's cache texture with the CPU effect cache's buffer: the node-group filter's
+ * kernel runs on the CPU (the shader-bake backend renders the user's tree over the described
+ * input), and the buffer that comes back is the answer -- the same pixels the CPU composite mixes
+ * and the bake writes. Uploading it is therefore parity by construction, not an approximation.
+ *
+ * The gather runs on the main thread, the only thread the effect cache computes on (a bake job
+ * computes there too, and the cache's mutex is never held while one computes), so the compute this
+ * may trigger -- the input rendered whole, nested slices included -- is safe here. A surface-
+ * dependent input never reaches here: the cache loop refused it before the job was queued to
+ * render (#combined_effect_input_needs_surface), so the compute below sees a description that reads
+ * the same without the object.
+ *
+ * The buffer is premultiplied, scene-linear RGBA float with the content alpha in the fourth
+ * component, one row per scanline from the bottom up; the texture is the RGBA half-float canvas
+ * #effect_gpu_acquire made at the input's size, which the correction pass's effect branch reads and
+ * straightens exactly as `composite_decode_tile` does on the CPU. `GPU_texture_update` converts the
+ * float rows to half floats in place -- no colourspace step, no row flip, the convention the image
+ * textures upload by. The whole buffer goes up whatever the cache named as moved: the kernel is
+ * pointwise, so a partial upload would save nothing worth the path.
+ *
+ * \return false with the reason reported when the CPU answer cannot be had or does not match the
+ *         texture the cache handed out.
+ */
+bool combined_effect_bake_upload(const Material &ma,
+                                 const GpuEffectJob &job,
+                                 const int tile_number)
+{
+  int width = 0;
+  int height = 0;
+  /* The CPU effect cache's buffer, keyed under the same marker the GPU entry is: a direct effect's
+   * DNA marker, a chain member's composite one -- the member asks through the prefix-aware getter,
+   * whose input folds the members before it exactly as the described input above does, so the two
+   * sizes agree the same way the direct effect's do. */
+  std::shared_ptr<ImBuf> buffer = (job.correction->effect_member != nullptr) ?
+                                      BKE_paint_layers_chain_member_effect_buffer_result(
+                                          ma,
+                                          *job.row,
+                                          *job.correction->effect_chain,
+                                          *job.effect,
+                                          job.channel,
+                                          tile_number,
+                                          width,
+                                          height) :
+                                      BKE_paint_layers_effect_buffer_result(
+                                          ma, *job.effect, job.channel, tile_number, width, height);
+  if (buffer == nullptr || buffer->float_buffer.data == nullptr) {
+    return gpu_refuse("a node-group filter has no CPU result to upload");
+  }
+  if (width != job.input_size.x || height != job.input_size.y ||
+      GPU_texture_width(job.result) != width || GPU_texture_height(job.result) != height)
+  {
+    /* The CPU cache resolves the input's size through the same describe path the GPU key was built
+     * from, so this should not happen; a mismatch would smear one grid onto another. */
+    return gpu_refuse("a node-group filter result does not match its input size");
+  }
+  GPU_texture_update(job.result, GPU_DATA_FLOAT, buffer->float_buffer.data);
+  /* The upload lands before anything reads it: the correction pass samples the texture this same
+     frame, and the capture path barriers the same way (GPU_BARRIER_TEXTURE_UPDATE for the host
+     write, the fetch bit for the sampler that reads it after). */
+  GPU_memory_barrier(GPU_BARRIER_TEXTURE_UPDATE | GPU_BARRIER_TEXTURE_FETCH);
+  /* The versions are stamped after the upload, the way the dispatch path stamps them after its
+   * passes: an edit that landed while the CPU computed is newer than this entry and costs one more
+   * update rather than a result that never clears. The hashes are the ones the entry was keyed on
+   * above, so the publish finds it -- a chain member's through the keyed form, the composite
+   * marker and the instance-unique hash its correction carries. */
+  if (job.correction->effect_member != nullptr) {
+    BKE_paint_layers_effect_gpu_cache_publish_keyed(ma,
+                                                    job.correction->effect_marker,
+                                                    job.correction->effect_hash,
+                                                    job.channel,
+                                                    job.input_size.x,
+                                                    job.input_size.y,
+                                                    job.images,
+                                                    PaintLayerEffectKeyExtras{job.chain_hash,
+                                                                                 job.input_scalar_hash},
+                                                    tile_number);
+  }
+  else {
+    BKE_paint_layers_effect_gpu_cache_publish(ma,
+                                              *job.effect,
+                                              job.channel,
+                                              job.input_size.x,
+                                              job.input_size.y,
+                                              job.images,
+                                              PaintLayerEffectKeyExtras{job.chain_hash,
+                                                                           job.input_scalar_hash},
+                                              tile_number);
+  }
+  return true;
+}
+
 bool combined_preview_gpu_effects_run(
     const Material &ma,
     Span<Span<const PaintMaterialCompositeImageLayer>> stacks,
@@ -2062,14 +2205,47 @@ bool combined_preview_gpu_effects_run(
     }
   }
   for (GpuEffectJob &job : r_jobs) {
-    /* The description names the effect by its marker but not the row it sits on, and the input has
-     * to be described from both: find them in the material the same way the CPU cache's caller
-     * does. */
-    job.effect = BKE_paint_layers_find(ma, job.correction->effect_marker);
-    if (job.effect == nullptr || !BKE_paint_layers_effect_is_gpu_computed(*job.effect)) {
+    if (job.correction->effect_member != nullptr) {
+      /* A Smart Filter chain's GPU-computed member: the correction carries the pair the marker
+       * cannot name -- a composite marker is no row of the material, so the lookup below would
+       * refuse it. The member answers the kind flags and the definition tree exactly as a direct
+       * effect's row does, and the chain row resolves the owner the same lookup the CPU cache's
+       * caller runs. */
+      job.effect = job.correction->effect_member;
+      job.row = BKE_paint_layers_correction_owner(ma, *job.correction->effect_chain);
+    }
+    else {
+      /* The description names the effect by its marker but not the row it sits on, and the input
+       * has to be described from both: find them in the material the same way the CPU cache's
+       * caller does. */
+      job.effect = BKE_paint_layers_find(ma, job.correction->effect_marker);
+    }
+    if (job.effect == nullptr) {
       return gpu_refuse("a GPU effect row cannot be resolved");
     }
-    job.row = BKE_paint_layers_correction_owner(ma, *job.effect);
+    if (!BKE_paint_layers_effect_is_gpu_computed(*job.effect)) {
+      /* A kind with no effect pass of its own is refused, with the one exception: the node-group
+       * filter, whose CPU kernel answers through the shader-bake backend over the same described
+       * input the effect cache renders, so the CPU cache's buffer *is* the result and the GPU path
+       * publishes it instead of dispatching. A chain member of the same kind takes the same road:
+       * it was never a direct effect, but the predicate reads the member row's own kind, and its
+       * own plan is empty exactly like the direct one's -- the baked treatment is per member. */
+      if (!BKE_paint_layers_effect_is_precomputed_result(*job.effect)) {
+        return gpu_refuse("a GPU effect row cannot be resolved");
+      }
+      /* Without the backend or the definition tree the kernel leaves its buffer unchanged, and
+       * uploading that would publish a wrong "no-op" as the effect's result: refuse to the CPU
+       * preview, which skips the answer the same way. The parity reason lives on the predicate
+       * (#BKE_paint_layers_effect_node_group_can_compute), which reads the member row's own
+       * definition tree -- the tree the definition copy carried at save time. */
+      if (!BKE_paint_layers_effect_node_group_can_compute(*job.effect)) {
+        return gpu_refuse("a node-group filter has no shader-bake backend");
+      }
+      job.baked_result = true;
+    }
+    if (job.row == nullptr) {
+      job.row = BKE_paint_layers_correction_owner(ma, *job.effect);
+    }
     if (job.row == nullptr) {
       return gpu_refuse("a GPU effect has no owner row");
     }
@@ -2087,17 +2263,33 @@ bool combined_preview_gpu_effects_run(
   int chain_channel = -1;
   int chain_halo = 0;
   for (GpuEffectJob &job : r_jobs) {
-    if (!BKE_paint_layers_effect_input_describe(ma,
-                                                *job.row,
-                                                *job.effect,
-                                                job.channel,
-                                                /*dimensions_only=*/false,
-                                                /*describe_only=*/true,
-                                                job.input_entry,
-                                                PaintLayerTileContext{.painted_object =
-                                                                          painted_object,
-                                                                      .tile_number = tile_number}))
-    {
+    /* The input is described once here (describe-only, no slice rendered) and the same description
+     * is re-used by the render below. A Smart Filter chain member's input is the owner's content up
+     * to the chain with the members before it folded in -- the same prefix-aware describe the CPU
+     * cache computes the member from, so the two backends lay the member over the same canvas. */
+    const bool described = (job.correction->effect_member != nullptr) ?
+                               BKE_paint_layers_chain_member_input_describe(
+                                   ma,
+                                   *job.row,
+                                   *job.correction->effect_chain,
+                                   *job.effect,
+                                   job.channel,
+                                   /*dimensions_only=*/false,
+                                   /*describe_only=*/true,
+                                   job.input_entry,
+                                   PaintLayerTileContext{.painted_object = painted_object,
+                                                         .tile_number = tile_number}) :
+                               BKE_paint_layers_effect_input_describe(
+                                   ma,
+                                   *job.row,
+                                   *job.effect,
+                                   job.channel,
+                                   /*dimensions_only=*/false,
+                                   /*describe_only=*/true,
+                                   job.input_entry,
+                                   PaintLayerTileContext{.painted_object = painted_object,
+                                                         .tile_number = tile_number});
+    if (!described) {
       return gpu_refuse("an effect input cannot be described");
     }
     int width = 0;
@@ -2120,48 +2312,85 @@ bool combined_preview_gpu_effects_run(
     job.predecessor_halo = chain_halo;
     BKE_paint_layers_effect_input_images(job.input_entry, job.images);
     /* The pass plan, the neighbourhood halo, the scalar fingerprint of the input, and whether the
-     * region the cache reports can narrow the dispatch -- all decided from the description. */
+     * region the cache reports can narrow the dispatch -- all decided from the description. A
+     * baked job builds no plan: its kind has no effect pass (the node-group filter), so there is
+     * nothing for the plan to describe and nothing for the slot rule to check. */
     const float *params = job.correction->filter_params;
     job.input_scalar_hash = BKE_paint_layers_effect_input_scalar_hash(job.input_entry);
-    job.halo = BKE_paint_layers_effect_halo(
-        eMaterialPaintLayerFilter(job.correction->filter), params, width, height);
+    if (job.baked_result) {
+      /* The CPU answer this job uploads is computed without the painted surface, so a description
+       * whose pixels depend on one would publish what the described input does not hold: the
+       * surface-dependent shapes keep the kind with the CPU preview, the way the bake computes them
+       * per object. */
+      if (combined_effect_input_needs_surface(job.input_entry)) {
+        return gpu_refuse("a node-group filter input reads the surface the CPU answer cannot");
+      }
+      /* The kernel is a function of one texel -- the node group evaluates each pixel on its own --
+       * so the result moves only inside an edited rectangle: no halo of its own, and none passed on
+       * to the jobs after this one in the row. The whole-canvas upload below covers whatever the
+       * cache named as moved, which is more than a pointwise kernel needs and never less. */
+      job.halo = 0;
+    }
+    else {
+      job.halo = BKE_paint_layers_effect_halo(
+          eMaterialPaintLayerFilter(job.correction->filter), params, width, height);
+      BKE_paint_layers_effect_pass_plan(
+          eMaterialPaintLayerFilter(job.correction->filter), params, width, height, job.passes);
+      if (job.passes.is_empty()) {
+        if (bke::paint_perf::enabled()) {
+          /* Which kind and which parameters the plan refused: a parametric refusal (a picked Color
+           * Match, a Fill Area debug) and a plan the packing starved look alike otherwise. */
+          printf("[PBR-PERF] gpu_effect.noplan kind=%d params=%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g\n",
+                 int(job.correction->filter),
+                 params[0], params[1], params[2], params[3], params[4], params[5], params[6],
+                 params[7], params[8], params[9], params[10], params[11]);
+          fflush(stdout);
+        }
+        return gpu_refuse("a GPU effect has no pass plan");
+      }
+      /* A plan that names a slot fetch but no slot image would sample nothing at dispatch, and a
+       * result cached under such a description cannot be trusted either, so the effect -- hit or
+       * miss -- is refused to the CPU path. */
+      for (const PaintLayerEffectPass &pass : job.passes) {
+        if (pass.aux == ePaintLayerEffectPassAux::Slot && job.input_entry.slot_image == nullptr) {
+          return gpu_refuse("a Channel Split effect names no slot image");
+        }
+      }
+    }
     chain_halo += job.halo;
-    BKE_paint_layers_effect_pass_plan(
-        eMaterialPaintLayerFilter(job.correction->filter), params, width, height, job.passes);
-    if (job.passes.is_empty()) {
-      if (bke::paint_perf::enabled()) {
-        /* Which kind and which parameters the plan refused: a parametric refusal (a picked Color
-         * Match, a Fill Area debug) and a plan the packing starved look alike otherwise. */
-        printf("[PBR-PERF] gpu_effect.noplan kind=%d params=%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g\n",
-               int(job.correction->filter),
-               params[0], params[1], params[2], params[3], params[4], params[5], params[6],
-               params[7], params[8], params[9], params[10], params[11]);
-        fflush(stdout);
-      }
-      return gpu_refuse("a GPU effect has no pass plan");
-    }
-    /* A plan that names a slot fetch but no slot image would sample nothing at dispatch, and a
-     * result cached under such a description cannot be trusted either, so the effect -- hit or
-     * miss -- is refused to the CPU path. */
-    for (const PaintLayerEffectPass &pass : job.passes) {
-      if (pass.aux == ePaintLayerEffectPassAux::Slot && job.input_entry.slot_image == nullptr) {
-        return gpu_refuse("a Channel Split effect names no slot image");
-      }
-    }
     void *resource = nullptr;
-    const PaintLayerEffectGpuState state = BKE_paint_layers_effect_gpu_cache_get(ma,
-                                                                                *job.effect,
-                                                                                job.channel,
-                                                                                width,
-                                                                                height,
-                                                                                job.images,
-                                                                                PaintLayerEffectKeyExtras{
-                                                                                    job.chain_hash,
-                                                                                    job.input_scalar_hash},
-                                                                                effect_gpu_hooks,
-                                                                                &job.region,
-                                                                                &resource,
-                                                                                tile_number);
+    /* A direct effect's entry is keyed on its row's marker and hash; a chain member's on the
+     * composite marker and the instance-unique hash its correction carries -- the same key the CPU
+     * cache filed the member's answer under. */
+    const PaintLayerEffectGpuState state =
+        (job.correction->effect_member != nullptr) ?
+            BKE_paint_layers_effect_gpu_cache_get_keyed(ma,
+                                                        job.correction->effect_marker,
+                                                        job.correction->effect_hash,
+                                                        job.channel,
+                                                        width,
+                                                        height,
+                                                        job.images,
+                                                        PaintLayerEffectKeyExtras{
+                                                            job.chain_hash,
+                                                            job.input_scalar_hash},
+                                                        effect_gpu_hooks,
+                                                        &job.region,
+                                                        &resource,
+                                                        tile_number) :
+            BKE_paint_layers_effect_gpu_cache_get(ma,
+                                                  *job.effect,
+                                                  job.channel,
+                                                  width,
+                                                  height,
+                                                  job.images,
+                                                  PaintLayerEffectKeyExtras{
+                                                      job.chain_hash,
+                                                      job.input_scalar_hash},
+                                                  effect_gpu_hooks,
+                                                  &job.region,
+                                                  &resource,
+                                                  tile_number);
     if (state == PaintLayerEffectGpuState::Failed || resource == nullptr) {
       return gpu_refuse("a GPU effect texture could not be allocated");
     }

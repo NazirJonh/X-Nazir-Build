@@ -1027,6 +1027,48 @@ inline bool paint_layer_filter_is_gpu_computed(const int16_t filter)
 }
 
 /**
+ * Whether the GPU preview serves this CPU-computed kind from the CPU effect cache's buffer instead
+ * of an effect pass of its own: the user's node-group filter (a #MA_PAINT_LAYER_FILTER_NODE_GROUP)
+ * has no GPU branch, but its kernel runs through the shader-bake backend over the same described
+ * input the effect cache renders, so the cache's buffer *is* the answer -- uploading it is parity
+ * by construction, not an approximation. The effect-row form of
+ * #paint_layer_filter_is_gpu_computed's question, kept beside the other two so the refusal, the
+ * job walk and the kinds stay one rule.
+ */
+inline bool paint_layer_effect_is_precomputed_result(const MaterialPaintLayer &effect)
+{
+  return paint_layer_effect_is_cpu_computed(effect) &&
+         effect.kind_subtype == MA_PAINT_LAYER_FILTER_NODE_GROUP;
+}
+
+/**
+ * The same question for a bare filter subtype, as a correction of a description carries it: the
+ * correction names the kind, not the row. One answer with the effect-row form above, so a stack is
+ * never refused on one side and queued on the other.
+ */
+inline bool paint_layer_filter_is_precomputed_result(const int16_t filter)
+{
+  return paint_layer_filter_is_cpu_computed(filter) && filter == MA_PAINT_LAYER_FILTER_NODE_GROUP;
+}
+
+/**
+ * Whether the node-group filter \a effect can actually answer where it sits: the shader-bake
+ * backend is registered and the row still names its definition tree. The kernel leaves the buffer
+ * as it came when either is missing (#paint_layer_effect_kernel_apply's no-op branch), and the GPU
+ * path must refuse rather than upload that unchanged buffer as the effect's result -- the CPU
+ * preview answers instead, which skips the answer the same way. The one check the GPU job and the
+ * tests read, so the parity reason lives in one place.
+ */
+inline bool paint_layer_effect_node_group_can_compute(const MaterialPaintLayer &effect)
+{
+  if (effect.kind_subtype != MA_PAINT_LAYER_FILTER_NODE_GROUP) {
+    return false;
+  }
+  const PaintLayerShaderBakeHooks *hooks = BKE_paint_layers_shader_bake_hooks_get();
+  return hooks != nullptr && hooks->render != nullptr && effect.kind_tree != nullptr;
+}
+
+/**
  * Whether the transform \a effect would act in its own Decal frame: enabled, remapping and holding a
  * frame. The live graph has no form for it (it walks the surface), so the row that carries one is
  * baked for the viewport like a Blur is. It is the Material-free half of

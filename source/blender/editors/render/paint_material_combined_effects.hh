@@ -307,7 +307,10 @@ struct GpuEffectResult {
  */
 struct GpuEffectJob {
   const PaintMaterialCompositeCorrection *correction = nullptr;
-  /** The effect row of the description, named by the correction's marker, and the row it corrects. */
+  /** The effect row of the description, and the row it corrects. A direct effect is named by the
+   * correction's marker; a Smart Filter chain's GPU-computed member is no row of the material, and
+   * the job walk takes the member and the chain row from the correction's own pointers
+   * (#PaintMaterialCompositeCorrection::effect_member / ::effect_chain) instead. */
   const MaterialPaintLayer *effect = nullptr;
   const MaterialPaintLayer *row = nullptr;
   int channel = 0;
@@ -351,6 +354,14 @@ struct GpuEffectJob {
   Vector<Image *> images;
   /** Texels that moved since the cached result; carried for the GPU pass's region re-render. */
   rcti region = {0, 0, 0, 0};
+  /**
+   * A CPU-computed kind the GPU path serves from the CPU effect cache's buffer (the node-group
+   * filter): no pass plan is built, and a #Render answer is answered by uploading the CPU result
+   * (#BKE_paint_layers_effect_buffer_result) into the cache texture instead of rendering the input
+   * and dispatching. The pixels are the kernel's own output, so the parity a GPU-computed kind
+   * reaches through its pass plan this one reaches by construction.
+   */
+  bool baked_result = false;
   /** False when the cache hit and nothing is to be rendered. */
   bool needs_render = false;
   /** Whether the input's fourth component is a content alpha the composite keeps. */
@@ -362,7 +373,8 @@ struct GpuEffectJob {
    * one of the input's non-map scalar content. Computed from the description, without a GPU. */
   uint64_t chain_hash = 0;
   uint64_t input_scalar_hash = 0;
-  /** The pass plan of the effect, and whether a partial dispatch may narrow to the region. */
+  /** The pass plan of the effect, and whether a partial dispatch may narrow to the region. Empty
+   * for a #baked_result job, which dispatches nothing. */
   Vector<PaintLayerEffectPass> passes;
   /** The neighbourhood reach of the whole plan, in input texels. */
   int halo = 0;
@@ -374,6 +386,16 @@ struct GpuEffectJob {
    * renders the whole canvas (a map of another size, or a remapping between a map and the canvas). */
   bool region_exact = false;
 };
+
+/**
+ * Upload a baked job's CPU answer into the cache texture the job's `result` names and publish it:
+ * a CPU-computed kind (the node-group filter) has no GPU pass, so #combined_preview_gpu_effects_run
+ * takes this path instead of a dispatch. False with the reason reported when the CPU answer cannot
+ * be had or does not match the texture the cache handed out.
+ */
+bool combined_effect_bake_upload(const Material &ma,
+                                 const GpuEffectJob &job,
+                                 const int tile_number);
 
 /** The arguments of one effect pass dispatch: the job the pass belongs to, one pass of its plan,
  * and the buffers and rectangle that pass runs over. */
@@ -913,7 +935,10 @@ bool combined_effect_jobs_render(const Material &ma,
  * The GPU effect stage of the combined preview: collect the effects of the described stacks, key
  * their results in the GPU result cache, render the input of each one that needs it and dispatch its
  * pass plan over the input's own resolution, then publish. Runs after the Anchor Point captures and
- * before the channels' stacks, which mix the results in as corrections.
+ * before the channels' stacks, which mix the results in as corrections. The one CPU-computed kind
+ * the preview serves (#BKE_paint_layers_effect_is_precomputed_result, the node-group filter) takes
+ * the same cache loop with no plan: its CPU result buffer is uploaded into the cache texture and
+ * published like a dispatched result.
  *
  * \param stacks: the described stack per shaded channel, in the shading order (the capture plan's
  *        view of the same stacks). Only the channels \a has_stack names and, when \a wanted_channel

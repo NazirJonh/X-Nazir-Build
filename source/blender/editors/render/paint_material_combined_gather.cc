@@ -1187,6 +1187,11 @@ void combined_preview_gpu_free()
    * drops each texture with the hook that made it, so it needs no GPU type to do so.
    */
   BKE_paint_layers_effect_gpu_cache_free_all();
+  /* The shader-bake's cache images are session-local datablocks and the dynamic kind descriptors
+   * are memoized against the definitions; both go with the file, the way the source graph's
+   * memos do. */
+  BKE_paint_layers_shader_bake_free_all();
+  BKE_paint_layers_node_group_forget_all();
 }
 
 void combined_preview_gpu_caches_free()

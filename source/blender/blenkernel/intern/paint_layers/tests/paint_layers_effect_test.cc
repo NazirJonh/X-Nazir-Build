@@ -7683,10 +7683,8 @@ class ScopedShaderBakeStub {
 
 /* The three tests below read the combined preview's precomputed-result API
  * (#BKE_paint_layers_effect_buffer_result, #BKE_paint_layers_effect_node_group_can_compute,
- * #paint_layer_effect_is_precomputed_result, #paint_layer_filter_is_precomputed_result), which the
- * `06_combined_preview` patch of the custom-effects series adds. Disabled until that patch is
- * integrated, so this build's test binary compiles. */
-#if 0
+ * #paint_layer_effect_is_precomputed_result, #paint_layer_filter_is_precomputed_result), which
+ * `06_combined_preview` adds. */
 TEST_F(PaintLayersEffectTest, the_node_group_filter_result_is_the_kernel_answer)
 {
   /* The stub lives for the test only: the hooks are process state, and a later test must start
@@ -7855,7 +7853,9 @@ TEST_F(PaintLayersEffectTest, the_node_group_filter_refusal_follows_the_backend)
       << "a node-group filter correction rides the GPU stage";
 
   /* The mask-item form stays refused: the mask pass has no result texture to read, so a node-group
-   * grey in a mask keeps the whole stack with the CPU. */
+   * grey in a mask keeps the whole stack with the CPU. The filter corrects the base mask, which the
+   * Outliner's Add policy makes and the raw call expects. */
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 1.0f), nullptr);
   MaterialPaintLayer *mask_item = BKE_paint_layers_mask_filter_add(
       *ma, row, MA_PAINT_LAYER_FILTER_NODE_GROUP, nullptr);
   ASSERT_NE(mask_item, nullptr);
@@ -7868,7 +7868,6 @@ TEST_F(PaintLayersEffectTest, the_node_group_filter_refusal_follows_the_backend)
   EXPECT_STREQ(reason, "a Node Group correction is read")
       << "the mask item keeps the CPU-computed refusal";
 }
-#endif
 
 TEST_F(PaintLayersEffectTest, a_node_group_filter_alpha_answer_lays_a_premultiplied_layer)
 {

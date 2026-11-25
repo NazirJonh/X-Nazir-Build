@@ -830,12 +830,14 @@ MaterialPaintLayer *BKE_paint_layers_active_mask_item_get(Material &ma);
  *
  * \param name: the correction's name, or null for "Correction Paint" / "Correction Fill".
  * A Gradient correction (the Generator source) has no map and one channel record: its ramp
- * supplies the colour in a colour channel and its line the mix in a scalar one.
+ * supplies the colour in a colour channel and its line the mix in a scalar one. A Node Group
+ * correction (the Node Group source) owns no records either: it lays its definition's shader-bake
+ * map over the row's colour, and its tree is assigned with #BKE_paint_layers_kind_tree_set.
  *
- * \param source: #MA_PAINT_LAYER_SOURCE_IMAGE, #MA_PAINT_LAYER_SOURCE_CONSTANT or
- *                #MA_PAINT_LAYER_SOURCE_GENERATOR.
+ * \param source: #MA_PAINT_LAYER_SOURCE_IMAGE, #MA_PAINT_LAYER_SOURCE_CONSTANT,
+ *                #MA_PAINT_LAYER_SOURCE_GENERATOR or #MA_PAINT_LAYER_SOURCE_NODE_GROUP.
  * \return the new correction, or null when \a owner is not a row of \a ma's stack or \a source is
- * none of the three. A folder takes one: it corrects the isolated result of what the folder holds,
+ * none of the four. A folder takes one: it corrects the isolated result of what the folder holds,
  * before the folder's own blend, and a folder that has one is no longer a Pass Through folder.
  */
 MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,

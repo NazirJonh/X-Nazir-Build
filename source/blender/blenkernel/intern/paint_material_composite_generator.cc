@@ -384,13 +384,18 @@ bool BKE_paint_material_generator_sample_coordinate(const PaintMaterialComposite
    * row before it gets here, so the path only guards a hand-built item. */
   const PaintLayerGeneratorInfo *entry = BKE_paint_layers_generator_find(generator.subtype);
   float t;
-  if (entry != nullptr) {
+  if (entry != nullptr && entry->cpu_factor != nullptr) {
     t = entry->cpu_factor(generator, placed);
     if (!is_gradient) {
       /* A pattern's factor is a ramp position, and the ramp reads 0..1; the Gradient's line is
        * left alone, its own ramp lays the whole of it. */
       t = clamp_f(t, 0.0f, 1.0f);
     }
+  }
+  else if (entry != nullptr) {
+    /* The kind answers its factor through the shader-bake and has no CPU formula; the describe
+     * refuses such a row before it reaches here, so this only guards a hand-built item. */
+    t = 0.0f;
   }
   else {
     BLI_assert_msg(false, "Unknown paint layer generator subtype");

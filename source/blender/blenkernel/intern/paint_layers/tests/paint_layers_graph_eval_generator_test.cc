@@ -686,6 +686,7 @@ TEST(generator_registry, matches_the_kind_schemas_and_the_rna_enum)
       {MA_PAINT_LAYER_GENERATOR_SCRATCHES, "SCRATCHES", "Scratches"},
       {MA_PAINT_LAYER_GENERATOR_WEAVE, "WEAVE", "Weave"},
       {MA_PAINT_LAYER_GENERATOR_GRUNGE, "GRUNGE", "Grunge"},
+      {MA_PAINT_LAYER_GENERATOR_NODE_GROUP, "NODE_GROUP", "Node Group"},
   };
 
   const Span<const PaintLayerGeneratorInfo> generators = BKE_paint_layers_generator_all();

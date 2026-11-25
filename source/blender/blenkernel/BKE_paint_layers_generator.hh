@@ -152,10 +152,18 @@ MaterialPaintLayer *BKE_paint_layers_generator_add(Material &ma,
  * left on the row (which only reads it while its kind is Gradient), so switching back restores the
  * line the user drew. False when \a generator names no kind, or the kind does not allow the row's
  * role; a row that is not a generator at all cannot be switched.
+ *
+ * A switch onto the Node Group kind that leaves the row without a definition seeds it one: the
+ * template tree of the generator kind (#BKE_paint_layers_node_group_template_ensure), assigned
+ * like the Add operator assigns its own, so the one generic kind the properties panel can flip
+ * leaves something to edit rather than an inert row. A row that already reads a tree is never
+ * touched, and a caller without a \a bmain (a script building a stack unattended) skips the
+ * seeding -- the row stays inert, which the UI reports as a missing definition.
  */
 bool BKE_paint_layers_generator_kind_set(Material &ma,
                                          MaterialPaintLayer &row,
-                                         eMaterialPaintLayerGenerator generator);
+                                         eMaterialPaintLayerGenerator generator,
+                                         Main *bmain = nullptr);
 
 /** \} */
 

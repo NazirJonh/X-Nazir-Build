@@ -328,7 +328,8 @@ static bNodeSocket *backend_instance_socket(bNode &instance,
  * made (the ask then renders nothing, the way a failed chain leaves the row out of the graph).
  */
 static bNodeSocket *backend_generator_coordinate_build(bNodeTree &tree,
-                                                       const BakePlacement &placement)
+                                                       const BakePlacement &placement,
+                                                       bNode **r_node)
 {
   const auto space_output = [&]() -> const char * {
     switch (eMaterialPaintLayerGradientSpace(placement.space)) {
@@ -430,6 +431,7 @@ static bNodeSocket *backend_generator_coordinate_build(bNodeTree &tree,
   bke::node_add_link(tree, *coord, *coordinate, *rotate, *rotate_vector);
   bke::node_add_link(tree, *rotate, *rotate_out, *mapping, *map_vector);
   bke::node_add_link(tree, *mapping, *map_out, *shifted, *shift_a);
+  *r_node = shifted;
   return shift_out;
 }
 
@@ -446,6 +448,7 @@ static bNodeSocket *backend_generator_coordinate_build(bNodeTree &tree,
  * Principled socket to carry it.
  */
 static bNodeSocket *backend_generator_channel_build(bNodeTree &tree,
+                                                    bNode &fac_node,
                                                     bNode &principled,
                                                     const PaintLayerShaderBakeOutput &output,
                                                     const MaterialPaintChannelInfo &info,
@@ -482,7 +485,7 @@ static bNodeSocket *backend_generator_channel_build(bNodeTree &tree,
       bke::node_remove_node(nullptr, tree, *tail, true, false);
       return nullptr;
     }
-    bke::node_add_link(tree, fac_socket.owner_node(), fac_socket, *tail, *fac_in);
+    bke::node_add_link(tree, fac_node, fac_socket, *tail, *fac_in);
   }
   else {
     tail = backend_add_node(tree, SH_NODE_MAP_RANGE);
@@ -510,7 +513,7 @@ static bNodeSocket *backend_generator_channel_build(bNodeTree &tree,
     {
       end->value = output.scalar_end;
     }
-    bke::node_add_link(tree, fac_socket.owner_node(), fac_socket, *tail, *value_in);
+    bke::node_add_link(tree, fac_node, fac_socket, *tail, *value_in);
     tail_color = result;
     /* A linear pass carries no alpha of its own: the fourth channel stays at the socket's one,
      * which is the coverage a band-less row lays. */
@@ -518,6 +521,9 @@ static bNodeSocket *backend_generator_channel_build(bNodeTree &tree,
   }
 
   bNodeSocket *fed = nullptr;
+  /* The node that owns #fed: the wiring below hands it explicitly, because the socket's
+   * `owner_node()` reads the topology cache, which is not built while the material is assembled. */
+  bNode *fed_node = nullptr;
   if (info.is_color) {
     /* The Compose node is the carrier, the same mechanism the alpha ask uses: straight colour in,
      * the tail's alpha into the vec4's fourth channel. The bake dumps this socket's value whole,
@@ -537,6 +543,7 @@ static bNodeSocket *backend_generator_channel_build(bNodeTree &tree,
         bke::node_add_link(tree, *tail, *tail_alpha, *compose, *compose_alpha_in);
       }
       fed = compose_color_out;
+      fed_node = compose;
     }
     else if (compose != nullptr) {
       /* A compose that could not be built lays the colour alone: the alpha stays the socket's
@@ -544,9 +551,11 @@ static bNodeSocket *backend_generator_channel_build(bNodeTree &tree,
        * an alpha output would have laid. */
       bke::node_remove_node(nullptr, tree, *compose, true, false);
       fed = tail_color;
+      fed_node = tail;
     }
     else {
       fed = tail_color;
+      fed_node = tail;
     }
   }
   else {
@@ -555,11 +564,12 @@ static bNodeSocket *backend_generator_channel_build(bNodeTree &tree,
      * scalar chain applies. The dump's alpha stays opaque, so the row covers by its opacity --
      * the scalar answer the CPU sample gives. */
     fed = tail_color;
+    fed_node = tail;
   }
   if (fed == nullptr) {
     return nullptr;
   }
-  bke::node_add_link(tree, fed->owner_node(), *fed, principled, *socket_in);
+  bke::node_add_link(tree, *fed_node, *fed, principled, *socket_in);
   return fed;
 }
 
@@ -638,12 +648,9 @@ Material *paint_layers_shader_bake_backend_material_build(
                                                              PAINT_NG_SOCKET_COORDINATE))
     {
       const BakePlacement placement = backend_placement_read(request.parameters);
-      if (bNodeSocket *placed = backend_generator_coordinate_build(tree, placement)) {
-        bke::node_add_link(tree,
-                           placed->owner_node(),
-                           *placed,
-                           *instance,
-                           *coordinate_in);
+      bNode *placed_node = nullptr;
+      if (bNodeSocket *placed = backend_generator_coordinate_build(tree, placement, &placed_node)) {
+        bke::node_add_link(tree, *placed_node, *placed, *instance, *coordinate_in);
       }
     }
   }
@@ -710,7 +717,7 @@ Material *paint_layers_shader_bake_backend_material_build(
         if (socket_in == nullptr) {
           continue;
         }
-        bke::node_add_link(tree, own_color->owner_node(), *own_color, *principled, *socket_in);
+        bke::node_add_link(tree, *instance, *own_color, *principled, *socket_in);
         if (output.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
           wired_base_color = true;
         }
@@ -727,7 +734,7 @@ Material *paint_layers_shader_bake_backend_material_build(
         const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
             eMaterialPaintChannel(output.channel));
         const bNodeSocket *fed = backend_generator_channel_build(
-            tree, *principled, output, info, *fac_out);
+            tree, *instance, *principled, output, info, *fac_out);
         if (fed != nullptr && output.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
           wired_base_color = true;
         }

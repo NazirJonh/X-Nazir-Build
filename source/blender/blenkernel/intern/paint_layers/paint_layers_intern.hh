@@ -1030,6 +1030,15 @@ inline bool paint_layer_row_folds_into_bake(const Material &ma, const MaterialPa
  */
 inline bool paint_layer_row_needs_bake(const MaterialPaintLayer &row)
 {
+  /* A node-group source row has no live graph answer of its own: the bake map is what the graph
+   * lays, so the row asks for the bake the way a CPU-computed effect does. Only a row of the
+   * stack reads its own kind here; an effect of the same kind is laid from the row bake that
+   * carrying it already asks for. */
+  if (row.role == MA_PAINT_LAYER_ROLE_LAYER &&
+      paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_NEEDS_BAKE))
+  {
+    return true;
+  }
   for (const MaterialPaintLayer &effect : row.effects) {
     if (paint_layer_effect_is_cpu_computed(effect) || paint_layer_effect_acts_in_decal_frame(effect))
     {
@@ -1297,6 +1306,21 @@ inline bool paint_layer_row_participates(const Material &ma,
                                          const MaterialPaintLayer &layer,
                                          const int channel)
 {
+  /* A node-group source reads its definition, not records and not a material: it participates
+   * when the definition is assigned, whatever the bake has rendered yet -- the describe that
+   * follows answers for the bake's presence. A per-channel source takes part in the channels its
+   * tree names alone; the one-answer contract (`Result`-only) participates everywhere. */
+  if (layer.source == MA_PAINT_LAYER_SOURCE_NODE_GROUP && layer.kind_tree != nullptr &&
+      (layer.flag & MA_PAINT_LAYER_ENABLED) != 0)
+  {
+    bool per_channel[PAINT_MATERIAL_CHANNEL_NUM];
+    if (!BKE_paint_layers_node_group_source_channels(
+            layer.kind_tree, MutableSpan<bool>(per_channel, PAINT_MATERIAL_CHANNEL_NUM)) ||
+        (channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM && per_channel[channel]))
+    {
+      return true;
+    }
+  }
   return paint_layer_channel_contributes(ma, layer, paint_layer_channel_find(layer, channel)) ||
          paint_layer_effects_lay(ma, layer, channel) ||
          paint_layer_effects_derive(ma, layer, channel) ||

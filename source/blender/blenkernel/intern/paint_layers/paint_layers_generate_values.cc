@@ -149,19 +149,42 @@ bool values_sync_socket(Material &ma,
   }
   if (STREQ(role, ROLE_PARAM)) {
     /* The position names the parameter in the row's kind schema; a row whose kind lost it (a
-     * hand-edited tree) cannot be trusted, so the caller rebuilds. */
+     * hand-edited tree) cannot be trusted, so the caller rebuilds. A color or a vector parameter
+     * rides a typed socket of its own, written whole the way the scalar is. */
     const PaintLayerKindInfo *kind = paint_layer_kind_of(*layer);
     const int index = prop_int_get(iface.properties, INPUT_PARAM_PROP, -1);
     if (kind == nullptr || index < 0 || index >= kind->params_num || socket.default_value == nullptr)
     {
       return false;
     }
-    const float value = paint_layer_kind_param_get(*layer, index);
-    static_cast<bNodeSocketValueFloat *>(socket.default_value)->value = value;
-    if (iface.socket_data != nullptr) {
-      static_cast<bNodeSocketValueFloat *>(iface.socket_data)->value = value;
+    switch (kind->params[index].type) {
+      case PaintLayerKindParamType::Color: {
+        float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        paint_layer_kind_param_color_get(*layer, index, color);
+        copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(socket.default_value)->value, color);
+        if (iface.socket_data != nullptr) {
+          copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(iface.socket_data)->value, color);
+        }
+        return true;
+      }
+      case PaintLayerKindParamType::Vector: {
+        float vector[3];
+        paint_layer_kind_param_vector_get(*layer, index, vector);
+        copy_v3_v3(static_cast<bNodeSocketValueVector *>(socket.default_value)->value, vector);
+        if (iface.socket_data != nullptr) {
+          copy_v3_v3(static_cast<bNodeSocketValueVector *>(iface.socket_data)->value, vector);
+        }
+        return true;
+      }
+      default: {
+        const float value = paint_layer_kind_param_get(*layer, index);
+        static_cast<bNodeSocketValueFloat *>(socket.default_value)->value = value;
+        if (iface.socket_data != nullptr) {
+          static_cast<bNodeSocketValueFloat *>(iface.socket_data)->value = value;
+        }
+        return true;
+      }
     }
-    return true;
   }
   if (STREQ(role, ROLE_MASK_OPACITY) || STREQ(role, ROLE_MASK_VALUE) ||
       STREQ(role, ROLE_MASK_ENABLED) || STREQ(role, ROLE_MASK_CONTRAST))

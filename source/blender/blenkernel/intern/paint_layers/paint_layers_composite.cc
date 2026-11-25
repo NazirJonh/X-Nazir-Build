@@ -648,6 +648,114 @@ static bool paint_layer_effect_slot_size(const MaterialPaintLayer &effect,
 }
 
 /**
+ * The shader-bake's answer for a node-group row: the generated image the bake fills, at the
+ * material's canvas size, or null while there is no backend or no definition. The one place the
+ * two describes (the row's content and a laying correction's map) read it.
+ */
+static Image *composite_node_group_bake_image(const Material &ma,
+                                              const MaterialPaintLayer &layer,
+                                              const int bake_channel,
+                                              const int tile_number,
+                                              const PaintLayerSurfaceRef painted_object)
+{
+  Main *bmain = BKE_paint_layers_shader_bake_main();
+  if (bmain == nullptr) {
+    return nullptr;
+  }
+  const PaintLayerTileContext tile{.painted_object = painted_object,
+                                   .tile_number = tile_number};
+  const int size = ma.paint_layers_image_size;
+  return BKE_paint_layers_shader_bake_image_get(
+      *bmain, ma, layer, bake_channel, tile, size, size);
+}
+
+/**
+ * The node-group layer's source: the shader-bake's answer is the row's content, laid like a map
+ * at the bake's own alpha. The size is the material's canvas -- the bake is a generated image of
+ * that side, resampled by the mapping like any other map. A row whose bake has no answer yet (no
+ * backend, no bake landed) takes no part, the way a row with no map does.
+ */
+static bool composite_node_group_source_describe(const Material &ma,
+                                                 const MaterialPaintLayer &layer,
+                                                 const int channel,
+                                                 const int tile_number,
+                                                 PaintLayerSurfaceRef painted_object,
+                                                 PaintMaterialCompositeImageLayer &out)
+{
+  /* A per-channel source takes part in the channels its tree names alone: a channel it does not
+   * answer is the row not laying there, the way a record switched off is. The one-answer contract
+   * (`Result`-only) reads the same map in every channel, as it always has. */
+  bool per_channel[PAINT_MATERIAL_CHANNEL_NUM];
+  const bool multi = BKE_paint_layers_node_group_source_channels(
+      layer.kind_tree, MutableSpan<bool>(per_channel, PAINT_MATERIAL_CHANNEL_NUM));
+  if (multi && (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM || !per_channel[channel])) {
+    return false;
+  }
+  /* -1 is the one-answer contract the backend lays `Result` by: zero would name Base Color and
+   * miss a tree that only exposes `Result`. */
+  const int bake_channel = multi ? channel : -1;
+  Image *bake = composite_node_group_bake_image(ma, layer, bake_channel, tile_number, painted_object);
+  if (bake == nullptr) {
+    return false;
+  }
+  composite_mapping_describe(ma, layer, channel, out.mapping, tile_number, painted_object, bake);
+  /* The row's transform effects move what the row itself lays, the row's own mapping last. */
+  BKE_paint_layers_input_transforms_get(
+      ma, layer, channel, out.input_transforms, tile_number, painted_object);
+  out.color_image = bake;
+  out.color_iuser = nullptr;
+  /* The bake's alpha is straight and covers where the group lays, the way a painted map's does. */
+  out.color_alpha_coverage = true;
+  return true;
+}
+
+/**
+ * The node-group generator's source: the shader-bake's answer is the row's content in \a channel,
+ * laid like a map at the bake's own alpha -- the same shape the source describe gives the
+ * node-group source, reached per channel because a generator answers one map per channel. The
+ * pattern emission (the placement chain into the row's tree, the `Fac` through the channel's ramp
+ * tail) is rendered by the backend the way the viewport's graph builds it, so the bake map, the
+ * CPU preview and the exports carry the pattern the viewport shows.
+ *
+ * A generator takes part in the channels its live records keep -- the same predicate the graph's
+ * participation reads, whose Normal exclusion is the registry's #PAINT_LAYER_GENERATOR_NO_NORMAL
+ * (the channel-add rule already keeps a Normal record off the row). A channel whose bake has no
+ * answer yet (no backend, no bake landed) takes no part, the way a row with no map does: leaving
+ * it out, not describing a zero, keeps the stack below visible while the bake is due.
+ */
+static bool composite_node_group_generator_describe(const Material &ma,
+                                                    const MaterialPaintLayer &layer,
+                                                    const int channel,
+                                                    const int tile_number,
+                                                    PaintLayerSurfaceRef painted_object,
+                                                    PaintMaterialCompositeImageLayer &out)
+{
+  /* A subtype this build's table does not know reads as no generator: the same skip the
+   * #composite_generator_describe gives, rather than a payload read as another kind's. */
+  if (BKE_paint_layers_generator_of(layer) == nullptr) {
+    return false;
+  }
+  const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
+  if (!paint_layer_channel_contributes(ma, layer, record)) {
+    return false;
+  }
+  Image *bake = composite_node_group_bake_image(ma, layer, channel, tile_number, painted_object);
+  if (bake == nullptr) {
+    return false;
+  }
+  /* The bake already carries the row's placement (the backend builds the same chain the generated
+   * graph does), so the row mapping is not laid on top of it: doing so would move a pattern that
+   * the CPU generator path leaves at its placed coordinate. The generator's own transform effects
+   * are refused by the kind rules, and `out.input_transforms` stays empty for the same reason. */
+  out.color_image = bake;
+  out.color_iuser = nullptr;
+  /* The bake's alpha is the tail's coverage -- a colour channel's band alpha, an opaque one on a
+   * scalar channel -- and covers the way a painted map's does. */
+  out.color_alpha_coverage = true;
+  return true;
+}
+
+/**
  * Describe the source of the row \a layer (not a folder) in \a channel to the evaluator: the
  * counterpart of the generator's #PaintLayersTreeBuilder::row_source_emit, which builds the same
  * thing as nodes. False when the row takes no part, which the generator leaves out as well.
@@ -684,7 +792,20 @@ static bool composite_row_source_describe(const Material &ma,
   if (!paint_layer_row_participates(ma, layer, channel)) {
     return false;
   }
+  if (layer.source == MA_PAINT_LAYER_SOURCE_NODE_GROUP) {
+    /* The user's node group answers for the row's content, through the shader-bake's map. */
+    return composite_node_group_source_describe(ma, layer, channel, tile_number, painted_object, out);
+  }
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES)) {
+    if (layer.kind_subtype == MA_PAINT_LAYER_GENERATOR_NODE_GROUP) {
+      /* A node-group pattern has no CPU factor to evaluate: the CPU composite answers it from the
+       * shader-bake instead, one bake of the full pattern emission over the map's UV, one map per
+       * channel. The bake and the viewport render the same node chain -- the placement chain into
+       * the row's tree, the `Fac` through the channel's ramp tail -- so the parity is by
+       * construction; the describe reads the bake's map like any other. */
+      return composite_node_group_generator_describe(
+          ma, layer, channel, tile_number, painted_object, out);
+    }
     /* A generator: no map and no constant, only its pattern, colour ramp and the channel's own
      * value ramp. A projected row reads its UV line through its own frame. */
     return composite_generator_describe(ma,
@@ -1064,12 +1185,51 @@ static void composite_mask_item_generator(const MaskItemDescribeContext &context
                                           const MaterialPaintLayer &mask,
                                           Vector<PaintMaterialCompositeMaskItem> &r_items)
 {
-  /* A generator mask item: the ramp's colour is the grey and its alpha the coverage, read from
-   * the item's own pattern rather than from a map. A UV line follows the row's frame when the
-   * row projects, so a decal's gradient mask moves with its frame. */
   PaintMaterialCompositeMaskItem item;
   item.opacity = BKE_paint_layers_effective_opacity(mask);
   item.contrast = BKE_paint_layers_mask_contrast_get(mask);
+  if (mask.kind_subtype == MA_PAINT_LAYER_GENERATOR_NODE_GROUP) {
+    /* A node-group pattern has no CPU factor to evaluate, so the item carries the shader-bake's
+     * answer instead: the map of a live record of the item, read as the generator mask item's
+     * grey and coverage. Base Color when the item has it (the default add lays it), otherwise the
+     * first record the mask keeps -- a narrowed mask correction may carry only, say, Roughness,
+     * and asking Base Color would silently drop the item. The item is laid by its blend, invert
+     * and opacity like any painted item's, which the combined preview lays too (no gradient
+     * payload to refuse). */
+    int bake_channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+    if (!paint_layer_channel_contributes(context.ma,
+                                         mask,
+                                         paint_layer_channel_find(mask, bake_channel)))
+    {
+      for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+        if (paint_layer_channel_contributes(
+                context.ma, mask, paint_layer_channel_find(mask, channel)))
+        {
+          bake_channel = channel;
+          break;
+        }
+      }
+    }
+    Image *bake = composite_node_group_bake_image(context.ma,
+                                                  mask,
+                                                  bake_channel,
+                                                  context.tile_number,
+                                                  context.painted_object);
+    if (bake == nullptr) {
+      return;
+    }
+    item.image = bake;
+    item.iuser = nullptr;
+    /* The bake already carries the placement, like a source row's map; the item's mapping stays
+     * identity so the pattern is not moved a second time (see the row form). */
+    item.blend = composite_mask_item_blend(mask);
+    item.invert = paint_layer_mask_item_inverted(mask);
+    r_items.append(item);
+    return;
+  }
+  /* A generator mask item: the ramp's colour is the grey and its alpha the coverage, read from
+   * the item's own pattern rather than from a map. A UV line follows the row's frame when the
+   * row projects, so a decal's gradient mask moves with its frame. */
   if (!composite_generator_describe(context.ma,
                                     mask,
                                     PAINT_MATERIAL_CHANNEL_BASE_COLOR,
@@ -1592,6 +1752,29 @@ static void composite_effect_append(
     PaintMaterialCompositeImageLayer &out,
     PaintLayerSurfaceRef painted_object = nullptr)
 {
+  if (effect.source == MA_PAINT_LAYER_SOURCE_NODE_GROUP) {
+    /* A node-group source lays the shader-bake's answer over the content it reads, at the row's
+     * blend and opacity -- the same maps the row lays. The kind carries NEEDS_BAKE (the live graph
+     * lays the row bake that holds it), so this branch stands before the CPU-computed one, whose
+     * kernel path is a filter's, not a laying source's. No lays gate of the other kinds' here:
+     * what a source lays is what its definition supplies, and the bake image is that answer's
+     * presence. */
+    PaintMaterialCompositeCorrection correction;
+    correction.iuser = nullptr;
+    correction.opacity = BKE_paint_layers_channel_opacity_effective(effect, channel) *
+                         pass_through_scale;
+    Image *bake = composite_node_group_bake_image(
+        ma, effect, /*bake_channel=*/-1, tile_number, painted_object);
+    if (bake == nullptr) {
+      return;
+    }
+    composite_mapping_describe(
+        ma, effect, channel, correction.mapping, tile_number, painted_object, bake);
+    correction.image = bake;
+    correction.blend = layer_channel_blend(effect, channel);
+    out.content_corrections.append(correction);
+    return;
+  }
   if (paint_layer_effect_is_cpu_computed(effect)) {
     composite_effect_append_cpu_computed(ma,
                                          owner_row,
@@ -1638,15 +1821,31 @@ static void composite_effect_append(
                                                        correction);
   }
   else if (paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_GENERATES)) {
-    /* A generator correction has no map: its ramp is laid by its own blend and opacity. */
-    described = composite_generator_describe(ma,
-                                             effect,
-                                             channel,
-                                             context_surface,
-                                             correction.gradient,
-                                             /*projection_row=*/nullptr,
-                                             tile_number,
-                                             painted_object);
+    if (effect.kind_subtype == MA_PAINT_LAYER_GENERATOR_NODE_GROUP) {
+      /* A node-group pattern has no CPU factor to evaluate, so the correction carries the
+       * shader-bake's answer instead: the bake map laid by the member's blend and opacity, the
+       * same answer the row form carries. The laid-map shape is what the GPU correction pass
+       * reads -- the way a node-group source correction lays -- so the combined preview no
+       * longer has to refuse the member to the CPU. */
+      Image *bake = composite_node_group_bake_image(ma, effect, channel, tile_number, painted_object);
+      if (bake != nullptr) {
+        composite_mapping_describe(
+            ma, effect, channel, correction.mapping, tile_number, painted_object, bake);
+        correction.image = bake;
+        described = true;
+      }
+    }
+    else {
+      /* A generator correction has no map: its ramp is laid by its own blend and opacity. */
+      described = composite_generator_describe(ma,
+                                               effect,
+                                               channel,
+                                               context_surface,
+                                               correction.gradient,
+                                               /*projection_row=*/nullptr,
+                                               tile_number,
+                                               painted_object);
+    }
   }
   else if (paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE)) {
     described = composite_effect_source_describe(

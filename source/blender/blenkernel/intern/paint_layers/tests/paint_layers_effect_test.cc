@@ -7973,44 +7973,98 @@ TEST_F(PaintLayersEffectTest, a_node_group_filter_alpha_shows_on_the_map_around_
   }
 }
 
-/* This test and its #ScopedFlatBakeStub come from the `02_node_group_source` patch of the
- * custom-effects series: disabled here, since that patch adds both and the duplicate would not
- * compile once it is integrated. */
-#if 0
+TEST_F(PaintLayersEffectTest, a_node_group_source_tree_with_an_alpha_output_stays_coverage_by_alpha)
+{
+  /* The source kind's own contract: the map it lays covers by its own alpha channel, so a tree
+   * that also exposes an `Alpha` output answers nothing by it -- the descriptor stays
+   * colour-only, and no reader of the kind flag would treat the source's answer as a layer. */
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  row->source = MA_PAINT_LAYER_SOURCE_NODE_GROUP;
+  row->kind_subtype = 0;
+  bNodeTree *tree = make_tree("NG Layer Alpha");
+  ASSERT_NE(tree, nullptr);
+  tree->tree_interface.add_socket(
+      "Result", "", "NodeSocketColor", NODE_INTERFACE_SOCKET_OUTPUT, nullptr);
+  tree->tree_interface.add_socket(
+      "Alpha", "", "NodeSocketFloat", NODE_INTERFACE_SOCKET_OUTPUT, nullptr);
+  tree->tree_interface.add_socket(
+      "UV", "", "NodeSocketVector", NODE_INTERFACE_SOCKET_INPUT, nullptr);
+  row->kind_tree = tree;
+  clear_active();
+
+  EXPECT_FALSE(paint_layer_kind_result_has_alpha(*row))
+      << "a source tree's alpha is its coverage already";
+}
+
+/**
+ * A flat backend for the definition-hash test below: the pixels are irrelevant there -- only
+ * that a render lands and the entry turns rendered matters, so an ask with a tree and outputs is
+ * answered without reading anything.
+ */
+static bool flat_shader_bake_stub_render(const PaintLayerShaderBakeRequest &request,
+                                         MutableSpan<PaintLayerShaderBakeOutput> outputs)
+{
+  if (request.tree == nullptr || outputs.is_empty()) {
+    return false;
+  }
+  for (const PaintLayerShaderBakeOutput &output : outputs) {
+    if (output.pixels == nullptr) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Install the flat stub for the scope of a test; the default cleared back is the no-backend
+ * state. */
+class ScopedFlatBakeStub {
+ public:
+  ScopedFlatBakeStub(Main &bmain)
+  {
+    BKE_paint_layers_shader_bake_hooks_set({flat_shader_bake_stub_render, &bmain});
+  }
+  ~ScopedFlatBakeStub()
+  {
+    BKE_paint_layers_shader_bake_hooks_set({});
+  }
+};
+
 TEST_F(PaintLayersEffectTest, a_value_edit_inside_the_definition_tree_is_due)
 {
   ScopedFlatBakeStub stub(*bmain);
 
+  /* The shader-bake cache serves the layer and generator kinds: a filter is the effect cache's
+   * kernel and is deliberately not answered here, so the row is the node-group source. */
   MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
-  MaterialPaintLayer *group = add_effect(*row, MA_PAINT_LAYER_FILTER_NODE_GROUP);
-  ASSERT_NE(group, nullptr);
-  bNodeTree *tree = make_tree("NG Filter Value Edit");
+  row->source = MA_PAINT_LAYER_SOURCE_NODE_GROUP;
+  row->kind_subtype = 0;
+  bNodeTree *tree = make_tree("NG Value Edit");
   ASSERT_NE(tree, nullptr);
   tree->tree_interface.add_socket(
       "Result", "", "NodeSocketColor", NODE_INTERFACE_SOCKET_OUTPUT, nullptr);
   tree->tree_interface.add_socket(
       "Input", "", "NodeSocketColor", NODE_INTERFACE_SOCKET_INPUT, nullptr);
-  group->kind_tree = tree;
+  row->kind_tree = tree;
   clear_active();
 
   const PaintLayerTileContext tile{.painted_object = nullptr,
                                    .tile_number = PAINT_TILE_NUMBER_BASE};
   constexpr int size = 64;
   /* A fresh row asks for its render, and a landed one stops asking. */
-  EXPECT_TRUE(BKE_paint_layers_shader_bake_due(*ma, *group, tile, size, size));
-  ASSERT_TRUE(BKE_paint_layers_shader_bake_compute(*bmain, *ma, *group, tile, size, size));
-  EXPECT_FALSE(BKE_paint_layers_shader_bake_due(*ma, *group, tile, size, size));
+  EXPECT_TRUE(BKE_paint_layers_shader_bake_due(*ma, *row, tile, size, size));
+  ASSERT_TRUE(BKE_paint_layers_shader_bake_compute(*bmain, *ma, *row, tile, size, size));
+  EXPECT_FALSE(BKE_paint_layers_shader_bake_due(*ma, *row, tile, size, size));
 
   /* A value edit that moves neither the interface hash nor the output topology: a Mix node's
    * unlinked factor inside the graph. The tree update raises the content revision the definition
    * hash folds in, so the landed answer is stale and the render is due again -- a hash that
    * ignored the values would serve the old answer forever. */
-  bNode *mix = bke::node_add_static_node(nullptr, tree, SH_NODE_MIX);
+  bNode *mix = bke::node_add_static_node(nullptr, *tree, SH_NODE_MIX);
   ASSERT_NE(mix, nullptr);
   bNodeSocket *factor = nullptr;
-  LISTBASE_FOREACH (bNodeSocket *, socket, &mix->inputs) {
-    if (socket->type == SOCK_FLOAT) {
-      factor = socket;
+  for (bNodeSocket &socket : mix->inputs) {
+    if (socket.type == SOCK_FLOAT) {
+      factor = &socket;
       break;
     }
   }
@@ -8019,17 +8073,459 @@ TEST_F(PaintLayersEffectTest, a_value_edit_inside_the_definition_tree_is_due)
   BKE_ntree_update_tag_socket_property(tree, factor);
   BKE_ntree_update_after_single_tree_change(*bmain, *tree);
 
-  EXPECT_TRUE(BKE_paint_layers_shader_bake_due(*ma, *group, tile, size, size))
+  EXPECT_TRUE(BKE_paint_layers_shader_bake_due(*ma, *row, tile, size, size))
       << "the Mix factor edit retires the landed answer";
 }
-#endif
 
-/* The doc comment below belongs to `a_node_group_source_can_be_a_content_correction`, the test the
- * `02_node_group_source` patch adds after this point; kept as the patch left it. */
 /**
  * A node-group source is also a content correction: the row form lays the shader-bake's answer as
  * the row's content, and the correction form lays the same answer over another row's colour. The
  * add path makes a correction with no records of its own, the kind allows the effective role, and
  * the composite carries the bake map.
  */
+TEST_F(PaintLayersEffectTest, a_node_group_source_can_be_a_content_correction)
+{
+  ScopedFlatBakeStub stub(*bmain);
+
+  ma->paint_layers_image_size = 64;
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, row, "Group Correction", MA_PAINT_LAYER_SOURCE_NODE_GROUP);
+  ASSERT_NE(correction, nullptr);
+  EXPECT_EQ(correction->role, MA_PAINT_LAYER_ROLE_EFFECT);
+  EXPECT_EQ(correction->source, MA_PAINT_LAYER_SOURCE_NODE_GROUP);
+  EXPECT_TRUE(paint_layer_kind_role_allowed(*correction));
+  /* A source that reads a definition owns no records: what it lays is the bake's map. */
+  EXPECT_EQ(correction->channels_num, 0);
+
+  bNodeTree *tree = make_tree("NG Correction");
+  ASSERT_NE(tree, nullptr);
+  tree->tree_interface.add_socket(
+      "Result", "", "NodeSocketColor", NODE_INTERFACE_SOCKET_OUTPUT, nullptr);
+  tree->tree_interface.add_socket(
+      "UV", "", "NodeSocketVector", NODE_INTERFACE_SOCKET_INPUT, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_kind_tree_set(*ma, correction, tree));
+  clear_active();
+
+  const PaintLayerTileContext tile{.painted_object = nullptr,
+                                   .tile_number = PAINT_TILE_NUMBER_BASE};
+  const int size = ma->paint_layers_image_size;
+  ASSERT_TRUE(BKE_paint_layers_shader_bake_compute(*bmain, *ma, *correction, tile, size, size));
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(
+      BKE_paint_layers_composite_image_layers(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  ASSERT_EQ(layers.size(), 1);
+  const Vector<PaintMaterialCompositeCorrection> &corrections = layers[0].content_corrections;
+  ASSERT_EQ(corrections.size(), 1);
+  Image *bake = BKE_paint_layers_shader_bake_image_get(
+      *bmain, *ma, *correction, -1, tile, size, size);
+  ASSERT_NE(bake, nullptr);
+  EXPECT_EQ(corrections[0].image, bake) << "the correction lays the definition's bake map";
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Node Group Generator (the shader-bake answer)
+ *
+ * The node-group generator has no CPU factor: its CPU-composite answer is the shader-bake's own
+ * pattern emission, rendered by the backend the way the viewport's graph builds it -- the
+ * placement chain into the row's tree, the `Fac` through each channel's ramp tail. The backend is
+ * stubbed here the way the editors register theirs, with a render that reads the placement from
+ * the request's IDProperties by the schema's names (the same keys the real backend reads) and
+ * lays a deterministic pattern over the UV: the placed x taken from 0 at the left to 1 at the
+ * right, through the ramp tail the outputs carry.
+ *
+ * The parity contract is "both sides render the same node chain": full graph-vs-CPU parity needs
+ * the real backend (the graph interpreter cannot be pointed at the EEVEE render the bake runs),
+ * so these tests pin the CPU side's plumbing -- the describe's map-row answer, the per-channel
+ * keying, the ramp context reaching the ask and the placement values it carries.
+ * \{ */
+
+/**
+ * The placement of a generator ask, read the way the real backend reads it: the request's
+ * IDProperties by the schema's own names, with the schema's defaults where a value is missing.
+ */
+struct GeneratorStubPlacement {
+  float scale_x = 5.0f;
+  float scale_y = 5.0f;
+  bool scale_lock = true;
+  float rotation = 0.0f;
+  float offset_x = 0.0f;
+  float offset_y = 0.0f;
+  int seed = 0;
+};
+
+static GeneratorStubPlacement generator_stub_placement_read(const IDProperty *parameters)
+{
+  GeneratorStubPlacement placement;
+  if (parameters == nullptr || parameters->type != IDP_GROUP) {
+    return placement;
+  }
+  const auto float_of = [&](const char *name, const float fallback) {
+    const IDProperty *prop = IDP_GetPropertyFromGroup(parameters, name);
+    if (prop == nullptr) {
+      return fallback;
+    }
+    return (prop->type == IDP_FLOAT) ? IDP_float_get(prop) : fallback;
+  };
+  const auto int_of = [&](const char *name, const int fallback) {
+    const IDProperty *prop = IDP_GetPropertyFromGroup(parameters, name);
+    if (prop == nullptr) {
+      return fallback;
+    }
+    return (prop->type == IDP_INT) ? IDP_int_get(prop) : fallback;
+  };
+  placement.scale_x = float_of("scale", 5.0f);
+  placement.scale_y = float_of("scale_y", 5.0f);
+  placement.scale_lock = float_of("scale_lock", 1.0f) != 0.0f;
+  placement.rotation = float_of("rotation", 0.0f);
+  placement.offset_x = float_of("offset_x", 0.0f);
+  placement.offset_y = float_of("offset_y", 0.0f);
+  placement.seed = int_of("seed", 0);
+  return placement;
+}
+
+/** The placed x the stub's pattern reads, the chain the backend builds evaluated by hand: turn,
+ * scale, offsets, seed, in the order the CPU's own #paint_layer_generator_coordinate applies
+ * them. The space is left to the real backend's coordinate source -- a stub renders the UV grid,
+ * which is the space a fresh row reads. */
+static float generator_stub_pattern_x(const GeneratorStubPlacement &placement,
+                                      const float u,
+                                      const float v)
+{
+  const float radians = placement.rotation * float(M_PI) / 180.0f;
+  const float cos_r = cosf(radians);
+  const float sin_r = sinf(radians);
+  float x = cos_r * u - sin_r * v;
+  float y = sin_r * u + cos_r * v;
+  y *= (placement.scale_lock || placement.scale_x <= 0.0f) ?
+           1.0f :
+           placement.scale_y / placement.scale_x;
+  const float s = float(placement.seed);
+  float seed_x = s * 0.6180339887498948482f;
+  seed_x -= floorf(seed_x);
+  float seed_y = s * 0.7548776662466927361f;
+  seed_y -= floorf(seed_y);
+  x += placement.offset_x + seed_x;
+  y += placement.offset_y + seed_y;
+  return x;
+}
+
+/**
+ * A stub shader-bake backend for generator asks: the pattern is the placed x, taken from 0 at
+ * the left to 1 at the right, laid through the ramp tail the outputs carry -- the band a colour
+ * channel reads, the encoded ends a scalar one lerps between. The ask is refused unless it is a
+ * generator one whose outputs carry the ramp context, so a test that reaches the pattern has
+ * proven the compute filled it; the placement comes from the request's IDProperties, so the
+ * plumbing the real backend exercises is exercised here too.
+ */
+static bool node_group_generator_stub_render(const PaintLayerShaderBakeRequest &request,
+                                             MutableSpan<PaintLayerShaderBakeOutput> outputs)
+{
+  if (request.tree == nullptr || !request.generator || outputs.is_empty()) {
+    return false;
+  }
+  for (const PaintLayerShaderBakeOutput &output : outputs) {
+    /* The ramp context is the ask's own payload: a generator ask without it is one the compute
+     * did not fill, and laying the raw pattern would read as a band the row does not carry. */
+    if (output.pixels == nullptr || output.ramp == nullptr || output.scalar_end < output.scalar_start)
+    {
+      return false;
+    }
+  }
+  const GeneratorStubPlacement placement = generator_stub_placement_read(request.parameters);
+  const int64_t texels_num = int64_t(request.width) * int64_t(request.height);
+  for (const PaintLayerShaderBakeOutput &output : outputs) {
+    for (const int64_t i : IndexRange(texels_num)) {
+      const int x = int(i % request.width);
+      const int y = int(i / request.width);
+      const float u = (float(x) + 0.5f) / float(request.width);
+      const float v = (float(y) + 0.5f) / float(request.height);
+      const float t = clamp_f(generator_stub_pattern_x(placement, u, v), 0.0f, 1.0f);
+      float rgba[4];
+      if (!BKE_colorband_evaluate(output.ramp, t, rgba)) {
+        /* A band with no stops answers nothing, the way the graph's ramp node reads one. */
+        rgba[0] = rgba[1] = rgba[2] = 0.0f;
+        rgba[3] = 0.0f;
+      }
+      output.pixels[i * 4 + 0] = rgba[0];
+      output.pixels[i * 4 + 1] = rgba[1];
+      output.pixels[i * 4 + 2] = rgba[2];
+      output.pixels[i * 4 + 3] = rgba[3];
+    }
+  }
+  return true;
+}
+
+/** Install the generator stub for the scope of a test; the cleared back is the no-backend state. */
+class ScopedGeneratorBakeStub {
+ public:
+  ScopedGeneratorBakeStub(Main &bmain)
+  {
+    BKE_paint_layers_shader_bake_hooks_set({node_group_generator_stub_render, &bmain});
+  }
+  ~ScopedGeneratorBakeStub()
+  {
+    BKE_paint_layers_shader_bake_hooks_set({});
+  }
+};
+
+/** A node-group generator row reading \a name's tree (`Coordinate` in, `Fac` out), its schema
+ * seeded from the assignment the way the UI seeds one. The canvas is shrunk to the tests' size:
+ * the bake image is the stack's dimensions, and the default would be a 4096 one per channel. */
+static MaterialPaintLayer *generator_row_add(PaintLayersEffectTest &fixture,
+                                             const char *row_name,
+                                             const char *tree_name)
+{
+  fixture.ma->paint_layers_image_size = 64;
+  MaterialPaintLayer *row = BKE_paint_layers_generator_add(
+      *fixture.ma, MA_PAINT_LAYER_GENERATOR_NODE_GROUP, row_name, nullptr, PaintLayerPlace::Above);
+  EXPECT_NE(row, nullptr);
+  if (row == nullptr) {
+    return nullptr;
+  }
+  bNodeTree *tree = fixture.make_tree(tree_name);
+  EXPECT_NE(tree, nullptr);
+  if (tree == nullptr) {
+    return nullptr;
+  }
+  tree->tree_interface.add_socket(
+      "Coordinate", "", "NodeSocketVector", NODE_INTERFACE_SOCKET_INPUT, nullptr);
+  tree->tree_interface.add_socket(
+      "Fac", "", "NodeSocketFloat", NODE_INTERFACE_SOCKET_OUTPUT, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_kind_tree_set(*fixture.ma, row, tree));
+  fixture.clear_active();
+  return row;
+}
+
+/** Compute \a row's shader-bake at the material's canvas size, as the sweep does. */
+static bool generator_bake_compute(Main &bmain, Material &ma, MaterialPaintLayer &row)
+{
+  const PaintLayerTileContext tile{.painted_object = nullptr,
+                                   .tile_number = PAINT_TILE_NUMBER_BASE};
+  const int size = ma.paint_layers_image_size;
+  return BKE_paint_layers_shader_bake_compute(bmain, ma, row, tile, size, size);
+}
+
+TEST_F(PaintLayersEffectTest, the_node_group_generator_row_describes_as_the_bake_map)
+{
+  ScopedGeneratorBakeStub stub(*bmain);
+  MaterialPaintLayer *row = generator_row_add(*this, "NG Gen", "NG Generator Describe");
+  ASSERT_NE(row, nullptr);
+  ASSERT_NE(row->system_properties, nullptr) << "the assignment seeded the placement schema";
+  ASSERT_TRUE(generator_bake_compute(*bmain, *ma, *row));
+
+  /* The describe: a map row per channel, the bake image its colour, the alpha its coverage --
+   * and no gradient payload, which is what keeps the combined preview from refusing the row. */
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(*ma, int(kColor), layers));
+  ASSERT_EQ(layers.size(), 1);
+  const PaintMaterialCompositeImageLayer &layer = layers[0];
+  EXPECT_FALSE(layer.gradient.enabled) << "the answer is a map, not a payload";
+  EXPECT_TRUE(layer.color_alpha_coverage);
+  const PaintLayerTileContext tile{.painted_object = nullptr,
+                                   .tile_number = PAINT_TILE_NUMBER_BASE};
+  const int size = ma->paint_layers_image_size;
+  EXPECT_EQ(layer.color_image,
+            BKE_paint_layers_shader_bake_image_get(*bmain, *ma, *row, int(kColor), tile, size, size));
+
+  /* The composite evaluation carries the pattern: the placed x of every texel, through the row's
+   * default band (black to white), laid at the full coverage the band's alpha gives. */
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  ASSERT_EQ(width, size);
+  const auto texel = [&](const int x, const int y, const int channel) {
+    return pixels[(int64_t(y) * width + x) * 4 + channel];
+  };
+  for (const int y : {0, size / 2, size - 1}) {
+    for (const int x : {0, size / 4, size / 2, size - 1}) {
+      const float t = clamp_f((float(x) + 0.5f) / float(width), 0.0f, 1.0f);
+      EXPECT_NEAR(texel(x, y, 0), t, 2e-3f) << "the pattern's red at " << x << "," << y;
+      EXPECT_NEAR(texel(x, y, 1), t, 2e-3f) << "the pattern's green at " << x << "," << y;
+      EXPECT_NEAR(texel(x, y, 2), t, 2e-3f) << "the pattern's blue at " << x << "," << y;
+      EXPECT_NEAR(texel(x, y, 3), 1.0f, 2e-3f) << "the band's coverage at " << x << "," << y;
+    }
+  }
+  /* The refusal matrix: a map row with a bake image is laid by the combined preview, so no
+   * reason fires for the row the gradient form used to refuse. */
+  EXPECT_EQ(BKE_paint_layers_gpu_unsupported_reason(layer, false), nullptr);
+}
+
+TEST_F(PaintLayersEffectTest, the_node_group_generator_placement_reaches_the_ask)
+{
+  ScopedGeneratorBakeStub stub(*bmain);
+  MaterialPaintLayer *row = generator_row_add(*this, "NG Gen", "NG Generator Placement");
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(generator_bake_compute(*bmain, *ma, *row));
+
+  /* The placement the schema seeds: the turn, the Y ratio of the unlocked scales, the offsets and
+   * the seed are exactly the values the backend reads from the request's IDProperties. */
+  paint_layer_kind_param_set(*row, PAINT_LAYER_GEN_OFFSET_X, 0.25f);
+  paint_layer_kind_param_set(*row, PAINT_LAYER_GEN_OFFSET_Y, -0.125f);
+  paint_layer_kind_param_set(*row, PAINT_LAYER_GEN_ROTATION, 30.0f);
+  paint_layer_kind_param_set(*row, PAINT_LAYER_GEN_SCALE, 2.0f);
+  paint_layer_kind_param_set(*row, PAINT_LAYER_GEN_SCALE_Y, 3.0f);
+  paint_layer_kind_param_bool_set(*row, PAINT_LAYER_GEN_SCALE_LOCK, false);
+  paint_layer_kind_param_int_set(*row, PAINT_LAYER_GEN_SEED, 7);
+  /* An edit of the values retires the entry: the due-check asks for the render that fills it. */
+  const PaintLayerTileContext tile{.painted_object = nullptr,
+                                   .tile_number = PAINT_TILE_NUMBER_BASE};
+  const int size = ma->paint_layers_image_size;
+  EXPECT_TRUE(BKE_paint_layers_shader_bake_due(*ma, *row, tile, size, size));
+  ASSERT_TRUE(generator_bake_compute(*bmain, *ma, *row));
+
+  GeneratorStubPlacement placement;
+  placement.scale_x = 2.0f;
+  placement.scale_y = 3.0f;
+  placement.scale_lock = false;
+  placement.rotation = 30.0f;
+  placement.offset_x = 0.25f;
+  placement.offset_y = -0.125f;
+  placement.seed = 7;
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  for (const int y : {1, size / 2, size - 2}) {
+    for (const int x : {1, size / 3, size - 2}) {
+      const float u = (float(x) + 0.5f) / float(width);
+      const float v = (float(y) + 0.5f) / float(height);
+      const float t = clamp_f(generator_stub_pattern_x(placement, u, v), 0.0f, 1.0f);
+      const float got = pixels[(int64_t(y) * width + x) * 4 + 0];
+      EXPECT_NEAR(got, t, 2e-3f) << "the placed pattern at " << x << "," << y;
+    }
+  }
+}
+
+TEST_F(PaintLayersEffectTest, the_bake_key_resolves_the_unset_tile)
+{
+  ScopedGeneratorBakeStub stub(*bmain);
+  MaterialPaintLayer *row = generator_row_add(*this, "NG Gen", "NG Generator Tile Resolve");
+  ASSERT_NE(row, nullptr);
+  const PaintLayerTileContext base{.painted_object = nullptr,
+                                    .tile_number = PAINT_TILE_NUMBER_BASE};
+  const PaintLayerTileContext unset{.painted_object = nullptr,
+                                    .tile_number = PAINT_TILE_NUMBER_AUTO};
+  const int size = ma->paint_layers_image_size;
+  ASSERT_TRUE(generator_bake_compute(*bmain, *ma, *row));
+
+  /* The unset tile and the base tile it resolves to are one identity -- the resolve the GPU
+   * effect cache already keys by -- so the same entry answers both and neither asks a second
+   * render of the same answer. */
+  Image *base_image = BKE_paint_layers_shader_bake_image_get(
+      *bmain, *ma, *row, int(kColor), base, size, size);
+  Image *unset_image = BKE_paint_layers_shader_bake_image_get(
+      *bmain, *ma, *row, int(kColor), unset, size, size);
+  ASSERT_NE(base_image, nullptr);
+  EXPECT_EQ(base_image, unset_image);
+  EXPECT_FALSE(BKE_paint_layers_shader_bake_due(*ma, *row, unset, size, size));
+}
+
+TEST_F(PaintLayersEffectTest, the_node_group_generator_answers_per_channel_through_the_ramp_tail)
+{
+  ScopedGeneratorBakeStub stub(*bmain);
+  MaterialPaintLayer *row = generator_row_add(*this, "NG Gen", "NG Generator Channels");
+  ASSERT_NE(row, nullptr);
+  /* A scalar channel switched on like a Fill's: the record carries the value ramp the tail
+   * reads, and the ask names one map per channel. */
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, row, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+
+  const PaintLayerTileContext tile{.painted_object = nullptr,
+                                   .tile_number = PAINT_TILE_NUMBER_BASE};
+  const int size = ma->paint_layers_image_size;
+  ASSERT_TRUE(generator_bake_compute(*bmain, *ma, *row));
+  /* One entry per channel, keyed by the channel: the row's answer is two maps, never one doubling
+   * for the other. */
+  Image *color_bake = BKE_paint_layers_shader_bake_image_get(
+      *bmain, *ma, *row, int(kColor), tile, size, size);
+  Image *rough_bake = BKE_paint_layers_shader_bake_image_get(
+      *bmain, *ma, *row, int(PAINT_MATERIAL_CHANNEL_ROUGHNESS), tile, size, size);
+  ASSERT_NE(color_bake, nullptr);
+  ASSERT_NE(rough_bake, nullptr);
+  EXPECT_NE(color_bake, rough_bake);
+  EXPECT_TRUE(BKE_paint_layers_shader_bake_due(*ma, *row, tile, size, size) == false);
+
+  /* The scalar answer is the record's own value ramp, evaluated at the placed x: the same grey
+   * the graph's scalar ColorRamp gives. */
+  const MaterialPaintLayerChannel *record = paint_layer_channel_find(*row,
+                                                                     PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  ASSERT_NE(record, nullptr);
+  ASSERT_NE(record->gradient_ramp, nullptr);
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel_on_tile(PAINT_MATERIAL_CHANNEL_ROUGHNESS, PAINT_TILE_NUMBER_BASE,
+                                     pixels, width, height));
+  for (const int x : {0, size / 2, size - 1}) {
+    const float t = clamp_f((float(x) + 0.5f) / float(width), 0.0f, 1.0f);
+    float grey[4];
+    ASSERT_TRUE(BKE_colorband_evaluate(record->gradient_ramp, t, grey));
+    EXPECT_NEAR(pixels[(int64_t(size / 2) * width + x) * 4 + 0], grey[0], 2e-3f)
+        << "the scalar tail at " << x;
+  }
+
+  /* A band edit retires the answer: the entry is keyed on the row's ramp beside the parameters,
+   * so an edited band is due and the next render lays it -- the bake's tail rides the row's band,
+   * exactly what an edit of the panel's ramp has to reach. */
+  MaterialPaintLayerRamp *ramp = BKE_paint_layers_ramp_ensure(*row);
+  ASSERT_NE(ramp, nullptr);
+  ramp->band.data[0].r = ramp->band.data[0].g = ramp->band.data[0].b = 1.0f;
+  ramp->band.data[1].r = ramp->band.data[1].g = ramp->band.data[1].b = 0.0f;
+  EXPECT_TRUE(BKE_paint_layers_shader_bake_due(*ma, *row, tile, size, size));
+  ASSERT_TRUE(generator_bake_compute(*bmain, *ma, *row));
+  Vector<float> inverted;
+  int inverted_width = 0;
+  int inverted_height = 0;
+  ASSERT_TRUE(render_channel(inverted, inverted_width, inverted_height));
+  for (const int x : {0, size / 2, size - 1}) {
+    const float t = clamp_f((float(x) + 0.5f) / float(inverted_width), 0.0f, 1.0f);
+    /* The inverted band: one minus the placed x, the same tail the graph's ramp node reads. */
+    EXPECT_NEAR(inverted[(int64_t(size / 2) * inverted_width + x) * 4 + 0], 1.0f - t, 2e-3f)
+        << "the edited band at " << x;
+  }
+}
+
+TEST_F(PaintLayersEffectTest, the_node_group_generator_correction_carries_the_bake)
+{
+  ScopedGeneratorBakeStub stub(*bmain);
+  ma->paint_layers_image_size = 64;
+  MaterialPaintLayer *painted = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  ASSERT_NE(painted, nullptr);
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, painted, "NG Correction", MA_PAINT_LAYER_SOURCE_GENERATOR);
+  ASSERT_NE(correction, nullptr);
+  ASSERT_TRUE(
+      BKE_paint_layers_generator_kind_set(*ma, *correction, MA_PAINT_LAYER_GENERATOR_NODE_GROUP, bmain));
+  ASSERT_NE(correction->kind_tree, nullptr) << "the switch seeded the definition";
+  clear_active();
+  ASSERT_TRUE(generator_bake_compute(*bmain, *ma, *correction));
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(*ma, int(kColor), layers));
+  ASSERT_EQ(layers.size(), 1);
+  ASSERT_EQ(layers[0].content_corrections.size(), 1);
+  const PaintMaterialCompositeCorrection &correction_out = layers[0].content_corrections[0];
+  /* The laid-map shape the GPU correction pass reads: the bake image, no gradient payload -- the
+   * same answer the row form carries, laid by the member's blend and opacity. */
+  EXPECT_FALSE(correction_out.gradient.enabled);
+  EXPECT_NE(correction_out.image, nullptr);
+  EXPECT_EQ(correction_out.image,
+            BKE_paint_layers_shader_bake_image_get(*bmain,
+                                                   *ma,
+                                                   *correction,
+                                                   int(kColor),
+                                                   PaintLayerTileContext{.painted_object = nullptr,
+                                                                         .tile_number =
+                                                                             PAINT_TILE_NUMBER_BASE},
+                                                   ma->paint_layers_image_size,
+                                                   ma->paint_layers_image_size));
+  EXPECT_EQ(BKE_paint_layers_gpu_unsupported_reason(layers[0], false), nullptr);
+}
+
+/** \} */
+
 }  // namespace blender::bke::tests

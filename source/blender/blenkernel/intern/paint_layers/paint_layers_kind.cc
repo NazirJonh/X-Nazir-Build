@@ -1005,6 +1005,27 @@ static const PaintLayerKindInfo kinds[] = {
      nullptr,
      0,
      PAINT_LAYER_KIND_READS_SOURCE},
+    /* A node group the user built (a #MaterialPaintLayerSource kind reading
+     * #MaterialPaintLayer::kind_tree): the row lays what the group's `Result` (or its per-channel
+     * outputs) show, computed over the map by the shader-bake. Read, not painted, like a Material
+     * row; the parameters are the tree's interface sockets, the schema is the dynamic one. The
+     * row is baked like a heavy generator's: the bake map is what the live graph lays (the first
+     * pass instantiates no user tree there), so a fresh bake is what the viewport shows.
+     *
+     * A correction form is the same answer laid over another row's content
+     * (#BKE_paint_layers_correction_add takes the kind), with the composite's laying branch and the
+     * shader-bake sweep already serving it. The mask-item form still waits for its describe and
+     * graph branch, so it is not offered yet. */
+    {MA_PAINT_LAYER_SOURCE_NODE_GROUP,
+     0,
+     "Node Group",
+     PaintLayerKindCategory::Source,
+     paint_layer_role_bit(MA_PAINT_LAYER_ROLE_LAYER) |
+         paint_layer_role_bit(MA_PAINT_LAYER_ROLE_EFFECT),
+     nullptr,
+     0,
+     uint32_t(PAINT_LAYER_KIND_READS_SOURCE | PAINT_LAYER_KIND_NEEDS_BAKE |
+              PAINT_LAYER_KIND_DYNAMIC_SCHEMA)},
     /* A folder owns children, which corrections and mask items never have. */
     {MA_PAINT_LAYER_SOURCE_STACK,
      0,
@@ -1710,9 +1731,11 @@ bool paint_layer_kind_role_allowed(const MaterialPaintLayer &row)
   }
   /* A NEEDS_BAKE kind computes itself through an effect cache: an effect against the row's colour,
    * a mask item against the grey the mask has built up to it (the mask effect cache). A row of one
-   * would be described from the parameters alone, and those carry no colour. */
+   * would be described from the parameters alone, and those carry no colour. A source kind is the
+   * exception: its content is the map the bake lays, so it is a layer like a Material row. */
   if ((info->flags & PAINT_LAYER_KIND_NEEDS_BAKE) != 0 &&
-      row.role == MA_PAINT_LAYER_ROLE_LAYER)
+      row.role == MA_PAINT_LAYER_ROLE_LAYER &&
+      (info->flags & PAINT_LAYER_KIND_READS_SOURCE) == 0)
   {
     return false;
   }

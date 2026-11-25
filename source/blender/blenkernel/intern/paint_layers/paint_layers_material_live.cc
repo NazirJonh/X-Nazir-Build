@@ -28,6 +28,7 @@
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_node_group.hh"
 #include "BKE_paint_material_resolve.hh"
 
 #include "DNA_ID.h"
@@ -330,6 +331,16 @@ bool paint_layer_correction_reads_source(const Material &ma,
       effect.role != MA_PAINT_LAYER_ROLE_EFFECT || paint_layer_channel_filtered(ma, channel))
   {
     return false;
+  }
+  if (effect.source == MA_PAINT_LAYER_SOURCE_NODE_GROUP) {
+    /* The shader-bake's map covers by its own alpha, so there is no coverage source to refuse on.
+     * A per-channel definition answers only the channels its tree names; the `Result`-only
+     * contract answers every channel, as the row form does. */
+    bool per_channel[PAINT_MATERIAL_CHANNEL_NUM] = {};
+    const bool multi = BKE_paint_layers_node_group_source_channels(
+        effect.kind_tree, MutableSpan<bool>(per_channel, PAINT_MATERIAL_CHANNEL_NUM));
+    return !multi ||
+           (channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM && per_channel[channel]);
   }
   const PaintLayerMaterialSource source = paint_layer_material_channel_source(ma, effect, channel);
   if (source.kind == PaintLayerMaterialSourceKind::None ||

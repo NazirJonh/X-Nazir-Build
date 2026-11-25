@@ -149,6 +149,25 @@ static constexpr PaintLayerGeneratorInfo generators[] = {
      .group_coordinate_id = GRUNGE_GROUP_ID_COORDINATE,
      .group_factor_id = GRUNGE_GROUP_ID_FACTOR,
      .gpu_emit = &bke::paint_layers::paint_layer_generator_grunge_gpu_emit},
+    /* The node-group generator: the pattern is the row's own definition
+     * (#MaterialPaintLayer::kind_tree), not a shared group a factory makes, so the group fields
+     * stay unset and the emission reads the row. The COMPOUND bit is true the same way it is for
+     * the shared patterns -- the pattern is a graph of its own -- and the factor ensure branches
+     * on the kind to take the group from the row instead of the factory. The schema rides the
+     * dynamic kind descriptor (placement prefix, the tree's own inputs, the ramp); the CPU factor
+     * is null because the composite answers the pattern from the shader-bake, not from a formula.
+     */
+    {.subtype = MA_PAINT_LAYER_GENERATOR_NODE_GROUP,
+     .name = "Node Group",
+     .identifier = "NODE_GROUP",
+     .menu_name = N_("Node Group Generator"),
+     .description = N_("A pattern from one of your node groups: Coordinate in, Fac out, ramped like every generator"),
+     .flags = PAINT_LAYER_GENERATOR_NO_NORMAL | PAINT_LAYER_GENERATOR_COMPOUND,
+     .cpu_factor = nullptr,
+     .node_group_ensure = nullptr,
+     .group_coordinate_id = nullptr,
+     .group_factor_id = nullptr,
+     .gpu_emit = &bke::paint_layers::paint_layer_generator_node_group_gpu_emit},
 };
 
 const PaintLayerGeneratorInfo *BKE_paint_layers_generator_find(const int16_t subtype)

@@ -924,11 +924,41 @@ void PaintLayersTreeBuilder::generator_inputs_create(LayerGroup &group,
     }
     char base[200];
     SNPRINTF(base, "%s Generator %s", label, kind->params[i].label);
-    bNodeTreeInterfaceSocket *param = layer_group_value_input(
-        group, base, "NodeSocketFloat", ROLE_PARAM, row.marker, -1);
+    /* The input is typed as the socket it feeds is: a vector or a color parameter links into a
+     * vector or an RGBA socket, and a float input would be a link the tree refuses. */
+    bNodeTreeInterfaceSocket *param = nullptr;
+    switch (kind->params[i].type) {
+      case PaintLayerKindParamType::Color: {
+        param = layer_group_value_input(
+            group, base, "NodeSocketColor", ROLE_PARAM, row.marker, -1);
+        if (param != nullptr) {
+          float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+          paint_layer_kind_param_color_get(row, i, color);
+          group_input_default_set(group, *param, color);
+        }
+        break;
+      }
+      case PaintLayerKindParamType::Vector: {
+        param = layer_group_value_input(
+            group, base, "NodeSocketVector", ROLE_PARAM, row.marker, -1);
+        if (param != nullptr) {
+          float vector[3];
+          paint_layer_kind_param_vector_get(row, i, vector);
+          group_input_vector_default_set(group, *param, vector);
+        }
+        break;
+      }
+      default: {
+        param = layer_group_value_input(
+            group, base, "NodeSocketFloat", ROLE_PARAM, row.marker, -1);
+        if (param != nullptr) {
+          group_input_default_set(group, *param, paint_layer_kind_param_get(row, i));
+        }
+        break;
+      }
+    }
     if (param != nullptr) {
       prop_int_set(param->properties, INPUT_PARAM_PROP, i);
-      group_input_default_set(group, *param, paint_layer_kind_param_get(row, i));
     }
     /* Kept even when null, so the builder sees the set is incomplete and builds nothing. */
     generator_param_inputs_.lookup_or_add_default(&row).add(i, param);

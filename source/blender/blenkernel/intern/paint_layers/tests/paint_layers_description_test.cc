@@ -336,10 +336,14 @@ TEST_F(PaintLayersDescription, kind_registry_describes_the_built_in_kinds)
   EXPECT_TRUE(paint_layer_kind_role_allowed(*row));
 
   /* A source or subtype this build does not know is reported as unknown, never as a built-in. */
-  /* 3 is reserved for the Node Group source, which this build does not have. */
-  row->source = 3;
-  EXPECT_EQ(paint_layer_kind_of(*row), nullptr);
-  EXPECT_FALSE(paint_layer_kind_role_allowed(*row));
+  /* The Node Group source (3) exists now; an unassigned row of it still answers a kind, whose
+   * dynamic schema is empty while no definition is read. An unknown subtype stays unknown. */
+  row->source = MA_PAINT_LAYER_SOURCE_NODE_GROUP;
+  ASSERT_NE(paint_layer_kind_of(*row), nullptr);
+  EXPECT_STREQ(paint_layer_kind_of(*row)->name, "Node Group");
+  EXPECT_EQ(paint_layer_kind_of(*row)->params_num, 0);
+  /* The Node Group source may be a layer or a correction; the row's role was made a layer above. */
+  EXPECT_TRUE(paint_layer_kind_role_allowed(*row));
   row->source = MA_PAINT_LAYER_SOURCE_IMAGE;
   row->kind_subtype = 99;
   EXPECT_EQ(paint_layer_kind_of(*row), nullptr);

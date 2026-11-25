@@ -211,6 +211,11 @@ class OUTLINER_MT_stack_layer_procedural_add(Menu):
                           'GRADIENT', "Add Gradient Layer", text="Gradient Layer")
         layout.menu("OUTLINER_MT_stack_layer_pattern_add",
                     **_stack_glyph_args(bpy.app.icons.glyph(_GLYPH_PATTERN), 'TEXTURE'))
+        # The user's own node group as the layer's content: the entry makes the template tree and
+        # the row together, the definition edited in the Shader Editor afterwards.
+        layout.operator("outliner.stack_layer_node_group_add", text="Node Group Layer",
+                        **_stack_glyph_args(bpy.app.icons.glyph(_GLYPH_TEXTURE),
+                                            'NODETREE')).type = 'SOURCE_LAYER'
 
 
 class OUTLINER_MT_stack_layer_pattern_add(Menu):
@@ -223,8 +228,10 @@ class OUTLINER_MT_stack_layer_pattern_add(Menu):
         # identifier is also the `type` of the Add kind that lays that pattern as a layer.
         generators = bpy.types.MaterialPaintLayer.bl_rna.properties["generator"].enum_items
         for item in generators:
-            if item.identifier == 'GRADIENT':
-                # Has its own entry in the procedural menu.
+            if item.identifier in {'GRADIENT', 'NODE_GROUP'}:
+                # The Gradient has its own entry in the procedural menu. A Node Group generator
+                # needs a definition tree, which the generic Add does not make: it comes from
+                # the Custom menu, which creates the tree and the row in one go.
                 continue
             props = layout.operator("outliner.stack_layer_add", text=item.name, **pattern_icon)
             props.type = item.identifier
@@ -313,6 +320,17 @@ class OUTLINER_MT_stack_layer_node_group_add(Menu):
         props = layout.operator("outliner.stack_layer_node_group_add",
                                 text="New Node Group Filter", icon='NODETREE')
         props.type = 'FILTER'
+        # The node-group source kinds: a layer's content, and a correction laid over a row.
+        props = layout.operator("outliner.stack_layer_node_group_add",
+                                text="New Node Group Layer", icon='NODETREE')
+        props.type = 'SOURCE_LAYER'
+        props = layout.operator("outliner.stack_layer_node_group_add",
+                                text="New Node Group Correction", icon='NODETREE')
+        props.type = 'SOURCE_CORRECTION'
+        # The node-group generator's pattern.
+        props = layout.operator("outliner.stack_layer_node_group_add",
+                                text="New Node Group Generator", icon='TEXTURE')
+        props.type = 'GENERATOR'
 
 
 class OUTLINER_MT_stack_layer_effect_add(Menu):

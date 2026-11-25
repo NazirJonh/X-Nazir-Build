@@ -651,6 +651,22 @@ static const PaintLayerKindInfo generator_kinds[] = {
      int(std::size(grunge_generator_params)),
      PAINT_LAYER_KIND_GENERATES,
      false},
+    /* A generator the user built as a node group (#MaterialPaintLayer::kind_tree): the group
+     * answers `Fac` for the placed `Coordinate` and may answer `Color` where no ramp could. The
+     * placement prefix and the ramp tail are the shared schema's; the parameters between them are
+     * the tree's own inputs, read by the dynamic kind schema. The generator registry's entry
+     * carries the emission (the compound pattern against the row's own tree) and the
+     * #PAINT_LAYER_GENERATOR_NO_NORMAL flag: a node-group pattern lays no Normal unless the
+     * group's `Color` answer makes one, which the first pass leaves to the colour channels. */
+    {MA_PAINT_LAYER_SOURCE_GENERATOR,
+     MA_PAINT_LAYER_GENERATOR_NODE_GROUP,
+     "Node Group",
+     PaintLayerKindCategory::Source,
+     paint_layer_all_roles,
+     nullptr,
+     0,
+     uint32_t(PAINT_LAYER_KIND_GENERATES | PAINT_LAYER_KIND_DYNAMIC_SCHEMA),
+     false},
 };
 
 Span<const PaintLayerKindParam> paint_layer_generator_placement_params()

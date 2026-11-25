@@ -257,7 +257,10 @@ static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
     MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
         ma, owner, name.c_str(), MA_PAINT_LAYER_SOURCE_GENERATOR);
     if (effect != nullptr && params.generator != MA_PAINT_LAYER_GENERATOR_GRADIENT) {
-      BKE_paint_layers_generator_kind_set(ma, *effect, eMaterialPaintLayerGenerator(params.generator));
+      /* The main the Add was given seeds a Node Group generator's definition; without one the row
+       * stays inert, like every generic path that cannot reach a main. */
+      BKE_paint_layers_generator_kind_set(
+          ma, *effect, eMaterialPaintLayerGenerator(params.generator), params.bmain);
     }
     return effect;
   }
@@ -559,7 +562,10 @@ static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
     MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
         ma, owner, MA_PAINT_LAYER_SOURCE_GENERATOR, name.c_str());
     if (item != nullptr && params.generator != MA_PAINT_LAYER_GENERATOR_GRADIENT) {
-      BKE_paint_layers_generator_kind_set(ma, *item, eMaterialPaintLayerGenerator(params.generator));
+      /* The main the Add was given seeds a Node Group generator's definition; without one the row
+       * stays inert, like every generic path that cannot reach a main. */
+      BKE_paint_layers_generator_kind_set(
+          ma, *item, eMaterialPaintLayerGenerator(params.generator), params.bmain);
     }
     return item;
   }

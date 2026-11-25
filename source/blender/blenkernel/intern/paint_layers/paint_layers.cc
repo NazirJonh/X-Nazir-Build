@@ -1092,7 +1092,8 @@ MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
   if (!ELEM(source,
             MA_PAINT_LAYER_SOURCE_IMAGE,
             MA_PAINT_LAYER_SOURCE_CONSTANT,
-            MA_PAINT_LAYER_SOURCE_GENERATOR))
+            MA_PAINT_LAYER_SOURCE_GENERATOR,
+            MA_PAINT_LAYER_SOURCE_NODE_GROUP))
   {
     return nullptr;
   }
@@ -2515,13 +2516,14 @@ bool BKE_paint_layers_transform_input_supported(const MaterialPaintLayer &owner)
 {
   /* A transform effect moves the maps the owner itself reads: an owner that lays a map of its own
    * (a Paint row, a Fill with a map or one that will carry one) or reads a source at its UV (a
-   * Material row) has something to move. A folder composites children rather than reading a map,
-   * a Mesh Map row reads the shared atlas without a mapping, and a generator's UV line is its own
-   * parameter, so none of them takes one. */
+   * Material row, a node-group source's baked map) has something to move. A folder composites
+   * children rather than reading a map, a Mesh Map row reads the shared atlas without a mapping,
+   * and a generator's UV line is its own parameter, so none of them takes one. */
   switch (owner.source) {
     case MA_PAINT_LAYER_SOURCE_IMAGE:
     case MA_PAINT_LAYER_SOURCE_CONSTANT:
     case MA_PAINT_LAYER_SOURCE_MATERIAL:
+    case MA_PAINT_LAYER_SOURCE_NODE_GROUP:
       return true;
     default:
       return false;

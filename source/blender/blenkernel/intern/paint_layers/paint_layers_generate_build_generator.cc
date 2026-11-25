@@ -31,6 +31,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_generator_registry.hh"
+#include "BKE_paint_layers_node_group.hh"
 #include "BKE_paint_material_composite.hh"
 
 #include "NOD_socket.hh"
@@ -823,17 +824,30 @@ GeneratorFactor PaintLayersTreeBuilder::generator_compound_factor_ensure(
   }
   const int space = paint_layer_generator_space_of(layer);
   const bool is_2d = space == MA_PAINT_LAYER_GRADIENT_SPACE_UV;
-  if (!ctx_.generator_group_get) {
-    return {};
+  bNodeTree *pattern_group = nullptr;
+  const char *coordinate_id = nullptr;
+  const char *factor_id = nullptr;
+  if (info->subtype == MA_PAINT_LAYER_GENERATOR_NODE_GROUP) {
+    /* A node-group pattern is the row's own definition: the tree the row names, and the sockets
+     * the convention fixes. No shared factory and no per-kind identifiers -- the group comes from
+     * #MaterialPaintLayer::kind_tree, and every instance of the kind reads the same names. */
+    pattern_group = layer.kind_tree;
+    coordinate_id = PAINT_NG_SOCKET_COORDINATE;
+    factor_id = PAINT_NG_SOCKET_FAC;
   }
-  bNodeTree *pattern_group = ctx_.generator_group_get(info->subtype, is_2d);
+  else {
+    if (!ctx_.generator_group_get) {
+      return {};
+    }
+    pattern_group = ctx_.generator_group_get(info->subtype, is_2d);
+    coordinate_id = info->group_coordinate_id;
+    factor_id = info->group_factor_id;
+  }
   if (pattern_group == nullptr || tree.typeinfo == nullptr ||
       tree.typeinfo->group_idname == nullptr)
   {
     return {};
   }
-  const char *coordinate_id = info->group_coordinate_id;
-  const char *factor_id = info->group_factor_id;
   if (coordinate_id == nullptr || factor_id == nullptr) {
     return {};
   }
@@ -869,9 +883,25 @@ GeneratorFactor PaintLayersTreeBuilder::generator_compound_factor_ensure(
   grid_.place(*instance, layout::Column::Source, 0);
   nodes_made.append(instance);
 
+  /* Parameters are stored by the interface identifier (stable across a rename), while the
+   * convention's sockets are found by their name: a user's group names its sockets `Coordinate`
+   * and `Fac` but their identifiers are the generated `Socket_<n>`. Try the identifier first and
+   * fall back to the name, so both spellings work. */
   const auto instance_socket = [&](const eNodeSocketInOut in_out,
-                                   const char *identifier) -> bNodeSocket * {
-    return bke::node_find_socket(*instance, in_out, UString::from_ptr_noinline(identifier));
+                                   const char *identifier_or_name) -> bNodeSocket * {
+    if (bNodeSocket *socket = bke::node_find_socket(
+            *instance, in_out, UString::from_ptr_noinline(identifier_or_name)))
+    {
+      return socket;
+    }
+    const Span<bNodeSocket *> sockets = (in_out == SOCK_IN) ? instance->input_sockets() :
+                                                              instance->output_sockets();
+    for (bNodeSocket *socket : sockets) {
+      if (StringRef(socket->name) == identifier_or_name) {
+        return socket;
+      }
+    }
+    return nullptr;
   };
 
   bNodeSocket *coordinate_in = instance_socket(SOCK_IN, coordinate_id);
@@ -909,6 +939,14 @@ GeneratorFactor PaintLayersTreeBuilder::generator_compound_factor_ensure(
   }
   GeneratorFactor out;
   out.factor = {instance, factor};
+  if (info->subtype == MA_PAINT_LAYER_GENERATOR_NODE_GROUP) {
+    /* The own-colour answer the tree may carry: where the group lays a colour no ramp could
+     * express, the emission lays it whole instead of indexing the band, the Voronoi cell-colour
+     * shape. A tree without the output rides the ramp as every other pattern does. */
+    if (bNodeSocket *color = instance_socket(SOCK_OUT, PAINT_NG_SOCKET_COLOR)) {
+      out.color = {instance, color};
+    }
+  }
   generator_factors_.add(&layer, out);
   return out;
 }
@@ -942,6 +980,26 @@ KindEmitResult paint_layer_generator_grunge_gpu_emit(PaintLayersTreeBuilder &bui
                                                      const RowEmitContext &ctx)
 {
   return generator_compound_gpu_emit(builder, ctx);
+}
+
+KindEmitResult paint_layer_generator_node_group_gpu_emit(PaintLayersTreeBuilder &builder,
+                                                         const RowEmitContext &ctx)
+{
+  /* The compound emission against the row's own definition: the same placed coordinate, the same
+   * sockets the convention fixes. #generator_compound_factor_ensure branches on the kind to take
+   * the group from #MaterialPaintLayer::kind_tree, and reads the tree's `Color` output when the
+   * tree answers one -- a colour laid whole where no ramp could express the answer, the Voronoi
+   * cell-colour shape; a tree without it rides the ramp like every other pattern. */
+  const GeneratorFactor pattern = builder.generator_compound_factor_ensure(ctx.tree,
+                                                                           ctx.group,
+                                                                           ctx.layer);
+  if (pattern.factor.socket == nullptr) {
+    return {};
+  }
+  if (pattern.color.socket != nullptr) {
+    return builder.generator_own_color_emit(ctx, pattern);
+  }
+  return builder.generator_ramp_emit(ctx, pattern);
 }
 
 }  // namespace bke::paint_layers

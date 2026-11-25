@@ -203,6 +203,9 @@ PaintKindLook paint_look_for_source(const eMaterialPaintLayerSource source,
       return {ICON_GP_DRAW_FILL, paint_glyph::FILL};
     case MA_PAINT_LAYER_SOURCE_MATERIAL:
       return {ICON_MATERIAL, paint_glyph::TEXTURE};
+    case MA_PAINT_LAYER_SOURCE_NODE_GROUP:
+      /* The node editor's icon names what the row's content is: the user's own graph. */
+      return {ICON_NODETREE, paint_glyph::TEXTURE};
     case MA_PAINT_LAYER_SOURCE_GENERATOR:
       /* A pattern wears its own glyph so it is not read as a Gradient; the Gradient, and a subtype
        * the caller does not name, keep the ramp. */

@@ -104,5 +104,13 @@ KindEmitResult paint_layer_generator_weave_gpu_emit(PaintLayersTreeBuilder &buil
 KindEmitResult paint_layer_generator_grunge_gpu_emit(PaintLayersTreeBuilder &builder,
                                                      const RowEmitContext &ctx);
 
+/**
+ * The node-group generator's emission: the compound shape against the row's own definition
+ * (#MaterialPaintLayer::kind_tree), the placed coordinate into its `Coordinate`, the ramp reading
+ * its `Fac`, the parameters riding the tree's own socket identifiers.
+ */
+KindEmitResult paint_layer_generator_node_group_gpu_emit(PaintLayersTreeBuilder &builder,
+                                                         const RowEmitContext &ctx);
+
 }  // namespace bke::paint_layers
 }  // namespace blender

@@ -21,13 +21,16 @@
 
 #include "BKE_colorband.hh"
 #include "BKE_idprop.hh"
+#include "BKE_lib_id.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_edit.hh"
 #include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_gradient.hh"
+#include "BKE_paint_layers_node_group.hh"
 
 #include "DNA_material_types.h"
+#include "DNA_node_types.h"
 
 #include "paint_layers_intern.hh"
 #include "paint_layers_kind.hh"
@@ -383,9 +386,43 @@ MaterialPaintLayer *BKE_paint_layers_generator_add(Material &ma,
   return layer;
 }
 
+/**
+ * Seed the definition a node-group generator reads when its switch left the row without one: the
+ * kind's template tree (#BKE_paint_layers_node_group_template_ensure), named after the row and
+ * assigned like the Add operator assigns its own. The Node Group generator is the one generic kind
+ * the properties panel can flip, so the flip leaves a definition to edit in the Shader Editor
+ * rather than an empty dynamic schema the panel has nothing to draw from.
+ *
+ * The switch itself is never rolled back here: a tree that cannot be built or one the assignment
+ * refuses (the latter is the template's own validator, so unreachable in practice) leaves the row
+ * inert exactly as a switch without a #Main does, which the UI reports as a missing definition.
+ * The source-layer and filter kinds get no such seeding through the generic paths on purpose: a
+ * script may want to assign a tree of its own, and the Add operator is the UI path for those.
+ */
+static void paint_layer_generator_node_group_seed(Main &bmain,
+                                                  Material &ma,
+                                                  MaterialPaintLayer &row)
+{
+  bNodeTree *tree = BKE_paint_layers_node_group_template_ensure(
+      bmain, PaintLayerNodeGroupTemplateKind::Generator, row.name);
+  if (tree == nullptr) {
+    return;
+  }
+  if (!BKE_paint_layers_kind_tree_set(ma, &row, tree)) {
+    /* The assignment was refused, so the template never gained a user: it leaves the file instead
+     * of sitting orphaned in `Main`. */
+    BKE_id_free(&bmain, &tree->id);
+    return;
+  }
+  /* The row holds its own user on the definition now; drop the creation user the new tree came
+   * with, so the instances are the only owners (the Add operator drops it the same way). */
+  id_us_min(&tree->id);
+}
+
 bool BKE_paint_layers_generator_kind_set(Material &ma,
                                          MaterialPaintLayer &row,
-                                         const eMaterialPaintLayerGenerator generator)
+                                         const eMaterialPaintLayerGenerator generator,
+                                         Main *bmain)
 {
   if (!generator_row_owned(ma, row) || !BKE_paint_layers_generator_supported(row)) {
     return false;
@@ -416,6 +453,15 @@ bool BKE_paint_layers_generator_kind_set(Material &ma,
    * whatever this call leaves. */
   paint_layers_bake_precreate_texture(ma, row);
   BKE_paint_layers_tag_edited(ma);
+  /* The switch is done and the row tagged; the definition it reads is the last thing it gets, the
+   * way the Add operator makes the row first and assigns the template after. The assignment seeds
+   * the parameters from the tree's interface and tags again, and a row that already reads a tree
+   * keeps it: switching is a kind change, never a definition change. */
+  if (bmain != nullptr && generator == MA_PAINT_LAYER_GENERATOR_NODE_GROUP &&
+      row.kind_tree == nullptr)
+  {
+    paint_layer_generator_node_group_seed(*bmain, ma, row);
+  }
   return true;
 }
 

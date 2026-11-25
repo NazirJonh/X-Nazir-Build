@@ -1025,6 +1025,13 @@ void paint_layers_bake_jobs_ensure(wmWindowManager &wm, wmWindow *win, Main &bma
         break;
       }
     }
+    /* The node-group rows' shader-bake rides the same wanted policy, and runs BEFORE the bake
+     * job starts: the pixels that land here are what the row's own bake hash sees (the bake
+     * image's pixel version), so the bake this sweep starts reads the fresh answer instead of
+     * lagging one sweep behind it. */
+    if (surface_wanted) {
+      paint_layers_shader_bake_rows_ensure(bmain, ma);
+    }
     paint_layers_bake_job_start(wm, win, bmain, ma, surface_wanted);
     /* The source-graph cache rides the same sweep, under its own policy: a material that is being
      * looked at re-bakes a stale cache here; the others keep the mark until asked. The due

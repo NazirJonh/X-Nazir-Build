@@ -390,6 +390,12 @@ static const EnumPropertyItem rna_enum_material_paint_layer_generator_items[] = 
      0,
      "Grunge",
      "Noise modulated by a second, higher-frequency noise and thresholded, dirt in one row"},
+    {MA_PAINT_LAYER_GENERATOR_NODE_GROUP,
+     "NODE_GROUP",
+     0,
+     "Node Group",
+     "A pattern from one of your node groups: Coordinate in, Fac out, ramped like every "
+     "generator"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -1722,6 +1728,16 @@ static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
                    "already reads this one" :
                    "Cannot add a paint layer here");
     return nullptr;
+  }
+  if (eMaterialPaintLayerSource(source) == MA_PAINT_LAYER_SOURCE_NODE_GROUP) {
+    /* A node-group layer reads a definition the caller assigns itself
+     * (#MaterialPaintLayer::kind_tree): this generic path seeds no template on purpose, so a
+     * script is never handed one it did not ask for, and the Add operator is the UI path that
+     * makes the row and its tree together. The row is made as a plain Paint row above and then
+     * pointed at the source here, the way the operator shapes its own; without a tree the row
+     * stays inert, which the UI reports as a missing definition. */
+    layer->source = MA_PAINT_LAYER_SOURCE_NODE_GROUP;
+    layer->kind_subtype = 0;
   }
   /* A fresh row becomes the cursor, mirroring what the UI does when it adds one, unless the caller
    * builds a stack unattended and passes make_active=False to leave the cursor alone. */
@@ -5016,9 +5032,19 @@ static void rna_MaterialPaintLayer_generator_set(PointerRNA *ptr, int value)
     return;
   }
   if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    bNodeTree *previous_tree = layer->kind_tree;
     /* The switch keeps the role and the channel records; the kind registry refuses a kind the
      * role does not allow, which leaves the row as it was. */
-    BKE_paint_layers_generator_kind_set(*ma, *layer, eMaterialPaintLayerGenerator(value));
+    /* A set function has no #Main; the editor's is the one this data lives in (the reach the
+     * curve-patch brush setter and the channel image setter use). It is what lets the Node Group
+     * switch seed its definition; without a main the row would stay inert. */
+    BKE_paint_layers_generator_kind_set(*ma, *layer, eMaterialPaintLayerGenerator(value), G_MAIN);
+    if (previous_tree == nullptr && layer->kind_tree != nullptr) {
+      /* The switch made the definition: the node editors and the Shader Editor's pickers learn
+       * about the new tree, the way the Add operator announces its own (BKE only tags DEG; the
+       * editors need the WM notifier too). */
+      WM_main_add_notifier(NC_NODE | NA_EDITED, &layer->kind_tree->id);
+    }
   }
 }
 
@@ -6701,6 +6727,11 @@ static const EnumPropertyItem rna_enum_material_paint_layer_source_items[] = {
      0,
      "Generator",
      "A procedural colour and coverage built from shading coordinates"},
+    {MA_PAINT_LAYER_SOURCE_NODE_GROUP,
+     "NODE_GROUP",
+     0,
+     "Node Group",
+     "The paint-channel outputs of one of your node groups, computed over the map"},
     {MA_PAINT_LAYER_SOURCE_CURVE_PATCH,
      "CURVE_PATCH",
      0,

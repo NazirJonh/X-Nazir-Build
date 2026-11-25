@@ -25,6 +25,7 @@
 #include "BKE_node_tree_interface.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
+#include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_generator_registry.hh"
 
 #include "RNA_access.hh"
@@ -1784,6 +1785,44 @@ TEST_F(PaintLayersFilterKindsTest, node_group_filter_refusal_keeps_the_definitio
   EXPECT_FALSE(BKE_paint_layers_kind_tree_set(*ma, group, refused));
   EXPECT_EQ(group->kind_tree, valid);
   EXPECT_EQ(valid->id.us, valid_users);
+}
+
+TEST_F(PaintLayersFilterKindsTest, node_group_source_kind_is_a_dynamic_schema_operator)
+{
+  /* The Node Group source: a layer and a correction, read like a Material row. The stack rows the
+   * tests shape by hand set the source directly, as the kind switch would. */
+  Material *ma = BKE_material_add(bmain, "NodeGroupSourceKindMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  row->source = MA_PAINT_LAYER_SOURCE_NODE_GROUP;
+  row->kind_subtype = 0;
+  EXPECT_TRUE(paint_layer_kind_has_flag(*row, PAINT_LAYER_KIND_READS_SOURCE));
+  EXPECT_TRUE(paint_layer_kind_has_flag(*row, PAINT_LAYER_KIND_NEEDS_BAKE));
+  row->role = MA_PAINT_LAYER_ROLE_LAYER;
+  EXPECT_TRUE(paint_layer_kind_role_allowed(*row));
+  row->role = MA_PAINT_LAYER_ROLE_EFFECT;
+  EXPECT_TRUE(paint_layer_kind_role_allowed(*row));
+  row->role = MA_PAINT_LAYER_ROLE_MASK_ITEM;
+  EXPECT_FALSE(paint_layer_kind_role_allowed(*row));
+  row->role = MA_PAINT_LAYER_ROLE_LAYER;
+}
+
+TEST_F(PaintLayersFilterKindsTest, node_group_generator_kind_is_a_dynamic_schema_operator)
+{
+  /* The generator: every role, a schema that opens with the shared placement and closes with the
+   * ramp once a definition is read; without one the dynamic schema is empty. */
+  Material *ma = BKE_material_add(bmain, "NodeGroupGeneratorKindMat");
+  MaterialPaintLayer *generator = BKE_paint_layers_generator_add(
+      *ma, MA_PAINT_LAYER_GENERATOR_NODE_GROUP, "NG Gen", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(generator, nullptr);
+  EXPECT_TRUE(paint_layer_kind_has_flag(*generator, PAINT_LAYER_KIND_GENERATES));
+  EXPECT_TRUE(paint_layer_kind_has_flag(*generator, PAINT_LAYER_KIND_DYNAMIC_SCHEMA));
+  const PaintLayerGeneratorInfo *info = BKE_paint_layers_generator_of(*generator);
+  ASSERT_NE(info, nullptr);
+  EXPECT_STREQ(info->identifier, "NODE_GROUP");
+  EXPECT_EQ(info->cpu_factor, nullptr) << "the pattern's CPU answer is the shader-bake's";
+  EXPECT_EQ(info->node_group_ensure, nullptr)
+      << "the pattern is the row's own tree, not a shared group a factory makes";
 }
 
 }  // namespace blender::bke::tests

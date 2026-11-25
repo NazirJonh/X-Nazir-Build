@@ -15,10 +15,14 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 
 #include "BKE_gtest_base.hh"
 
 #include "BKE_paint_layers.hh"
+
+#include "../../paint_material_cache_common.hh"
+#include "../paint_layers_intern.hh"
 
 namespace blender {
 
@@ -62,6 +66,43 @@ class AnchorSliceCacheBudgetGuard {
 
  private:
   size_t previous_;
+};
+
+/**
+ * Snapshot every paint cache budget and restore them on scope exit, so a test that changes one
+ * cannot leak into the next test that measures eviction. The getters return the configured floor,
+ * not an entry's transient overshoot, which is what a restore needs.
+ */
+class ScopedPaintCacheBudgets {
+ public:
+  ScopedPaintCacheBudgets()
+      : anchor_(paint_layer_anchor_point_slice_cache_budget()),
+        effect_(paint_layer_effect_cache_budget()),
+        mask_effect_(paint_layer_mask_effect_cache_budget()),
+        gpu_effect_(paint_layer_effect_gpu_cache_budget()),
+        combined_(paint_material_cache::combined_cache_get_budget()),
+        composite_(paint_material_cache::composite_cache_get_budget())
+  {
+  }
+  ~ScopedPaintCacheBudgets()
+  {
+    paint_layer_anchor_point_slice_cache_set_budget(anchor_);
+    paint_layer_effect_cache_set_budget(effect_);
+    paint_layer_mask_effect_cache_set_budget(mask_effect_);
+    paint_layer_effect_gpu_cache_set_budget(gpu_effect_);
+    paint_material_cache::combined_cache_set_budget(combined_);
+    paint_material_cache::composite_cache_set_budget(composite_);
+  }
+  ScopedPaintCacheBudgets(const ScopedPaintCacheBudgets &) = delete;
+  ScopedPaintCacheBudgets &operator=(const ScopedPaintCacheBudgets &) = delete;
+
+ private:
+  size_t anchor_;
+  size_t effect_;
+  size_t mask_effect_;
+  size_t gpu_effect_;
+  int64_t combined_;
+  int64_t composite_;
 };
 
 }  // namespace blender::bke::tests

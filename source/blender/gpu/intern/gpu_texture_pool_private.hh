@@ -126,6 +126,13 @@ class TexturePoolImpl : public TexturePoolBase {
   Vector<TextureHandle> pool_;
   /* Set of textures currently in use. */
   Set<TextureHandle> acquired_;
+  /* VRAM of every texture in `pool_`, kept in step with the append/remove/reuse paths so the budget
+   * is checked in O(1) instead of re-walking every parked mip chain per release. */
+  size_t parked_bytes_ = 0;
+
+  /* Free the largest parked textures until `parked_bytes_ + incoming_bytes` fits the live budget.
+   * The same order `reset()` uses; leaves `parked_bytes_` honest, never touches `incoming`. */
+  void enforce_pool_budget(size_t incoming_bytes);
 
  protected:
   Texture *acquire_texture_impl(int3 extent,

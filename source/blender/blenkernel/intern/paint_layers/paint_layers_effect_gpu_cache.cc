@@ -27,6 +27,7 @@
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
 
+#include "paint_layers_cache_budgets.hh"
 #include "paint_layers_effect_cache_intern.hh"
 #include "paint_layers_intern.hh"
 
@@ -49,7 +50,8 @@ namespace blender {
  * entry evicted between two frames costs one dispatch -- not the main-thread whole-canvas render an
  * evicted CPU entry costs.
  */
-constexpr size_t PAINT_LAYER_EFFECT_GPU_CACHE_BYTES = size_t(512) * 1024 * 1024;
+constexpr size_t PAINT_LAYER_EFFECT_GPU_CACHE_BYTES =
+    size_t(bke::paint_cache::gpu_effect_cache_default_bytes);
 
 /** The live budget; only tests override it, to make eviction observable without 4K fixtures. */
 static size_t g_paint_effect_gpu_cache_budget = PAINT_LAYER_EFFECT_GPU_CACHE_BYTES;

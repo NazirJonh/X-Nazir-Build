@@ -16,6 +16,7 @@
 #include "BKE_brush_material_correction.hh"
 #include "BKE_image.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_composite.hh"
 
 #include "BLI_assert.h"
 #include "BLI_hash.hh"
@@ -239,11 +240,20 @@ std::shared_ptr<ImBuf> copy_source_pixels(const CorrectionCacheRequest &request)
   return owned_imbuf(dst);
 }
 
+/** The live budget: #UserDef::paint_layers_cache_budget_mb scales the built-in default, which is the
+ * budget table's "stroke_corrections" entry. Read at evict time, since this cache is the one paint
+ * cache an editor module owns and the preference sync runs in blenkernel. */
+int64_t correction_cache_budget()
+{
+  return BKE_paint_layers_cache_budget_bytes(
+      BKE_paint_layers_cache_budget_default_bytes("stroke_corrections"));
+}
+
 std::shared_ptr<const ImBuf> build_entry(const CorrectionCacheRequest &request)
 {
   /* A buffer larger than the whole budget would be built only to be evicted immediately. */
   const int64_t bytes = int64_t(request.source.x) * request.source.y * sizeof(float[4]);
-  if (bytes > correction_cache_max_bytes) {
+  if (bytes > correction_cache_budget()) {
     return nullptr;
   }
 
@@ -288,7 +298,7 @@ bool evict_one(const CacheEntry *keep)
 
 void enforce_budget(const CacheEntry *keep)
 {
-  while (cache_bytes() > correction_cache_max_bytes && cache_entries().size() > 1) {
+  while (cache_bytes() > correction_cache_budget() && cache_entries().size() > 1) {
     if (!evict_one(keep)) {
       return;
     }

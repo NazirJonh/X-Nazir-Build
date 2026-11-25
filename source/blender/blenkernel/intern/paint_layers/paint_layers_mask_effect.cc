@@ -34,6 +34,7 @@
 #include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
 
+#include "paint_layers_cache_budgets.hh"
 #include "paint_layers_composite_intern.hh"
 #include "paint_layers_effect_cache_intern.hh"
 #include "paint_layers_intern.hh"
@@ -59,7 +60,8 @@ struct MaskEffectCacheEntry {
 
 /** The same budget policy as the row effect cache: the working set of a couple of recent effects at
  * 4K, an entry evicted between two evaluations computed whole again. */
-constexpr size_t PAINT_LAYER_MASK_EFFECT_CACHE_BYTES = size_t(1024) * 1024 * 1024;
+constexpr size_t PAINT_LAYER_MASK_EFFECT_CACHE_BYTES =
+    size_t(bke::paint_cache::mask_effect_cache_default_bytes);
 
 static size_t g_paint_mask_effect_cache_budget = PAINT_LAYER_MASK_EFFECT_CACHE_BYTES;
 

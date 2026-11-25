@@ -1168,6 +1168,7 @@ def draw_material_layer_channels(layout, context, material, layer):
 # AddPresetPaintLayersUserSettings imports it lazily, so no cycle appears at startup.
 PAINT_LAYERS_USER_SETTINGS_PRESET_VALUES = (
     "prefs.paint_layers_auto_activate_tab",
+    "prefs.paint_layers_cache_budget_mb",
     "prefs.paint_layers_paint_default_channels",
     "prefs.paint_layers_fill_default_channels",
 )

@@ -336,6 +336,8 @@ static const EnumPropertyItem rna_enum_user_asset_library_brush_set_items[] = {
 #  include "BKE_name_matching.hh"
 #  include "BKE_object.hh"
 #  include "BKE_paint.hh"
+#  include "BKE_paint_layers_composite.hh"
+#  include "BKE_paint_material_composite.hh"
 #  include "BKE_preferences.h"
 #  include "BKE_screen.hh"
 #  include "BKE_sound.hh"
@@ -346,6 +348,7 @@ static const EnumPropertyItem rna_enum_user_asset_library_brush_set_items[] = {
 #  include "GPU_capabilities.hh"
 #  include "GPU_select.hh"
 #  include "GPU_texture.hh"
+#  include "GPU_texture_pool.hh"
 
 #  include "BLF_api.hh"
 
@@ -414,6 +417,15 @@ static void rna_userdef_sculpt_history_limit_update(Main *bmain, Scene *scene, P
   if (bmain != nullptr) {
     bke::sculpt_history::apply_limit_to_all(*bmain);
   }
+  rna_userdef_update(bmain, scene, ptr);
+}
+
+/* Paint Layer Cache Memory: the caches already hold entries sized for the old budget, so the new
+ * one applies from their next eviction, and a raise cannot bring evicted entries back. */
+static void rna_userdef_paint_layers_cache_budget_update(Main *bmain, Scene *scene, PointerRNA *ptr)
+{
+  BKE_paint_layers_cache_budgets_sync_from_userdef();
+  BKE_paint_material_cache_budgets_sync_from_userdef();
   rna_userdef_update(bmain, scene, ptr);
 }
 
@@ -1560,6 +1572,14 @@ static void rna_Userdef_memcache_update(Main * /*bmain*/, Scene * /*scene*/, Poi
   const int64_t new_limit = int64_t(U.memcachelimit) * 1024 * 1024;
   MEM_CacheLimiter_set_maximum(new_limit);
   memory_cache::set_approximate_size_limit(new_limit);
+  USERDEF_TAG_DIRTY;
+}
+
+static void rna_userdef_texture_pool_budget_update(Main * /*bmain*/,
+                                                   Scene * /*scene*/,
+                                                   PointerRNA * /*ptr*/)
+{
+  GPU_texture_pool_set_budget(uint64_t(int64_t(U.gpu_texture_pool_budget_mb) * 1024 * 1024));
   USERDEF_TAG_DIRTY;
 }
 
@@ -6746,6 +6766,23 @@ static void rna_def_userdef_edit(BlenderRNA *brna)
       "checks it");
   RNA_def_property_update(prop, 0, "rna_userdef_update");
 
+  prop = RNA_def_property(srna, "paint_layers_cache_budget_mb", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "paint_layers_cache_budget_mb");
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_range(prop, 0, max_memory_in_megabytes_int());
+  RNA_def_property_ui_text(
+      prop,
+      "Paint Layer Cache Memory",
+      "The memory the paint layer caches may hold at once, in MiB, shared by them proportionally "
+      "to their defaults: the Anchor Point slices, the effect and mask-effect results, the GPU "
+      "effect results, the stroke corrections, the composite and the Combined preview. 0 keeps the "
+      "built-in defaults, whose ceilings sum to 8 GiB at the largest sizes; a smaller value bounds "
+      "the sum instead, at the cost of recomputing evicted results. This is an approximate ceiling: "
+      "each cache keeps at least 1 MiB and the composite can exceed its share by one channel set. "
+      "The Mask Source coverage cache is not part of the sum. Applies from the next eviction, so "
+      "raise it before heavy painting rather than after");
+  RNA_def_property_update(prop, 0, "rna_userdef_paint_layers_cache_budget_update");
+
   /* VSE */
   prop = RNA_def_property(srna, "connect_strips_by_default", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(
@@ -7088,6 +7125,19 @@ static void rna_def_userdef_system(BlenderRNA *brna)
   RNA_def_property_range(prop, 0, max_memory_in_megabytes_int());
   RNA_def_property_ui_text(prop, "Memory Cache Limit", "Memory cache limit (in megabytes)");
   RNA_def_property_update(prop, 0, "rna_Userdef_memcache_update");
+
+  prop = RNA_def_property(srna, "gpu_texture_pool_budget", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "gpu_texture_pool_budget_mb");
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_range(prop, 0, max_memory_in_megabytes_int());
+  RNA_def_property_ui_text(
+      prop,
+      "GPU Texture Pool Budget",
+      "The VRAM each GPU context's texture pool may park for reuse, in MiB; parked textures beyond "
+      "it are evicted largest-first instead of kept for the next redraw. 0 keeps the pools "
+      "unlimited, which lets heavy viewport scratch (a 4K paint stack's effect buffers) park "
+      "gigabytes after use");
+  RNA_def_property_update(prop, 0, "rna_userdef_texture_pool_budget_update");
 
   /* Geometry Nodes. */
 

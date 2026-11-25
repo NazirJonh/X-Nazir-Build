@@ -172,6 +172,41 @@ void BKE_paint_layers_mask_effect_cache_free_all();
 void BKE_paint_layers_mask_effect_cache_free_material(const Material &ma);
 
 /**
+ * The byte budget of a paint cache whose built-in default is \a default_bytes, as
+ * #UserDef::paint_layers_cache_budget_mb chooses it: zero (unset) keeps the default, any other
+ * value shares that many MiB over every paint cache proportionally to its default, so a smaller
+ * value scales every ceiling down together. An entry larger than its cache's budget is not
+ * cached, which is what makes a small value safe: it trades recompute for memory.
+ */
+int64_t BKE_paint_layers_cache_budget_bytes(int64_t default_bytes);
+
+/**
+ * The built-in default of the paint cache named \a id in the budget table (the Anchor Point slices,
+ * the effect and mask-effect results, the GPU effect results, the stroke corrections, the composite
+ * and the Combined preview), or zero for an unknown name. Lets a cache whose default lives outside
+ * blenkernel -- the editors' stroke correction cache -- read the one table rather than mirror the
+ * number.
+ */
+int64_t BKE_paint_layers_cache_budget_default_bytes(const char *id);
+
+/**
+ * Apply #UserDef::paint_layers_cache_budget_mb to every cache in the budget table: the slice,
+ * effect, mask-effect and GPU effect caches, the stroke corrections (which read the preference when
+ * they evict, so are left alone here), the composite and the Combined preview. Called when the
+ * preferences load and when the preference changes; with the preference unset the caches fall back
+ * to their built-in defaults.
+ */
+void BKE_paint_layers_cache_budgets_sync_from_userdef();
+
+/**
+ * Print every paint cache's used and budget bytes to stderr, one `PAINT_MEM caches` line each and
+ * a `PAINT_MEM caches_total` sum, when `BLENDER_PAINT_MEM_LOG` is set; a no-op otherwise. \a where
+ * names the caller (the bake commit, a manual probe) and is echoed on each line. For diagnosing
+ * the 4K texture-memory footprint, never on a pixel path.
+ */
+void BKE_paint_layers_cache_debug_log(const char *where);
+
+/**
  * The grey the CPU-computed mask effect \a effect lays on its owner row \a row, on \a tile_number:
  * the mask effect cache's buffer, computed when no fresh one stands. A Normal to Mask item's grey
  * is the kernel's output over the Normal channel of the slice its Anchor Point references; the

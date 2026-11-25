@@ -396,12 +396,41 @@ static bool mask_gpu_result_compute(const MaterialPaintLayer &effect,
   /* The read-back: the last pass wrote the result texture, the one canvas acquired with the
    * HOST_READ flag the data read takes (see #readback_usage above). */
   GPU_finish();
-  float *pixels = static_cast<float *>(GPU_texture_read(result, GPU_DATA_FLOAT, 0));
-  if (pixels == nullptr) {
-    mask_bake_refuse("readback");
+  const float *grey = grey_input.float_buffer.data;
+  if (grey == nullptr) {
+    /* Refused rather than dereferenced below: without the grey the fold has nothing to read. */
+    mask_bake_refuse("no grey");
     return false;
   }
-  BLI_SCOPED_DEFER([&]() { MEM_delete(pixels); });
+  /* Decide whether the two buffers alias *before* the write handle is taken. `float_data_for_write`
+   * may clone a shared buffer, so comparing against the pointer it returns would call an aliased
+   * grey distinct; comparing the raw buffers keeps the decision independent of the implicit-sharing
+   * semantics. A grey that aliases the result is folded from a separate read-back buffer -- the
+   * read would otherwise overwrite the very grey the fold mixes in. */
+  const bool aliases = grey_input.float_buffer.data == r_result.float_buffer.data;
+  float *out = r_result.float_data_for_write();
+  const int64_t texels = int64_t(width) * height;
+  /* The read lands in the caller's buffer when the grey does not alias it: the fold's sources are
+   * each texel's own, so it reads in place, and the whole-canvas MEM copy (256 MiB at 4K) is
+   * saved. */
+  float *pixels = out;
+  bool pixels_owned = false;
+  if (aliases) {
+    pixels = static_cast<float *>(GPU_texture_read(result, GPU_DATA_FLOAT, 0));
+    if (pixels == nullptr) {
+      mask_bake_refuse("readback");
+      return false;
+    }
+    pixels_owned = true;
+  }
+  else {
+    GPU_texture_read(result, GPU_DATA_FLOAT, 0, out);
+  }
+  BLI_SCOPED_DEFER([&]() {
+    if (pixels_owned) {
+      MEM_delete(pixels);
+    }
+  });
 
   /* The readback lands in the caller's buffer with the CPU kernel's own `for_mask` semantics. The
    * kinds whose GPU tail leaves a premultiplied colour and a weight in alpha are folded here:
@@ -426,9 +455,6 @@ static bool mask_gpu_result_compute(const MaterialPaintLayer &effect,
                               MA_PAINT_LAYER_FILTER_DROP_SHADOW,
                               MA_PAINT_LAYER_FILTER_FILL_AREA);
   const bool band_from_alpha = filter == MA_PAINT_LAYER_FILTER_MASK_OUTLINE;
-  float *out = r_result.float_data_for_write();
-  const float *grey = grey_input.float_buffer.data;
-  const int64_t texels = int64_t(width) * height;
   for (const int64_t i : IndexRange(texels)) {
     /* The grey reads before the write: the two buffers may alias, and each texel's source is its
      * own texel alone. */

@@ -271,6 +271,8 @@ set(SRC
   intern/paint_layers/paint_layers.cc
   intern/paint_layers/paint_layers_anchor_point.cc
   intern/paint_layers/paint_layers_asset.cc
+  intern/paint_layers/paint_layers_cache_budgets.cc
+  intern/paint_layers/paint_layers_cache_budgets.hh
   intern/paint_layers/paint_layers_bake.cc
   intern/paint_layers/paint_layers_bake_coverage.cc
   intern/paint_layers/paint_layers_bake_drag.cc
@@ -941,6 +943,7 @@ if(WITH_GTESTS)
     intern/node_socket_value_iter_test.cc
     intern/paint_layers/tests/brush_layer_source_test.cc
     intern/paint_layers/tests/paint_layers_bake_test.cc
+    intern/paint_layers/tests/paint_layers_cache_budget_test.cc
     intern/paint_layers/tests/paint_layers_anchor_point_test.cc
     intern/paint_layers/tests/paint_layers_anchor_point_composite_test.cc
     intern/paint_layers/tests/paint_layers_asset_test.cc

@@ -1749,6 +1749,26 @@ struct UserDef {
   short essentials_brush_set = ASSET_LIBRARY_BRUSH_SET_BOTH;
   char _pad_essentials_brush_set[6] = {};
 
+  /**
+   * The VRAM each GPU context's texture pool may park for reuse, in MiB; parked textures beyond it
+   * are evicted largest-first instead of kept for the next redraw. Zero keeps the pools unlimited,
+   * which is what heavy viewport scratch (a 4K paint stack's effect buffers) makes worth bounding.
+   *
+   * Declared here, after every struct-typed member, so the field cannot shift a member's
+   * eight-byte alignment; #makesdna rejects any struct member that starts off an 8-byte boundary.
+   */
+  int gpu_texture_pool_budget_mb = 0;
+  /**
+   * The memory the paint layer caches may hold at once, in MiB, shared by them proportionally to
+   * their built-in defaults: the Anchor Point slices, the effect and mask-effect results, the GPU
+   * effect results, the stroke corrections, the composite and the Combined preview. Zero keeps
+   * those defaults, whose ceilings sum to 8 GiB at the largest sizes. A positive value is floored
+   * at 1 MiB per cache, so a small value trades recompute for memory rather than switching a cache
+   * off; the composite may exceed its share by one channel set. The Mask Source coverage cache is
+   * not part of the sum (see paint_mask_coverage_cache.hh).
+   */
+  int paint_layers_cache_budget_mb = 0;
+
   /** Runtime data (keep last). */
   UserDef_Runtime runtime;
 };

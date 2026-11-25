@@ -93,7 +93,9 @@
 #include "BKE_packedFile.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_object_mask.hh"
+#include "BKE_paint_material_composite.hh"
 #include "BKE_paint_material_sync.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
@@ -133,6 +135,7 @@
 #include "GHOST_IWindow.hh"
 
 #include "GPU_context.hh"
+#include "GPU_texture_pool.hh"
 
 #include "SEQ_sequencer.hh"
 
@@ -552,6 +555,14 @@ static void wm_init_userdef(Main *bmain)
   const int64_t cache_limit = int64_t(U.memcachelimit) * 1024 * 1024;
   MEM_CacheLimiter_set_maximum(cache_limit);
   memory_cache::set_approximate_size_limit(cache_limit);
+
+  /* The paint layer caches scale from their own preference, the way the general cache limit above
+   * does. */
+  BKE_paint_layers_cache_budgets_sync_from_userdef();
+  BKE_paint_material_cache_budgets_sync_from_userdef();
+
+  /* The viewport texture pool bounds its parked scratch the same way. */
+  GPU_texture_pool_set_budget(uint64_t(int64_t(U.gpu_texture_pool_budget_mb) * 1024 * 1024));
 
   BKE_sound_init(bmain);
 

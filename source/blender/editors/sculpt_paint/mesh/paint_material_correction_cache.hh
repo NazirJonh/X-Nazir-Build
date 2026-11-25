@@ -43,13 +43,15 @@ namespace ed::sculpt_paint::material {
 /**
  * How much corrected image data the whole session may hold.
  *
- * Declared beside the Mask Source coverage budget (#mask_coverage_cache_budget_bytes, 256 MiB) so
- * the two derived-image limits stay visible together: a correction buffer is 4x a coverage one
- * (RGBA floats against grey), and a stroke holds at most one per active channel, so the
- * session-wide ceiling for both caches together is this plus the coverage budget (~1 GiB). Raising
- * either constant means re-reading the other.
+ * The built-in default is the "stroke_corrections" entry of the paint cache budget table
+ * (#BKE_paint_layers_cache_budget_default_bytes), scaled by
+ * #BKE_paint_layers_cache_budget_bytes from #UserDef::paint_layers_cache_budget_mb. This cache
+ * reads the preference itself when it evicts, so it has no apply hook in the table.
+ *
+ * The Mask Source coverage budget (#mask_coverage_cache_budget_bytes, 256 MiB) is deliberately
+ * *not* an entry of that table: it is an editor-side derived-image limit with its own lifetime, so
+ * the "sum of caches" the preference proportions covers the paint caches proper and not this pair.
  */
-constexpr int64_t correction_cache_max_bytes = int64_t(768) << 20;
 
 /**
  * The #ImageUser state that selects *which* pixels a buffer holds.

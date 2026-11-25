@@ -1147,21 +1147,18 @@ std::shared_ptr<ImBuf> CombinedGpuFrame::read_back(gpu::Texture *texture) const
    * glGetTextureImage, Vulkan waits on its staging fence. An extra finish would only stall the
    * whole pipeline for a wait the read is about to do anyway, so do not put one back "to be safe".
    */
-  float *pixels = static_cast<float *>(GPU_texture_read(texture, GPU_DATA_FLOAT, 0));
-  if (pixels == nullptr) {
-    return nullptr;
-  }
   const int2 size(GPU_texture_width(texture), GPU_texture_height(texture));
   ImBuf *ibuf = IMB_allocImBuf(uint(size.x), uint(size.y), ImBufFlags::FloatData);
   if (ibuf == nullptr || ibuf->float_buffer.data == nullptr) {
     if (ibuf != nullptr) {
       IMB_freeImBuf(ibuf);
     }
-    MEM_delete(pixels);
     return nullptr;
   }
-  memcpy(ibuf->float_data_for_write(), pixels, sizeof(float[4]) * size_t(size.x) * size.y);
-  MEM_delete(pixels);
+  /* The read lands in the buffer the ImBuf owns: an intermediate read of the whole canvas (256 MiB
+   * at 4K) followed by a copy into it doubled the transient peak of every bake and mask read-back
+   * for one memcpy's worth of nothing. */
+  GPU_texture_read(texture, GPU_DATA_FLOAT, 0, ibuf->float_data_for_write());
   return std::shared_ptr<ImBuf>(ibuf, [](ImBuf *buffer) { IMB_freeImBuf(buffer); });
 }
 
@@ -2437,21 +2434,18 @@ bool combined_row_render_gpu(const Material &ma,
   }
 
   GPU_finish();
-  float *pixels = static_cast<float *>(GPU_texture_read(capture_color, GPU_DATA_FLOAT, 0));
-  if (pixels == nullptr) {
-    return gpu_refuse("the row render could not be read back");
-  }
+  /* The read lands in the caller's buffer, and the alpha the channel does not keep is set over it
+   * in place: no intermediate whole-canvas copy is made (256 MiB at 4K, once per channel). */
+  GPU_texture_read(capture_color, GPU_DATA_FLOAT, 0, r_rgba);
   const int64_t pixels_num = int64_t(size) * size;
   /* A channel that tracks no content alpha stays opaque, as in the CPU render; its transparency is
    * the coverage alone. Normal keeps the map's own alpha. */
   const bool keep_alpha = entry.tracks_content_alpha || channel == PAINT_MATERIAL_CHANNEL_NORMAL;
-  for (int64_t i = 0; i < pixels_num; i++) {
-    r_rgba[i * 4 + 0] = pixels[i * 4 + 0];
-    r_rgba[i * 4 + 1] = pixels[i * 4 + 1];
-    r_rgba[i * 4 + 2] = pixels[i * 4 + 2];
-    r_rgba[i * 4 + 3] = keep_alpha ? pixels[i * 4 + 3] : 1.0f;
+  if (!keep_alpha) {
+    for (int64_t i = 0; i < pixels_num; i++) {
+      r_rgba[i * 4 + 3] = 1.0f;
+    }
   }
-  MEM_delete(pixels);
   return true;
 }
 

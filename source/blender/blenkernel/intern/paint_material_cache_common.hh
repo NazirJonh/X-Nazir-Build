@@ -173,4 +173,22 @@ void enforce_budget(Map<Key, Entry> &entries,
   }
 }
 
+/**
+ * The live budgets of the two caches: #BKE_paint_material_cache_budgets_sync_from_userdef sets
+ * them from #UserDef::paint_layers_cache_budget_mb, and tests may too, to make eviction
+ * observable without 4K fixtures. Main thread only, like the caches themselves.
+ */
+void combined_cache_set_budget(int64_t bytes);
+int64_t combined_cache_get_budget();
+/** Bytes the cache holds now, the same sum the eviction compares to the budget. */
+int64_t combined_cache_bytes();
+void composite_cache_set_budget(int64_t bytes);
+/**
+ * The composite cache's configured floor, not the effective `max(floor, one_set_bytes)` the
+ * enforcement raises it to for the size being gathered. Tests snapshot and restore this.
+ */
+int64_t composite_cache_get_budget();
+/** Bytes the cache holds now, the same sum the eviction compares to the budget. */
+int64_t composite_cache_bytes();
+
 }  // namespace blender::bke::paint_material_cache

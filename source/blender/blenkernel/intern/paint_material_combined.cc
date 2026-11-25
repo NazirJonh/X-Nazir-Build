@@ -34,6 +34,7 @@
 #include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
 
+#include "paint_layers/paint_layers_cache_budgets.hh"
 #include "paint_material_cache_common.hh"
 
 namespace blender {
@@ -617,7 +618,12 @@ static CombinedCache g_cache;
 
 /** Float RGBA at 4096 square is 256 MiB on its own, so this cannot share the composite's budget.
  * It bounds a pathological case; in practice the cache holds one or two entries. */
-static constexpr int64_t COMBINED_CACHE_BUDGET_BYTES = 512 * 1024 * 1024;
+static constexpr int64_t COMBINED_CACHE_BUDGET_BYTES =
+    bke::paint_cache::combined_cache_default_bytes;
+
+/** The live budget; the user-preference sync and tests override it, to make eviction observable
+ * without 4K fixtures. Main thread only, like the cache itself. */
+static int64_t g_combined_cache_budget = COMBINED_CACHE_BUDGET_BYTES;
 
 static int64_t combined_entry_size_in_bytes(const CombinedCacheEntry &entry)
 {
@@ -627,7 +633,26 @@ static int64_t combined_entry_size_in_bytes(const CombinedCacheEntry &entry)
 static void combined_cache_enforce_budget(const CombinedCacheKey &keep)
 {
   bke::paint_material_cache::enforce_budget(
-      g_cache.entries, keep, COMBINED_CACHE_BUDGET_BYTES, combined_entry_size_in_bytes);
+      g_cache.entries, keep, g_combined_cache_budget, combined_entry_size_in_bytes);
+}
+
+void bke::paint_material_cache::combined_cache_set_budget(const int64_t bytes)
+{
+  g_combined_cache_budget = bytes;
+}
+
+int64_t bke::paint_material_cache::combined_cache_get_budget()
+{
+  return g_combined_cache_budget;
+}
+
+int64_t bke::paint_material_cache::combined_cache_bytes()
+{
+  int64_t bytes = 0;
+  for (const CombinedCacheEntry &entry : g_cache.entries.values()) {
+    bytes += combined_entry_size_in_bytes(entry);
+  }
+  return bytes;
 }
 
 /**

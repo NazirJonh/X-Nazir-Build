@@ -39,6 +39,7 @@
 #include "BKE_material.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_paint_types.hh"
@@ -1908,6 +1909,11 @@ void ImagePaintStroke::done(const bool is_cancel, const bool stroke_started)
   }
   pop->mode->paint_stroke_done(pop->stroke_handle);
   pop->stroke_handle = nullptr;
+
+  /* One probe per finished stroke, env-gated: the caches the stroke filled (slices, effect and mask
+   * results, previews) are what the 4K budget turns on, and the bake commit may never run for a
+   * plain stroke. */
+  BKE_paint_layers_cache_debug_log("stroke_done");
 
   /* Drop the dab trajectory so the next stroke starts empty regardless of brush changes. The
    * `PaintOperation` itself is destroyed right after this, but keeping `clear()` here matches

@@ -172,7 +172,16 @@ struct MaskCoverageKey {
 
 /** Largest source that is still worth caching: 4096x4096, 64 MiB as one float per texel. */
 constexpr int64_t mask_coverage_cache_max_pixels = int64_t(1) << 22;
-/** Entry count and byte budget of the whole registry. */
+/**
+ * Entry count and byte budget of the whole registry.
+ *
+ * Deliberately outside the paint cache budget table (#BKE_paint_layers_cache_budget_default_bytes)
+ * and therefore *not* scaled by #UserDef::paint_layers_cache_budget_mb: this registry is an
+ * editor-side derived-image limit with its own lifetime, and the "sum of caches" the preference
+ * proportions covers the blenkernel paint caches proper. The stroke correction budget beside it
+ * (whenever that one changes) is a table entry; keep the pair documented together, not numerically
+ * coupled.
+ */
 constexpr int mask_coverage_cache_max_entries = 4;
 constexpr int64_t mask_coverage_cache_budget_bytes = int64_t(256) << 20;
 

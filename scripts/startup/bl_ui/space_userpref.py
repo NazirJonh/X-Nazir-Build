@@ -996,6 +996,11 @@ class USERPREF_PT_system_memory(SystemPanel, CenterAlignMixIn, Panel):
         col.prop(system, "vbo_time_out", text="VBO Time Out")
         col.prop(system, "vbo_collection_rate", text="Garbage Collection Rate")
 
+        layout.separator()
+
+        col = layout.column()
+        col.prop(system, "gpu_texture_pool_budget")
+
         if sys.platform != "darwin":
             layout.separator()
             col = layout.column(align=True)

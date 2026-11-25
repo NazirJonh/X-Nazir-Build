@@ -1840,6 +1840,15 @@ void BKE_paint_material_composite_cache_free_material(const Material &ma);
 /** Drop every cached composite. For teardown and for file load. */
 void BKE_paint_material_composite_cache_free_all();
 
+/**
+ * Apply #UserDef::paint_layers_cache_budget_mb to the composite and Combined preview caches. Called
+ * when the preferences load and when the preference changes; with the preference unset both caches
+ * fall back to their built-in defaults. The paint layer caches take the same preference through
+ * #BKE_paint_layers_cache_budgets_sync_from_userdef, and the stroke correction cache reads it when
+ * it evicts.
+ */
+void BKE_paint_material_cache_budgets_sync_from_userdef();
+
 /** Whether a composite of \a channel of \a ma is currently cached. Exists for tests. */
 bool BKE_paint_material_composite_cache_contains(const Material &ma,
                                                  int channel,

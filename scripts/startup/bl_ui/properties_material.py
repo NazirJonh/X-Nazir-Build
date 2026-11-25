@@ -2476,6 +2476,7 @@ class LAYER_MATERIAL_PT_user_settings(LayerMaterialButtonsPanel, Panel):
         layout = self.layout
         layout.use_property_split = True
         layout.prop(context.preferences.edit, "paint_layers_auto_activate_tab")
+        layout.prop(context.preferences.edit, "paint_layers_cache_budget_mb")
         layout.popover(
             panel="LAYER_MATERIAL_PT_user_settings_paint_channels_menu",
             text="Paint Layer Channels",

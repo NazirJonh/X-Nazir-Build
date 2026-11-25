@@ -61,6 +61,7 @@
 #include "BKE_report.hh"
 
 #include "../paint_material_composite_internal.hh"
+#include "paint_layers_cache_budgets.hh"
 #include "paint_layers_composite_intern.hh"
 #include "paint_layers_effect_cache_intern.hh"
 #include "paint_layers_intern.hh"
@@ -69,6 +70,7 @@
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_userdef_types.h"
 
 #include "IMB_colormanagement.hh"
 #include "IMB_imbuf.hh"
@@ -3325,7 +3327,8 @@ static void anchor_slice_images_get(const Material &ma,
  * rendered whole again; 4 GiB holds the working set of a reader at 4K and keeps the few most
  * recent others. A pair larger than the budget is never cached.
  */
-constexpr size_t PAINT_LAYER_ANCHOR_SLICE_CACHE_BYTES = size_t(4096) * 1024 * 1024;
+constexpr size_t PAINT_LAYER_ANCHOR_SLICE_CACHE_BYTES =
+    size_t(bke::paint_cache::anchor_slice_cache_default_bytes);
 
 /** The live budget; only tests override it, to make eviction observable without 4K fixtures. */
 static size_t g_anchor_slice_cache_budget = PAINT_LAYER_ANCHOR_SLICE_CACHE_BYTES;
@@ -3869,7 +3872,8 @@ static bool anchor_slice_region_is_exact(const Material &ma,
  * sizes; an entry evicted between two evaluations is computed whole again, and an entry larger than
  * the budget is never cached.
  */
-constexpr size_t PAINT_LAYER_EFFECT_CACHE_BYTES = size_t(1024) * 1024 * 1024;
+constexpr size_t PAINT_LAYER_EFFECT_CACHE_BYTES =
+    size_t(bke::paint_cache::effect_cache_default_bytes);
 
 /** The live budget; only tests override it, to make eviction observable without 4K fixtures. */
 static size_t g_paint_effect_cache_budget = PAINT_LAYER_EFFECT_CACHE_BYTES;
@@ -4734,6 +4738,64 @@ size_t paint_layer_effect_cache_budget()
 {
   std::lock_guard<std::mutex> lock(g_paint_effect_cache_mutex);
   return g_paint_effect_cache_budget;
+}
+
+int64_t BKE_paint_layers_cache_budget_bytes(const int64_t default_bytes)
+{
+  const int pref_mb = U.paint_layers_cache_budget_mb;
+  if (pref_mb <= 0) {
+    return default_bytes;
+  }
+  /* The denominator is the budget table's own default sum, so moving one cache's default keeps
+   * every proportion correct instead of silently breaking the "8 GiB" the UI names. The sum is in
+   * bytes while `pref_mb` is in MiB, so the denominator is converted to MiB first: dividing bytes
+   * by a byte denominator would return MiB-sized numbers that the callers then read as bytes.
+   * `default_bytes` is at most a few GiB and `pref_mb` at most `INT_MAX`, so the product stays
+   * inside int64. */
+  const int64_t denominator_mb = bke::paint_cache::paint_cache_budget_total_default_bytes() /
+                                 (int64_t(1) << 20);
+  if (denominator_mb <= 0) {
+    return default_bytes;
+  }
+  const int64_t scaled = default_bytes * int64_t(pref_mb) / denominator_mb;
+  /* A positive preference must not silently switch a cache off: integer division turns a few MiB
+   * into a zero ceiling for the larger caches, and every setter reads zero as "cache nothing", so
+   * a user asking for little memory would instead get no caching at all. The 1 MiB floor trades a
+   * slight overshoot of the requested total for actually caching (see the preference's UI text). */
+  constexpr int64_t min_bytes = int64_t(1) << 20;
+  return scaled < min_bytes ? min_bytes : scaled;
+}
+
+void BKE_paint_layers_cache_budgets_sync_from_userdef()
+{
+  const bool log_enabled = bke::paint_cache::paint_mem_log_enabled();
+  for (const bke::paint_cache::PaintCacheBudgetEntry &entry :
+       bke::paint_cache::paint_cache_budget_entries())
+  {
+    if (entry.apply != nullptr) {
+      const int64_t applied = BKE_paint_layers_cache_budget_bytes(entry.default_bytes);
+      entry.apply(applied);
+      if (log_enabled) {
+        fprintf(stderr,
+                "PAINT_MEM budget pref_mb=%d id=%s default_bytes=%lld applied_bytes=%lld\n",
+                int(U.paint_layers_cache_budget_mb),
+                entry.id,
+                (long long)entry.default_bytes,
+                (long long)applied);
+      }
+    }
+  }
+  if (log_enabled) {
+    /* The stroke correction cache has no apply hook (it reads the preference when it evicts), but
+     * its share belongs in the same report: the seven entries are what the denominator sums. */
+    const int64_t default_bytes = BKE_paint_layers_cache_budget_default_bytes("stroke_corrections");
+    fprintf(stderr,
+            "PAINT_MEM budget pref_mb=%d id=stroke_corrections "
+            "default_bytes=%lld applied_bytes=%lld\n",
+            int(U.paint_layers_cache_budget_mb),
+            (long long)default_bytes,
+            (long long)BKE_paint_layers_cache_budget_bytes(default_bytes));
+  }
 }
 
 int paint_layer_effect_cache_entry_count()

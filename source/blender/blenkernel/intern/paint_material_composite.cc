@@ -84,6 +84,7 @@
 #include <iterator>
 #include <memory>
 
+#include "paint_layers/paint_layers_cache_budgets.hh"
 #include "paint_material_cache_common.hh"
 
 namespace blender {
@@ -4021,7 +4022,12 @@ struct CompositeCacheEntry {
 
 /** A composite is one buffer per material and channel, so this is a handful of entries at most;
  * the budget only exists to bound a pathological case, not to be managed. */
-static constexpr int64_t COMPOSITE_CACHE_BUDGET_BYTES = 256 * 1024 * 1024;
+static constexpr int64_t COMPOSITE_CACHE_BUDGET_BYTES =
+    bke::paint_cache::composite_cache_default_bytes;
+
+/** The live budget; the user-preference sync and tests override it, to make eviction observable
+ * without 4K fixtures. Main thread only, like the cache itself. */
+static int64_t g_composite_cache_budget = COMPOSITE_CACHE_BUDGET_BYTES;
 
 /**
  * The one composite cache of the session.
@@ -4091,18 +4097,49 @@ static int64_t composite_one_set_bytes_per_texel()
 }
 
 /**
- * The floor is #COMPOSITE_CACHE_BUDGET_BYTES. Above it, the budget grows to hold one composite per
- * channel and tile at the size being gathered: a larger material's whole set would otherwise evict
- * itself on every redraw, since the gather needs all of its channels resident at once.
+ * The floor is the live budget, which starts at #COMPOSITE_CACHE_BUDGET_BYTES and scales with
+ * #UserDef::paint_layers_cache_budget_mb. Above the floor, the budget grows to hold one composite
+ * per channel and tile at the size being gathered: a larger material's whole set would otherwise
+ * evict itself on every redraw, since the gather needs all of its channels resident at once.
  */
 static void composite_cache_enforce_budget(const CompositeCacheKey &keep,
                                            const int width,
                                            const int height)
 {
   const int64_t one_set_bytes = int64_t(width) * height * composite_one_set_bytes_per_texel();
-  const int64_t budget_bytes = std::max(COMPOSITE_CACHE_BUDGET_BYTES, one_set_bytes);
+  const int64_t budget_bytes = std::max(g_composite_cache_budget, one_set_bytes);
   bke::paint_material_cache::enforce_budget(
       g_cache.entries, keep, budget_bytes, composite_entry_size_in_bytes);
+}
+
+void bke::paint_material_cache::composite_cache_set_budget(const int64_t bytes)
+{
+  g_composite_cache_budget = bytes;
+}
+
+int64_t bke::paint_material_cache::composite_cache_get_budget()
+{
+  /* The configured floor, not the effective `max(floor, one_set_bytes)` the enforcement takes: a
+   * snapshot/restore of the budgets has to put the preference's value back, and the one-set floor
+   * is a per-gather allowance, not a setting. */
+  return g_composite_cache_budget;
+}
+
+int64_t bke::paint_material_cache::composite_cache_bytes()
+{
+  int64_t bytes = 0;
+  for (const CompositeCacheEntry &entry : g_cache.entries.values()) {
+    bytes += composite_entry_size_in_bytes(entry);
+  }
+  return bytes;
+}
+
+void BKE_paint_material_cache_budgets_sync_from_userdef()
+{
+  /* The composite and Combined preview are entries of the same budget table the other caches read,
+   * so the one sync that applies it covers them; this entry point stays for the callers that name
+   * the material caches. */
+  BKE_paint_layers_cache_budgets_sync_from_userdef();
 }
 
 /** Every image the stack reads, in the order the layers are composited. */

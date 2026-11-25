@@ -260,7 +260,20 @@ class ImageToContentCorrectionAction final : public StackDropAction {
     if (material == nullptr || target.place == StackMovePlace::Into) {
       return false;
     }
-    return is_content_correction(target_row(*material, target));
+    const MaterialPaintLayer *row = target_row(*material, target);
+    if (row == nullptr) {
+      return false;
+    }
+    /* A Smart Filter definition member takes no corrections: the chain's unfolding reads the
+     * member's own kind and payloads alone, so a Fill correction landed on it would sit there
+     * unread -- laid nowhere, visible nowhere. The member rows are drawn inert in the stack, so
+     * the drop aiming at one is a slip the hint explains. */
+    if (BKE_paint_layers_asset_row_is_definition_member(*row)) {
+      *r_disabled_hint = TIP_(
+          "That layer is a saved member of a Smart Filter definition and takes no corrections");
+      return false;
+    }
+    return is_content_correction(row);
   }
 
   bool execute(bContext &C,
@@ -701,6 +714,11 @@ class SmartMaterialAssetAction final : public StackDropAction {
       return (status & (OPERATOR_FINISHED | OPERATOR_INTERFACE)) != 0;
     }
 
+    /* A Smart Filter aimed at one of a row's mask corrections lands on that row's mask instead of
+     * correcting the row's colour: the aim is the mask landing's whole signal, the same reading
+     * the image drop gives a mask line. The insert dispatches on it, so nothing is asked twice. */
+    const bool mask_landing = is_mask_item(anchor);
+
     PaintLayerImportResult result;
     if (!BKE_paint_layers_asset_insert(*CTX_data_main(&C),
                                        material,
@@ -716,9 +734,19 @@ class SmartMaterialAssetAction final : public StackDropAction {
      * the source by name and library (its session UID does not survive), the laid-down rows by
      * their markers. A fresh instance per drop: dropping the same asset twice keeps both, as
      * "<name> #1" and "<name> #2". A mask drop records nothing here: the apply dialog it opens is
-     * the one point a Smart Mask lands from, and that operator records the instance itself. */
+     * the one point a Smart Mask lands from, and that operator records the instance itself. A
+     * Filter's mask landing records the mask instance's shape with the Filter type -- the target
+     * row and the laid chain item -- the finding aid a future mask reload reads; the reload of
+     * today refuses a Filter instance, so the record answers the panel label and Make Unique for
+     * now. */
     if (type != PaintLayerAssetType::Mask) {
-      BKE_paint_layers_asset_instance_record(material, *source, type, result.imported.as_span());
+      if (mask_landing) {
+        BKE_paint_layers_asset_instance_record_filter_mask(
+            material, *source, *result.first, result.imported_mask_items.as_span());
+      }
+      else {
+        BKE_paint_layers_asset_instance_record(material, *source, type, result.imported.as_span());
+      }
     }
     if (result.dropped_object_masks) {
       BKE_report(CTX_wm_reports(&C), RPT_WARNING, "Object masks were not imported");
@@ -739,9 +767,14 @@ class SmartMaterialAssetAction final : public StackDropAction {
      * helpers would have done and its undo step. */
     if (SpaceOutliner *space_outliner = CTX_wm_space_outliner(&C)) {
       stack_row_edit_finished(C, *space_outliner, material.id, ordinal, true);
+      if (mask_landing) {
+        /* The chain item is listed under the target row's mask section: bring that section up, so
+         * the item the drop just laid is not there and unseen. */
+        stack_row_reveal_attached(*space_outliner, ordinal);
+      }
     }
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
-    ED_undo_push(&C, "Insert Smart Material");
+    ED_undo_push(&C, mask_landing ? "Apply Smart Filter to Mask" : "Insert Smart Material");
     return true;
   }
 

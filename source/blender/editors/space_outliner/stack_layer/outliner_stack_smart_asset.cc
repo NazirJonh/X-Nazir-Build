@@ -28,6 +28,7 @@
 #include "BKE_report.hh"
 
 #include "BLI_function_ref.hh"
+#include "BLI_listbase_iterator.hh"
 #include "BLI_span.hh"
 #include "BLI_string_ref.hh"
 #include "BLI_string.h"
@@ -86,6 +87,11 @@ const EnumPropertyItem smart_asset_save_type_items[] = {
      0,
      "Smart Mask",
      "Save the selected row's mask stack as a reusable mask asset"},
+    {int(PaintLayerAssetType::Filter),
+     "FILTER",
+     0,
+     "Smart Filter",
+     "Save the selected rows' filter corrections as one reusable chain definition"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -142,7 +148,8 @@ const MaterialPaintLayer *selected_mask_row(const StackReadContext &ctx,
 
 /**
  * The rows the operator saves, or an empty vector after reporting why not. \a type decides which
- * selection is valid: a mask needs one masked row, a layer exactly one row or folder.
+ * selection is valid: a mask needs one masked row, a layer exactly one row or folder, a filter
+ * takes the corrections of the selected rows as the chain definition's members.
  */
 Vector<const MaterialPaintLayer *> smart_asset_save_rows(bContext *C,
                                                          wmOperator *op,
@@ -168,6 +175,37 @@ Vector<const MaterialPaintLayer *> smart_asset_save_rows(bContext *C,
     }
     rows.clear();
     rows.append(mask_row);
+  }
+  if (type == PaintLayerAssetType::Filter) {
+    /* A Smart Filter cannot be saved out of a Smart Filter definition: the rows that live there
+     * are already a chain's members, so the save would build a definition out of a definition --
+     * a chain of chains, which this build does not unfold. The selection cannot even reach a
+     * member's corrections the way it reads a stack row's effects (a member is a correction
+     * itself, and corrections carry no corrections of their own), so the ordinary "no
+     * corrections" refusal below would only fire for a stack the user edited around the
+     * guards. */
+    if (BKE_paint_layers_asset_is_filter_definition(material)) {
+      BKE_report(op->reports,
+                 RPT_ERROR,
+                 "A Smart Filter cannot be saved from another Smart Filter's definition");
+      return {};
+    }
+    /* A Smart Filter saves the selected rows' corrections, not the rows: the definition the chain
+     * instance reads is a stack of effect rows, and those are what hangs on the selection. The
+     * portability walk judges every member; this only says why there is nothing to judge. */
+    Vector<const MaterialPaintLayer *> members;
+    for (const MaterialPaintLayer *row : rows) {
+      for (const MaterialPaintLayer &effect : row->effects) {
+        members.append(&effect);
+      }
+    }
+    if (members.is_empty()) {
+      BKE_report(op->reports,
+                 RPT_ERROR,
+                 "Select a layer with filter corrections to save as a Smart Filter");
+      return {};
+    }
+    return members;
   }
   if (rows.is_empty()) {
     BKE_report(op->reports, RPT_ERROR, "Select a layer or a folder to save");
@@ -290,7 +328,17 @@ std::optional<PaintLayerAssetPortability> smart_asset_portability_check(
   PaintLayerAssetPortability portability = BKE_paint_layers_asset_portability_check(
       material, rows, type);
   if (portability.blocking()) {
-    if (portability.text_decal_num > 0) {
+    if (portability.chain_unsupported_num > 0) {
+      /* Only a Filter save counts members, so this refusal is the Filter one: the definition the
+       * chain would read must hold pointwise filter corrections alone, and anything else in the
+       * selection would arrive as a member the unfolding cannot lay. */
+      BKE_reportf(op.reports,
+                  RPT_ERROR,
+                  "%d selected correction(s) cannot be saved in a Smart Filter: only pointwise "
+                  "filter effects can travel in the chain definition",
+                  portability.chain_unsupported_num);
+    }
+    else if (portability.text_decal_num > 0) {
       BKE_report(op.reports,
                  RPT_ERROR,
                  "Text Decal effects cannot be saved in a Smart asset: their Text objects would "

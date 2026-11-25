@@ -21,6 +21,11 @@
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_paint_layers.hh"
+/* The curve-patch object an asset Material carries has to land invalidated, the way the copy
+ * and the import land it. */
+#include "BKE_paint_layers_curve_patch_object.hh"
+/* The edit verb that places the mask-landing chain item beside the item the drop aimed at. */
+#include "BKE_paint_layers_edit.hh"
 #include "BKE_paint_layers_import.hh"
 
 #include "MEM_guardedalloc.h"
@@ -41,6 +46,7 @@
 #include "DNA_material_types.h"
 #include "DNA_scene_types.h"
 
+#include "paint_layers_intern.hh"
 #include "paint_layers_kind.hh"
 
 namespace blender {
@@ -96,6 +102,7 @@ bool asset_type_is_valid(const PaintLayerAssetType type)
     case PaintLayerAssetType::Material:
     case PaintLayerAssetType::Layer:
     case PaintLayerAssetType::Mask:
+    case PaintLayerAssetType::Filter:
       return true;
   }
   return false;
@@ -623,6 +630,33 @@ void portability_mask_walk(const MaterialPaintLayer &row,
   }
 }
 
+/**
+ * Judge the saved rows \a row-wise as a Smart Filter's members: each must be an effect row of the
+ * pointwise shape the chain's unfolding lays (#paint_layer_effect_is_smart_filter_member), and a
+ * folder in the saved set is a member the definition cannot hold at all. Everything refused is
+ * counted into #PaintLayerAssetPortability::chain_unsupported_num; every member accepted is
+ * counted into #chain_member_num, so a report can say what the save would have carried.
+ *
+ * The generic walk still runs for a Filter save (a Curve Patch or a Text Decal hiding under a
+ * member is worth its own word), but the members are what blocks it: the definitions the chain
+ * reads are effect rows, so their nested lists are empty and the generic counts answer for the
+ * members alone anyway.
+ */
+static void portability_filter_members_walk(const Span<const MaterialPaintLayer *> rows,
+                                            PaintLayerAssetPortability &r_portability)
+{
+  for (const MaterialPaintLayer *row : rows) {
+    if (row == nullptr) {
+      continue;
+    }
+    if (BKE_paint_layers_is_folder(*row) || !paint_layer_effect_is_smart_filter_member(*row)) {
+      r_portability.chain_unsupported_num++;
+      continue;
+    }
+    r_portability.chain_member_num++;
+  }
+}
+
 }  // namespace
 
 const char *BKE_paint_layers_asset_type_label(const PaintLayerAssetType type)
@@ -634,6 +668,8 @@ const char *BKE_paint_layers_asset_type_label(const PaintLayerAssetType type)
       return "Smart Layer";
     case PaintLayerAssetType::Material:
       return "Smart Material";
+    case PaintLayerAssetType::Filter:
+      return "Smart Filter";
     case PaintLayerAssetType::None:
       break;
   }
@@ -665,6 +701,11 @@ PaintLayerAssetType BKE_paint_layers_asset_type_get(const Material &ma)
   return PaintLayerAssetType(value);
 }
 
+bool BKE_paint_layers_asset_is_filter_definition(const Material &ma)
+{
+  return BKE_paint_layers_asset_type_get(ma) == PaintLayerAssetType::Filter;
+}
+
 const char *BKE_paint_layers_asset_default_catalog(const PaintLayerAssetType type)
 {
   switch (type) {
@@ -674,6 +715,8 @@ const char *BKE_paint_layers_asset_default_catalog(const PaintLayerAssetType typ
       return "Paint/Smart Layers";
     case PaintLayerAssetType::Material:
       return "Paint/Smart Materials";
+    case PaintLayerAssetType::Filter:
+      return "Paint/Smart Filters";
     default:
       return "";
   }
@@ -751,8 +794,91 @@ PaintLayerAssetPortability BKE_paint_layers_asset_portability_check(
       portability_walk(*row, saved_markers, seen_images, portability);
     }
   }
+  /* A Filter save is judged on its members, not on what hangs under them: the saved rows are the
+   * effect rows the chain definition holds, so the member walk above is the walk that counts. */
+  if (type == PaintLayerAssetType::Filter) {
+    portability_filter_members_walk(rows, portability);
+  }
   return portability;
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Smart Filter definition
+ *
+ * A Filter asset's rows are effect rows: the chain definition is the asset material's stack read
+ * as a list of corrections, which is what the dynamic chain descriptor walks and what the
+ * composite unfolding lays. The ordinary rows import cannot build that -- it validates its rows
+ * against the source's stack lists, and a correction hangs on a row's effects list, not on a
+ * stack list -- so the definition is copied here, member by member, with the same item copy every
+ * other import path uses.
+ * \{ */
+
+/**
+ * Copy the Smart Filter members \a rows into \a asset's stack, unlinked copies placed at the root
+ * in the saved order. Every member keeps its role and its kind -- the copy is the plain item
+ * duplicate, markers of their own, maps of their own -- so the definition reads exactly like the
+ * stack the user built the chain from. The asset's channel set is widened to every channel the
+ * members work in first: the composite unfolding judges each member against the definition
+ * material's set, and a set without a member's channel would silently drop that member from every
+ * instance.
+ *
+ * The members' pointwise shapes were judged before this ran (the portability walk the create
+ * refuses on), so what arrives here is only ever what the unfolding can lay. \a image_policy is
+ * the save's painted-map policy, the same one the other types' imports carry.
+ */
+static bool paint_layer_filter_members_copy(Main &bmain,
+                                            Material &asset,
+                                            const Span<const MaterialPaintLayer *> rows,
+                                            const PaintLayerImageImportPolicy image_policy)
+{
+  uint32_t member_channels = 0;
+  for (const MaterialPaintLayer *row : rows) {
+    if (row == nullptr) {
+      return false;
+    }
+    for (const int i : IndexRange(row->channels_num)) {
+      const int channel = row->channels[i].channel;
+      if (channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM) {
+        member_channels |= uint32_t(1) << channel;
+      }
+    }
+  }
+  if (member_channels != 0) {
+    BKE_paint_layers_channel_set_mask_set(asset,
+                                          BKE_paint_layers_channel_set_mask_get(asset) |
+                                              member_channels);
+  }
+
+  PaintLayerMarkerMap marker_map;
+  PaintLayerCopyOptions copy_options;
+  /* The same flags a Smart asset import carries: the members bring no Curve Patch and no Text
+   * Decal (both refused by the member walk), and their maps follow the save's policy. */
+  copy_options.flags = SMART_ASSET_IMPORT_FLAGS;
+  copy_options.image_policy = image_policy;
+  copy_options.copy_assigned_maps = true;
+  for (const MaterialPaintLayer *row : rows) {
+    MaterialPaintLayer *copy = paint_layer_item_duplicate(bmain, asset, *row, &marker_map,
+                                                          copy_options);
+    if (copy == nullptr) {
+      /* A half-copied definition would lay a chain the asset does not describe: the create
+       * frees the asset material on a false answer, so the copies made so far go with it. */
+      return false;
+    }
+    BLI_addtail(&asset.paint_layers, copy);
+    paint_layer_anchor_point_refs_remap(*copy, marker_map);
+    paint_layer_anchor_point_foreign_ref_clear(asset, *copy);
+  }
+  if (BLI_listbase_is_empty(&asset.paint_layers)) {
+    return false;
+  }
+  asset.paint_layers_flag |= MA_PAINT_LAYERED;
+  BKE_paint_layers_text_decal_invalidate(asset);
+  BKE_paint_layers_curve_patch_object_invalidate(asset);
+  BKE_paint_layers_tag_edited(asset);
+  return true;
+}
+
+/** \} */
 
 Material *BKE_paint_layers_asset_create(Main &bmain,
                                         Material &source,
@@ -771,12 +897,32 @@ Material *BKE_paint_layers_asset_create(Main &bmain,
     return nullptr;
   }
   for (const MaterialPaintLayer *row : rows) {
-    if (row == nullptr || BKE_paint_layers_owner_list(source, *row) == nullptr) {
+    if (row == nullptr) {
+      return nullptr;
+    }
+    /* A Filter save's rows are the definition's members -- effect rows hanging on their owner
+     * rows' effects lists, which no stack list owns. Every other type saves stack rows, and a
+     * row the source's stack does not hold is foreign to it. Whether the members qualify at all
+     * is the portability walk's answer below. */
+    if (type != PaintLayerAssetType::Filter &&
+        BKE_paint_layers_owner_list(source, *row) == nullptr)
+    {
       return nullptr;
     }
   }
+  /* A Filter save out of a Smart Filter definition is refused here, not judged: the rows that
+   * live in a definition are already a chain's members, and saving them again would build a
+   * definition out of a definition -- a chain of chains, which this build does not unfold (the
+   * member walk below would refuse a chain row among the members, but the members of a
+   * definition carry no corrections for it to judge, so the save would pass by reading nothing).
+   * The editor's save operator reports the refusal in its own words before reaching this. */
+  if (type == PaintLayerAssetType::Filter && BKE_paint_layers_asset_is_filter_definition(source)) {
+    return nullptr;
+  }
   /* Curve Patch payload is private tool state and its curves live in the source geometry; the
-   * core refuses before any ID is created, so a caller cannot leak an asset material. */
+   * core refuses before any ID is created, so a caller cannot leak an asset material. For a
+   * Filter save this is also where a non-conforming member (a Blur, a transform, a plain layer
+   * saved as a member) is refused: the chain's unfolding cannot lay it. */
   if (BKE_paint_layers_asset_portability_check(source, rows, type).blocking()) {
     return nullptr;
   }
@@ -826,6 +972,13 @@ Material *BKE_paint_layers_asset_create(Main &bmain,
     params.copy_assigned_maps = true;
     ok = holder != nullptr &&
          BKE_paint_layers_import_rows(bmain, *asset, source, rows, params, r_result);
+  }
+  else if (type == PaintLayerAssetType::Filter) {
+    /* The definition's members are effect rows: no holder row and no rows import, the copies go
+     * straight into the asset's stack, roles kept (see the section above). The members' pointwise
+     * shapes were the portability walk's to refuse; arriving here, the caller is guaranteed a
+     * definition the chain descriptor and the unfolding both read. */
+    ok = paint_layer_filter_members_copy(bmain, *asset, rows, image_policy);
   }
   else {
     PaintLayerImportParams params;
@@ -892,6 +1045,253 @@ const MaterialPaintLayer *BKE_paint_layers_asset_mask_holder_find(const Material
   return nullptr;
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Smart Filter instance
+ *
+ * A Filter asset imports nothing: the drop lays one chain row on the target row and the asset
+ * material stays the definition both the descriptor and the composite read through it. The values
+ * the instance carries are seeded here from the asset's exposed-parameters list, one override per
+ * exposed (member, parameter), keyed the way the descriptor named the aggregate parameter -- so
+ * the instance's panel edits the same property the unfolding reads back.
+ * \{ */
+
+/**
+ * Seed the chain instance's exposed parameter values from \a asset.
+ *
+ * The asset's list is keyed by member name, each entry one integer per exposed parameter named
+ * after it and carrying its position in the member's own schema -- the shape
+ * #BKE_paint_layers_asset_params_expose built. Every entry is checked against the member's live
+ * schema the way an import marks its copies: a position that no longer names that parameter is a
+ * stale label and is skipped, not guessed. Two members of one name share an entry, and each of
+ * them is seeded from its own stored value -- the entry says what is offered, not what it is.
+ *
+ * The value is the member's current one, read through its typed accessor at the entry's position
+ * (a schema default where nothing is stored), and written into the instance's own properties under
+ * the member key the dynamic descriptor named. The typed setters create the property with the
+ * schema's range and label as UI data, so the instance's aggregate panel draws without another
+ * step. Payload parameters -- a ramp, the curves, a color balance, a channel mixer -- are not
+ * seeded (v1): their values live in the member's payloads, the unfolding passes those through
+ * whole, and an instance override of them has no reader.
+ *
+ * Every seeded parameter is also marked the way an imported row is (an Int 1 in the instance's
+ * binding-marker group), so the Smart-asset instance panel lists the aggregate parameters with
+ * their per-instance switches like any other import's.
+ */
+static void paint_layer_filter_instance_params_seed(MaterialPaintLayer &instance, const Material &asset)
+{
+  const IDProperty *exposed = BKE_paint_layers_asset_params_get(asset);
+  const PaintLayerKindInfo *instance_kind = paint_layer_kind_of(instance);
+  if (exposed == nullptr || instance_kind == nullptr) {
+    return;
+  }
+  for (const MaterialPaintLayer &member : asset.paint_layers) {
+    const IDProperty *entry = IDP_GetPropertyFromGroup(exposed, member.name);
+    if (entry == nullptr || entry->type != IDP_GROUP) {
+      continue;
+    }
+    const PaintLayerKindInfo *member_kind = paint_layer_kind_of(member);
+    if (member_kind == nullptr) {
+      continue;
+    }
+    for (const IDProperty &mark : entry->data.group) {
+      if (mark.type != IDP_INT) {
+        continue;
+      }
+      const int position = IDP_int_get(&mark);
+      if (position < 0 || position >= member_kind->params_num ||
+          strcmp(member_kind->params[position].name, mark.name) != 0)
+      {
+        continue;
+      }
+      const PaintLayerKindParam &param = member_kind->params[position];
+      switch (param.type) {
+        case PaintLayerKindParamType::Ramp:
+        case PaintLayerKindParamType::Curves:
+        case PaintLayerKindParamType::ColorBalance:
+        case PaintLayerKindParamType::ChannelMixer:
+          /* Not offered to the instance in v1: the member's payload is the value, and the
+           * unfolding carries it whole. The aggregate entry still names it, so the panel of the
+           * asset itself keeps its switch; the instance reads the member's payload either way. */
+          continue;
+        default:
+          break;
+      }
+      const std::string key = paint_layer_chain_member_param_key(member.marker, param.name);
+      const int aggregate = paint_layer_kind_param_index(instance, key.c_str());
+      if (aggregate < 0) {
+        /* The instance's schema names no such member: the definition moved since the list was
+         * built, and a value with no slot to land in is dropped, not misfiled. */
+        continue;
+      }
+      switch (param.type) {
+        case PaintLayerKindParamType::Int:
+        case PaintLayerKindParamType::Enum:
+          paint_layer_kind_param_int_set(instance, aggregate,
+                                         paint_layer_kind_param_int_get(member, position));
+          break;
+        case PaintLayerKindParamType::Bool:
+          paint_layer_kind_param_bool_set(instance, aggregate,
+                                          paint_layer_kind_param_bool_get(member, position));
+          break;
+        case PaintLayerKindParamType::Color: {
+          float color[4];
+          paint_layer_kind_param_color_get(member, position, color);
+          paint_layer_kind_param_color_set(instance, aggregate, color);
+          break;
+        }
+        case PaintLayerKindParamType::Vector: {
+          float vector[3];
+          paint_layer_kind_param_vector_get(member, position, vector);
+          paint_layer_kind_param_vector_set(instance, aggregate, vector);
+          break;
+        }
+        default:
+          paint_layer_kind_param_set(instance, aggregate,
+                                     paint_layer_kind_param_get(member, position));
+          break;
+      }
+      IDP_ReplaceInGroup(item_param_marks_ensure(instance),
+                         bke::idprop::create(key, 1).release());
+    }
+  }
+}
+
+/**
+ * Whether \a anchor is the aim of a Smart Filter's mask landing: one of a row's mask corrections,
+ * the base mask included out. The base has no listing of its own (the stack walk skips it), so a
+ * drop can never aim at it; a script that names it asks for the content landing on the row, which
+ * a stack-row anchor names directly.
+ */
+static bool paint_layer_anchor_is_mask_landing(const MaterialPaintLayer *anchor)
+{
+  return anchor != nullptr && anchor->role == MA_PAINT_LAYER_ROLE_MASK_ITEM &&
+         (anchor->flag & MA_PAINT_LAYER_MASK_BASE) == 0;
+}
+
+/**
+ * Lay the Smart Filter instance as a mask item: one chain row on the mask \a anchor_item belongs
+ * to, named after the asset and reading the asset material as its definition -- the mask form of
+ * the content landing below, the composite unfolding the definition's members over the mask grey
+ * the way the mask filters fold. The kind table allows the chain the mask role, and the row bake
+ * already carries a row whose mask holds a chain (#paint_layer_row_needs_bake), so the laid item
+ * is baked with its row like any mask filter.
+ *
+ * The mask folds over a base mask, and #BKE_paint_layers_mask_filter_add asks for one: the add
+ * path that lands a mask correction makes it first (white, changing nothing until the item does),
+ * and the same pair is made here. The definition link is a material user like the content
+ * landing's, and the instance's values are seeded from the asset's exposed list through the same
+ * helper, so the aggregate panel reads the mask landing like the content one. The item is moved
+ * beside the one the drop aimed at afterwards, so the line the drop drew names the place it landed
+ * at; a move that cannot place it (the aim vanished under the write) leaves it at the tail the add
+ * laid it at, which is the landing the place would have asked for anyway.
+ *
+ * \a r_result names the row the user sees: #first is the target row (a mask item has no ordinal of
+ * its own, and the undo step highlights what the drop landed on), #rows one, and the chain item is
+ * in #imported_mask_items -- the shape a Smart Mask instance records, so the mask landing's record
+ * names its target and its item the same way.
+ */
+static bool paint_layer_filter_mask_instance_insert(Material &dst,
+                                                    Material &asset,
+                                                    MaterialPaintLayer &anchor_item,
+                                                    const PaintLayerPlace place,
+                                                    PaintLayerImportResult *r_result)
+{
+  MaterialPaintLayer *target = BKE_paint_layers_mask_item_owner(dst, anchor_item);
+  if (target == nullptr) {
+    return false;
+  }
+  /* Like any mask correction, the chain folds over the base mask: made first, white, so it
+   * changes nothing until the item does. */
+  if (BKE_paint_layers_mask_base(*target) == nullptr &&
+      BKE_paint_layers_mask_add(dst, target, 1.0f) == nullptr)
+  {
+    return false;
+  }
+  MaterialPaintLayer *instance = BKE_paint_layers_mask_filter_add(
+      dst, target, MA_PAINT_LAYER_FILTER_CHAIN, asset.id.name + 2);
+  if (instance == nullptr) {
+    return false;
+  }
+  /* The chain reads its definition through the row's material pointer, shared between the
+   * instances of the asset: the user count is the one a Source Material row's pointer takes, and
+   * releasing the item releases it. */
+  instance->material = &asset;
+  id_us_plus(&asset.id);
+  /* The seed runs after the link: the aggregate schema the values are filed under resolves
+   * through the definition. */
+  paint_layer_filter_instance_params_seed(*instance, asset);
+  /* Beside the aimed item: the drop's line named the seam, and a mask item has no place of its own
+   * beyond that (Into reads as above, the way a one-line row's middle reads as a side). */
+  const PaintLayerPlace move_place =
+      (place == PaintLayerPlace::Below) ? PaintLayerPlace::Below : PaintLayerPlace::Above;
+  BKE_paint_layers_edit_move(dst, *instance, &anchor_item, move_place);
+  /* The filter add tagged the empty chain item; the definition link, the seeded values and the
+   * move came after, so the description the composite reads is tagged here once more. */
+  BKE_paint_layers_tag_edited(dst);
+
+  if (r_result != nullptr) {
+    *r_result = {};
+    r_result->first = target;
+    r_result->rows = 1;
+    r_result->imported_mask_items.append(instance);
+  }
+  return true;
+}
+
+/**
+ * Lay the Smart Filter instance: one chain row, added as \a anchor's correction by the table-driven
+ * add path (#BKE_paint_layers_filter_add accepts the chain kind, its roles allowing the effect role
+ * only), named after the asset and reading the asset material as its definition.
+ *
+ * An anchor that names one of a row's mask corrections is the mask landing instead
+ * (#paint_layer_filter_mask_instance_insert): the chain goes on that row's mask as one item.
+ *
+ * The definition link is a material user like a Material row's source is: the pointer with a user
+ * of its own, released with the row. The instance's values are seeded from the asset's exposed
+ * list before the instance record is left to the caller -- the drop action records what
+ * #PaintLayerImportResult::imported names, and the chain row is what this insert laid, so the
+ * record names it and a reload or Make Unique finds it again.
+ *
+ * \a r_result names the row the user sees: #first is the target row (an effect row has no ordinal
+ * of its own, and the undo step highlights what the drop landed on), #rows one.
+ */
+static bool paint_layer_filter_instance_insert(Material &dst,
+                                               Material &asset,
+                                               MaterialPaintLayer *anchor,
+                                               const PaintLayerPlace place,
+                                               PaintLayerImportResult *r_result)
+{
+  if (paint_layer_anchor_is_mask_landing(anchor)) {
+    return paint_layer_filter_mask_instance_insert(dst, asset, *anchor, place, r_result);
+  }
+  MaterialPaintLayer *instance = BKE_paint_layers_filter_add(
+      dst, anchor, MA_PAINT_LAYER_FILTER_CHAIN, asset.id.name + 2);
+  if (instance == nullptr) {
+    return false;
+  }
+  /* The chain reads its definition through the row's material pointer, shared between the
+   * instances of the asset: the user count is the one a Source Material row's pointer takes, and
+   * releasing the row releases it. */
+  instance->material = &asset;
+  id_us_plus(&asset.id);
+  /* The seed runs after the link: the aggregate schema the values are filed under resolves
+   * through the definition. */
+  paint_layer_filter_instance_params_seed(*instance, asset);
+  /* The filter add tagged the empty chain row; the definition link and the seeded values came
+   * after, so the description the composite reads is tagged here once more. */
+  BKE_paint_layers_tag_edited(dst);
+
+  if (r_result != nullptr) {
+    *r_result = {};
+    r_result->first = anchor;
+    r_result->rows = 1;
+    r_result->imported.append(instance);
+  }
+  return true;
+}
+
+/** \} */
+
 bool BKE_paint_layers_asset_can_insert(const Material &dst,
                                        const Material &asset,
                                        const MaterialPaintLayer *anchor,
@@ -911,6 +1311,56 @@ bool BKE_paint_layers_asset_can_insert(const Material &dst,
   const PaintLayerAssetType type = BKE_paint_layers_asset_type_get(asset);
   if (type == PaintLayerAssetType::None) {
     return fail(TIP_("That material is not a Smart asset"));
+  }
+  if (BKE_paint_layers_asset_is_filter_definition(dst)) {
+    /* The destination's stack is a Smart Filter definition: its root rows are the chain's saved
+     * member corrections, not a working stack. No smart asset lands there -- a Filter would hang
+     * its chain row on a member (a definition inside a definition, which the unfolding of the
+     * outer chain never reads), and a row-holding type would import working rows between the
+     * members, where the descriptor skips them and a re-save of the definition refuses them. The
+     * asset itself stays usable: it lands in any ordinary layered material. */
+    return fail(TIP_("That material is a Smart Filter definition; its stack is not a working stack"));
+  }
+  if (type == PaintLayerAssetType::Filter) {
+    /* A Smart Filter lands ON something, and the aim names which: a stack row takes the chain as
+     * its content correction (the place is not read there -- no row is laid beside anything), and
+     * one of a row's mask corrections takes it as a mask item of the mask they belong to. The add
+     * paths are #BKE_paint_layers_filter_add and #BKE_paint_layers_mask_filter_add, whose own
+     * rules (the target in the stack, the kind's roles, the base mask) are the last word; this
+     * predicate is what a drop gesture asks first, so it answers what the two can see.
+     *
+     * The mask landing is the same gesture the image drop reads off the aim: a line beside a mask
+     * correction means the mask, a line beside the row means the content. The base mask aims at
+     * nothing -- the stack walk skips it, so a drop cannot name it, and a script asking for it by
+     * the row itself gets the content landing a stack-row anchor names. A definition member is
+     * refused as the target of either landing (the unfolding reads the member's kind and payloads
+     * alone, and the definition is the asset's), on top of the definition-material refusal above.
+     */
+    if (!BKE_paint_layers_is_layered(dst)) {
+      return fail(TIP_("A Smart Filter needs a layered material to land in"));
+    }
+    if (asset.paint_layers.first == nullptr) {
+      return fail(TIP_("That Smart Filter holds no effects"));
+    }
+    if (paint_layer_anchor_is_mask_landing(anchor)) {
+      const MaterialPaintLayer *target = BKE_paint_layers_mask_item_owner(dst, *anchor);
+      if (target == nullptr) {
+        return fail(TIP_("A Smart Filter lands on the mask of a layer of the stack"));
+      }
+      if (BKE_paint_layers_asset_row_is_definition_member(*target)) {
+        return fail(TIP_(
+            "That layer is a saved member of a Smart Filter definition and takes no corrections"));
+      }
+      return true;
+    }
+    if (anchor == nullptr || BKE_paint_layers_owner_list(dst, *anchor) == nullptr) {
+      return fail(TIP_("A Smart Filter needs a layer of the stack to correct"));
+    }
+    if (BKE_paint_layers_asset_row_is_definition_member(*anchor)) {
+      return fail(TIP_(
+          "That layer is a saved member of a Smart Filter definition and takes no corrections"));
+    }
+    return true;
   }
   if (anchor != nullptr && BKE_paint_layers_owner_list(dst, *anchor) == nullptr) {
     return fail(TIP_("A Smart asset can only land beside a layer of the stack"));
@@ -955,6 +1405,14 @@ bool BKE_paint_layers_asset_insert(Main &bmain,
   }
 
   const PaintLayerAssetType type = BKE_paint_layers_asset_type_get(asset);
+  if (type == PaintLayerAssetType::Filter) {
+    /* A Filter asset imports no rows: the insert is the single chain row on the target -- the
+     * target's content correction, or one mask item of its mask when the anchor names a mask
+     * correction (see the section above), seeded with the instance's values either way. The place
+     * is read only by the mask landing, which lays beside the aimed item. */
+    return paint_layer_filter_instance_insert(dst, asset, anchor, place, r_result);
+  }
+
   Vector<const MaterialPaintLayer *> rows;
   if (type == PaintLayerAssetType::Mask) {
     rows.append(BKE_paint_layers_asset_mask_holder_find(asset));
@@ -1286,10 +1744,6 @@ void BKE_paint_layers_item_param_enabled_set(MaterialPaintLayer &item,
 
 /** \} */
 
-/* -------------------------------------------------------------------- */
-/** \name Smart-asset instances
- * \{ */
-
 bool BKE_paint_layers_asset_instances_any(const Material &ma)
 {
   if (const IDProperty *instances = instances_group_get(ma)) {
@@ -1427,7 +1881,11 @@ static int paint_layer_instance_nearest_root(const Material &ma,
 int BKE_paint_layers_asset_instance_of_row(const Material &ma, const MaterialPaintLayer &row)
 {
   if (BKE_paint_layers_owner_list(ma, row) == nullptr) {
-    return -1;
+    /* A row off the stack lists is a correction or a mask item, which no row walk reaches. The
+     * one such row an instance record names directly is a Smart Filter's chain instance: the
+     * insert laid it as the target's correction and recorded it the way a root is recorded, so
+     * the marker answers on its own. Every other correction matches nothing, as before. */
+    return BKE_paint_layers_asset_instance_of_marker(ma, row.marker);
   }
   /* The records name roots at any depth -- a drop Into a folder lays its rows nested -- so the
    * row's instance is the one of the nearest ancestor that is a root, the row itself included. A
@@ -1546,6 +2004,61 @@ int BKE_paint_layers_asset_instance_record_mask(Material &ma,
   return id;
 }
 
+int BKE_paint_layers_asset_instance_record_filter_mask(
+    Material &ma,
+    const Material &source,
+    const MaterialPaintLayer &target,
+    const Span<const MaterialPaintLayer *> imported_items)
+{
+  /* The same record a Smart Mask drop leaves, for a Smart Filter's mask landing: the instance
+   * names the target row by its marker (as `mask_target`, never in a `rows` set, so the row keeps
+   * answering for whatever row instance it belonged to) and the laid chain item by its marker (as
+   * `mask_items`), and the type member carries #PaintLayerAssetType::Filter -- so the instance
+   * panel lists the drop, a Make Unique ends its binding through the items' parameter markers,
+   * and a future mask reload can find the target row and the item this landing laid. The mode is
+   * recorded as Add Corrections: the landing lays the chain over the mask the target already has
+   * (making the base mask white when there was none) and replaces nothing.
+   *
+   * A reload of this instance is deliberately a no-op in this version: the reload refuses a
+   * Filter-typed instance outright (a chain has no rows to re-import, and laying the definition's
+   * members as stack rows would lay nothing), before it reads any of the mask members here. The
+   * record is the finding aid that reload will need, not a contract the current reload answers.
+   */
+  legacy_instance_migrate(ma);
+  IDProperty *instances = instances_group_ensure(ma);
+
+  const std::string source_name(source.id.name + 2);
+  const char *source_library = (source.id.lib != nullptr) ? source.id.lib->filepath : "";
+  const int id = instance_id_next(*instances);
+  const int number = instance_number_next(*instances, source_name, source_library);
+
+  IDProperty *group = bke::idprop::create_group(std::to_string(id)).release();
+  id_property_set_int(group, ASSET_INSTANCE_ID_PROP, id);
+  id_property_set_int(group, ASSET_INSTANCE_NUMBER_PROP, number);
+  IDP_ReplaceInGroup(group, bke::idprop::create(ASSET_SOURCE_NAME_PROP, source_name).release());
+  IDP_ReplaceInGroup(group,
+                     bke::idprop::create(ASSET_SOURCE_LIBRARY_PROP, StringRefNull(source_library))
+                         .release());
+  id_property_set_int(group, ASSET_SOURCE_TYPE_PROP, int(PaintLayerAssetType::Filter));
+  char target_marker[UUID_STRING_SIZE];
+  BLI_uuid_format(target_marker, target.marker);
+  IDP_ReplaceInGroup(
+      group, bke::idprop::create(ASSET_SOURCE_MASK_TARGET_PROP, target_marker).release());
+  id_property_set_int(group, ASSET_SOURCE_MASK_MODE_PROP, 1);
+  IDProperty *items = bke::idprop::create_group(ASSET_SOURCE_MASK_ITEMS_PROP).release();
+  for (const MaterialPaintLayer *item : imported_items) {
+    if (item == nullptr) {
+      continue;
+    }
+    char marker[UUID_STRING_SIZE];
+    BLI_uuid_format(marker, item->marker);
+    IDP_ReplaceInGroup(items, bke::idprop::create(marker, 1).release());
+  }
+  IDP_ReplaceInGroup(group, items);
+  IDP_ReplaceInGroup(instances, group);
+  return id;
+}
+
 PaintLayerAssetReloadResult BKE_paint_layers_asset_reload(Main &bmain,
                                                           Material &ma,
                                                           const int instance_id)
@@ -1603,6 +2116,15 @@ PaintLayerAssetReloadResult BKE_paint_layers_asset_reload(Main &bmain,
   const IDProperty *type_prop = IDP_GetPropertyFromGroup(instance, ASSET_SOURCE_TYPE_PROP);
   const bool mask_reload = (type_prop != nullptr && type_prop->type == IDP_INT &&
                             IDP_int_get(type_prop) == int(PaintLayerAssetType::Mask));
+  /* A Filter instance laid no rows to replace: its one chain row is a correction reading the
+   * definition, and the reload's rows import would lay the definition's members as stack rows,
+   * which nothing then consumes. Refused rather than mangled; a chain reload (delete the instance
+   * row, lay a fresh one, carry the overrides over) rides on the insert path in a later pass. */
+  if (type_prop != nullptr && type_prop->type == IDP_INT &&
+      IDP_int_get(type_prop) == int(PaintLayerAssetType::Filter))
+  {
+    return PaintLayerAssetReloadResult::ImportFailed;
+  }
   /* The row the mask landed on, and whether the instance adds its corrections instead of
    * replacing the mask; only read for a mask reload. */
   MaterialPaintLayer *mask_target_row = nullptr;

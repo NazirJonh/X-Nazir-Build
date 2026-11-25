@@ -772,6 +772,68 @@ inline bool paint_layer_effect_is_filter(const MaterialPaintLayer &effect)
 }
 
 /**
+ * Whether \a row can be a member of a Smart Filter chain: a pointwise colour correction, or a
+ * #PAINT_LAYER_KIND_GPU_COMPUTED one the chain unfolds as an effect correction of its own.
+ *
+ * The test is the portability contract of a Smart Filter asset and the defensive filter of the
+ * unfolding at once, so the two can never disagree about what travels: the row is an effect whose
+ * source is a filter, its kind acts on the colour below it, and none of the flags price it out -- a
+ * #PAINT_LAYER_KIND_NEEDS_BAKE kind reads a neighbourhood or owns its result (a Blur), so the
+ * pointwise branch cannot lay it and it is refused, *unless* the kind is also
+ * #PAINT_LAYER_KIND_GPU_COMPUTED (the combined preview lays an effect pass for it) or it is the
+ * node-group filter shape (#paint_layer_effect_is_precomputed_result, whose answer the effect stage
+ * uploads from the CPU cache): both travel as effect corrections keyed on composite markers, the
+ * shape #composite_effect_append_chain lays. A #PAINT_LAYER_KIND_NEEDS_BAKE kind with neither -- a
+ * kernel the preview has no pass for and no precomputed answer for (a Normal to Mask, and any kind
+ * still to come) -- stays out, and the contract holds on purpose: a chain member is either pointwise
+ * or has a per-member GPU answer, because the per-member effect path below *does* work for the other
+ * kind on the CPU, but the GPU refusal matrix would then reject whole stacks for it, and a chain
+ * that saves fine and always previews on the CPU is not a thing v3 wants to hand out. A
+ * #PAINT_LAYER_KIND_TRANSFORMS_INPUT kind moves the UV instead of correcting a colour, a
+ * #PAINT_LAYER_KIND_MAP_COVERAGE kind lays coverage from a map, an Anchor Point marker or reader
+ * names a slice rather than a colour, and a kind that reads the row's image slot
+ * (#PaintLayerKindInfo::reads_image_slot, a Channel Split) carries pixels the definition would have
+ * to bring along. A nested chain (the #MA_PAINT_LAYER_FILTER_CHAIN kind itself) is excluded too:
+ * this build unfolds one level, and a chain of chains is a composite plan of its own.
+ *
+ * Every excluded shape would still save fine as a Smart Material; only the chain refuses them. The
+ * mask form of the chain (see #composite_mask_item_chain) additionally skips every CPU-computed
+ * member this test lets through: a mask item has no effect stage of its own to read a result
+ * texture from.
+ */
+inline bool paint_layer_effect_is_smart_filter_member(const MaterialPaintLayer &row)
+{
+  if (row.role != MA_PAINT_LAYER_ROLE_EFFECT || row.source != MA_PAINT_LAYER_SOURCE_FILTER) {
+    return false;
+  }
+  if (row.kind_subtype == MA_PAINT_LAYER_FILTER_CHAIN) {
+    return false;
+  }
+  if (!paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_ACTS_ON_BELOW)) {
+    return false;
+  }
+  /* The node-group filter is spelled directly rather than through
+   * #paint_layer_effect_is_precomputed_result: that predicate is defined below this point, and the
+   * condition here is its kind half alone -- a #PAINT_LAYER_KIND_NEEDS_BAKE row is CPU-computed by
+   * definition, so subtype == MA_PAINT_LAYER_FILTER_NODE_GROUP is the whole difference. */
+  if (paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_NEEDS_BAKE) &&
+      !paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_GPU_COMPUTED) &&
+      row.kind_subtype != MA_PAINT_LAYER_FILTER_NODE_GROUP)
+  {
+    return false;
+  }
+  if (paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_TRANSFORMS_INPUT) ||
+      paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_MAP_COVERAGE) ||
+      paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_ANCHOR_POINT) ||
+      paint_layer_kind_is_anchor_point_marker(row))
+  {
+    return false;
+  }
+  const PaintLayerKindInfo *info = paint_layer_kind_of(row);
+  return info != nullptr && !info->reads_image_slot;
+}
+
+/**
  * Whether the filter \a effect (a correction or an adjustment) changes the colour in \a channel.
  * The channels a filter works in are the live records of its row, the same switches a layer has:
  * the record carries no map, only the choice. A tangent normal is not a colour a per-channel

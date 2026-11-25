@@ -180,6 +180,9 @@ static PaintKindLook paint_filter_look(const int16_t filter)
     case MA_PAINT_LAYER_FILTER_NODE_GROUP:
       /* The node editor's icon names what the filter's kernel is: the user's own group. */
       return {ICON_NODETREE, 0};
+    case MA_PAINT_LAYER_FILTER_CHAIN:
+      /* The linked icon names what the chain is: one row standing for a definition elsewhere. */
+      return {ICON_LINKED, 0};
   }
   return {ICON_ARROW_LEFTRIGHT, 0};
 }

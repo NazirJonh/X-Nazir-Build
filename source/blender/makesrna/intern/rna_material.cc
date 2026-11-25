@@ -648,6 +648,11 @@ static const EnumPropertyItem rna_enum_material_paint_layer_filter_items[] = {
      "Node Group",
      "A filter from one of your node groups: Input in, Result out, every other input a parameter "
      "of its own"},
+    {MA_PAINT_LAYER_FILTER_CHAIN,
+     "CHAIN",
+     0,
+     "Custom Effect",
+     "A chain of effects you saved as one reusable definition, carried as a single row"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -1479,6 +1484,25 @@ static bool rna_paint_layer_in_stack(const Material &ma, const MaterialPaintLaye
 }
 
 /**
+ * Whether \a layer is a Smart Filter definition member: a stack row of a definition material,
+ * whose kind and payloads the chain's unfolding reads and whose shape the asset owns.
+ *
+ * The owner-list test comes first, and not only to keep the answer false for an ordinary material:
+ * the definition-member predicate reads the role alone, so a correction or a mask item of a working
+ * row -- where the non-layer role is the normal shape -- must not be asked it
+ * (#BKE_paint_layers_asset_row_is_definition_member). This helper is the RNA's one ask: an add or a
+ * row-level edit aimed at a member is refused with the definition contract in the report, the way
+ * `paint_layers.new` refuses a definition material itself, while the BKE functions behind them
+ * refuse the same writes for every caller.
+ */
+static bool rna_paint_layer_is_definition_member(const Material &ma,
+                                                 const MaterialPaintLayer &layer)
+{
+  return BKE_paint_layers_owner_list(ma, layer) != nullptr &&
+         BKE_paint_layers_asset_row_is_definition_member(layer);
+}
+
+/**
  * Paste a copy of the content correction or mask item \a source onto \a target. The source may
  * belong to another material, which is how a preset or another material's correction is handed
  * over; images are copied, never shared.
@@ -1497,6 +1521,18 @@ static MaterialPaintLayer *rna_Material_paint_layers_paste_correction(Material *
                                    nullptr;
   if (source == nullptr || target == nullptr || !rna_paint_layer_in_stack(*ma, target)) {
     BKE_report(reports, RPT_ERROR, "Pasting a correction needs a target row of this material");
+    return nullptr;
+  }
+  /* A Smart Filter definition member takes no pasted correction: the chain's unfolding reads the
+   * member's own kind and payloads alone, so a copy hung on it would sit there unread -- laid
+   * nowhere, visible nowhere. The BKE paste refuses the same write; the report is what a script
+   * reads, so its prefix stays the one every definition-member refusal shares and only the tail
+   * names the refused action. */
+  if (rna_paint_layer_is_definition_member(*ma, *target)) {
+    BKE_report(reports,
+               RPT_ERROR,
+               "That layer is a saved member of a Smart Filter definition and takes no pasted "
+               "corrections");
     return nullptr;
   }
   MaterialPaintLayer *copy = BKE_paint_layers_correction_paste(*bmain, *ma, *source, target);
@@ -1692,6 +1728,19 @@ static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
                                                          const int filter,
                                                          const int generator)
 {
+  /* A Smart Filter definition's stack is not a working stack: its root rows are the chain's saved
+   * member corrections, which the descriptor and the composite unfolding read through every
+   * instance. A working row added here would be skipped by the chain descriptor (a layer among
+   * the members), lay in the definition's own composite nowhere the user expects, and make a
+   * re-save of the definition refuse the stack it no longer reads as members alone. The
+   * definition is authored in a working material and saved; this is the same refusal the Smart
+   * asset insert gives a definition. */
+  if (BKE_paint_layers_asset_is_filter_definition(*ma)) {
+    BKE_report(reports,
+               RPT_ERROR,
+               "This material is a Smart Filter definition; its stack cannot take new layers");
+    return nullptr;
+  }
   /* The authoring policy is the shared BKE one (#BKE_paint_layers_add_with_policy): the same
    * default names and channels every other authoring path gets. An empty name means the unique
    * default. */
@@ -2047,6 +2096,16 @@ static void rna_Material_paint_layers_remove(Material *ma,
                                              PointerRNA *layer_ptr)
 {
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(layer_ptr->data);
+  /* A Smart Filter definition member is the chain's saved correction, held at the definition's
+   * stack root for the material's whole life: removing it would take a member out of the chain
+   * every instance unfolds, behind the asset's back. The definition is edited by saving a new one
+   * from a working material, not by unstacking this one; the BKE remove refuses the same write. */
+  if (layer != nullptr && rna_paint_layer_is_definition_member(*ma, *layer)) {
+    BKE_report(reports,
+               RPT_ERROR,
+               "That layer is a saved member of a Smart Filter definition and cannot be removed");
+    return;
+  }
   if (!BKE_paint_layers_remove(*ma, layer)) {
     BKE_reportf(reports,
                 RPT_ERROR,
@@ -2080,6 +2139,16 @@ static void rna_Material_paint_layers_move(Material *ma,
   MaterialPaintLayer *anchor = (anchor_ptr != nullptr) ?
                                    static_cast<MaterialPaintLayer *>(anchor_ptr->data) :
                                    nullptr;
+  /* A Smart Filter definition member is not the script's to move: the member's place is the
+   * chain's order, which every instance unfolds in, and the definition is managed by the asset.
+   * The BKE move refuses a member as the anchor with it -- placing a working row beside a member
+   * would land it in the definition's root list, between the members the descriptor reads. */
+  if (layer != nullptr && rna_paint_layer_is_definition_member(*ma, *layer)) {
+    BKE_report(reports,
+               RPT_ERROR,
+               "That layer is a saved member of a Smart Filter definition and cannot be moved");
+    return;
+  }
   if (!BKE_paint_layers_move(*ma, layer, anchor, PaintLayerPlace(place))) {
     BKE_report(reports, RPT_ERROR, "Cannot move the paint layer relative to the given anchor");
     return;
@@ -2093,6 +2162,15 @@ static void rna_Material_paint_layers_reorder(Material *ma,
                                               int index)
 {
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(layer_ptr->data);
+  /* A Smart Filter definition member is not the script's to reorder: the member's place is the
+   * chain's order, which every instance unfolds in, and the definition is managed by the asset.
+   * The BKE reorder refuses the same write. */
+  if (layer != nullptr && rna_paint_layer_is_definition_member(*ma, *layer)) {
+    BKE_report(reports,
+               RPT_ERROR,
+               "That layer is a saved member of a Smart Filter definition and cannot be reordered");
+    return;
+  }
   if (!BKE_paint_layers_reorder(*ma, layer, index)) {
     BKE_report(reports, RPT_ERROR, "Cannot reorder a paint layer that is not part of the material");
     return;
@@ -2120,6 +2198,17 @@ static MaterialPaintLayer *rna_Material_paint_layers_group(Material *ma,
     BKE_report(reports, RPT_ERROR, "The paint layers are not part of this material");
     return nullptr;
   }
+  /* A Smart Filter definition member is not the script's to fold: a folder between the members
+   * would leave the root list the chain descriptor and the unfolding read, taking every member
+   * inside it out of the chain with it. The BKE group refuses the same write. */
+  if (rna_paint_layer_is_definition_member(*ma, *layer) ||
+      (with != nullptr && rna_paint_layer_is_definition_member(*ma, *with)))
+  {
+    BKE_report(reports,
+               RPT_ERROR,
+               "Saved members of a Smart Filter definition cannot be grouped");
+    return nullptr;
+  }
   MaterialPaintLayer *members[2] = {layer, with};
   MaterialPaintLayer *folder = BKE_paint_layers_group(
       *ma, Span<MaterialPaintLayer *>(members, (with != nullptr) ? 2 : 1));
@@ -2136,6 +2225,15 @@ static void rna_Material_paint_layers_ungroup(Material *ma,
                                               PointerRNA *folder_ptr)
 {
   MaterialPaintLayer *folder = static_cast<MaterialPaintLayer *>(folder_ptr->data);
+  /* A Smart Filter definition member is not the script's to unstack: an ungroup lifts rows into
+   * the list the chain descriptor and the unfolding read, so a member arriving there would change
+   * the chain behind the asset's back. The BKE ungroup refuses the same write. */
+  if (folder != nullptr && rna_paint_layer_is_definition_member(*ma, *folder)) {
+    BKE_report(reports,
+               RPT_ERROR,
+               "That layer is a saved member of a Smart Filter definition and cannot be ungrouped");
+    return;
+  }
   if (!rna_paint_layer_in_stack(*ma, folder) || !BKE_paint_layers_ungroup(*ma, folder)) {
     BKE_report(reports, RPT_ERROR, "Cannot ungroup this paint layer");
     return;
@@ -2153,6 +2251,18 @@ static MaterialPaintLayer *rna_Material_paint_layers_merge_down(Material *ma,
   MaterialPaintLayer *lower = static_cast<MaterialPaintLayer *>(lower_ptr->data);
   if (!rna_paint_layer_in_stack(*ma, upper) || !rna_paint_layer_in_stack(*ma, lower)) {
     BKE_report(reports, RPT_ERROR, "Merged rows must belong to this material");
+    return nullptr;
+  }
+  /* A Smart Filter definition member is not the script's to fold: the merge groups the pair, and
+   * a folder between the members would leave the root list the chain descriptor and the unfolding
+   * read, taking every member inside it out of the chain with it. The BKE group beneath the merge
+   * refuses the same write. */
+  if (rna_paint_layer_is_definition_member(*ma, *upper) ||
+      rna_paint_layer_is_definition_member(*ma, *lower))
+  {
+    BKE_report(reports,
+               RPT_ERROR,
+               "Saved members of a Smart Filter definition cannot be merged");
     return nullptr;
   }
   MaterialPaintLayer *folder = BKE_paint_layers_edit_merge_down(*ma, *upper, *lower);
@@ -5436,6 +5546,17 @@ static MaterialPaintLayer *rna_MaterialPaintLayer_mask_filter_add(PointerRNA ptr
     BKE_report(reports, RPT_ERROR, "Paint layer is not part of this material");
     return nullptr;
   }
+  /* A Smart Filter definition member takes no mask filter: the chain's unfolding reads the
+   * member's own kind and payloads alone, so a filter hung on its mask would fold nowhere and sit
+   * unread. The BKE add refuses the same write; the report is what a script reads, so the prefix
+   * stays the one every definition-member refusal shares and the tail names the refused action. */
+  if (rna_paint_layer_is_definition_member(*ma, *layer)) {
+    BKE_report(reports,
+               RPT_ERROR,
+               "That layer is a saved member of a Smart Filter definition and takes no mask "
+               "filters");
+    return nullptr;
+  }
   MaterialPaintLayer *item = BKE_paint_layers_mask_filter_add(
       *ma, layer, eMaterialPaintLayerFilter(filter_type));
   if (item == nullptr) {
@@ -5505,6 +5626,18 @@ static MaterialPaintLayer *rna_MaterialPaintLayer_effect_add(PointerRNA ptr,
     /* The shared authoring policy numbers an empty name among this layer's own corrections, and
      * the Filter and Generator kinds carry the filter and generator in their params, the way the
      * Outliner's Add does. */
+    /* A Smart Filter definition member takes no corrections: the chain's unfolding reads the
+     * member's own kind and payloads alone, so a correction hung on it would sit there unread --
+     * laid nowhere, visible nowhere. The helper asks the member predicate only on a stack row, so
+     * this method's aim at an ordinary correction (another one on the row it hangs on) passes.
+     * The BKE add beneath the policy refuses the same write. */
+    if (rna_paint_layer_is_definition_member(*ma, *layer)) {
+      BKE_report(
+          reports,
+          RPT_ERROR,
+          "That layer is a saved member of a Smart Filter definition and takes no corrections");
+      return nullptr;
+    }
     PaintLayerAddParams params;
     params.anchor = layer;
     params.name = (name != nullptr && name[0] != '\0') ? name : nullptr;
@@ -5532,6 +5665,17 @@ static MaterialPaintLayer *rna_MaterialPaintLayer_mask_item_add(PointerRNA ptr,
   }
   MaterialPaintLayer *layer = nullptr;
   if (Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer)) {
+    /* A Smart Filter definition member takes no mask corrections: the chain's unfolding reads the
+     * member's own kind and payloads alone, so an item hung on its mask would fold nowhere and
+     * sit unread. The BKE add beneath the policy refuses the same write; the report keeps the
+     * prefix every definition-member refusal shares, with the tail naming the refused action. */
+    if (rna_paint_layer_is_definition_member(*ma, *layer)) {
+      BKE_report(reports,
+                 RPT_ERROR,
+                 "That layer is a saved member of a Smart Filter definition and takes no mask "
+                 "corrections");
+      return nullptr;
+    }
     /* The policy makes the base mask first when the layer has none, and numbers an empty name among
      * this layer's own mask items. */
     PaintLayerAddParams params;
@@ -5567,6 +5711,15 @@ static MaterialPaintLayer *rna_MaterialPaintLayer_mask_add(PointerRNA ptr,
 {
   MaterialPaintLayer *layer = nullptr;
   if (Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer)) {
+    /* A Smart Filter definition member takes no mask: the chain's unfolding reads the member's
+     * own kind and payloads alone, so a mask built under it would fold nowhere and sit unread.
+     * The BKE add refuses the same write. */
+    if (rna_paint_layer_is_definition_member(*ma, *layer)) {
+      BKE_report(reports,
+                 RPT_ERROR,
+                 "That layer is a saved member of a Smart Filter definition and takes no mask");
+      return nullptr;
+    }
     if (MaterialPaintLayer *item = BKE_paint_layers_mask_add(*ma, layer, value)) {
       return item;
     }
@@ -7148,6 +7301,7 @@ static void rna_def_material_smart_asset_instance(BlenderRNA *brna)
       {1, "MATERIAL", 0, "Smart Material", ""},
       {2, "LAYER", 0, "Smart Layer", ""},
       {3, "MASK", 0, "Smart Mask", ""},
+      {4, "FILTER", 0, "Smart Filter", ""},
       {0, nullptr, 0, nullptr, nullptr},
   };
   prop = RNA_def_property(srna, "type", PROP_ENUM, PROP_NONE);

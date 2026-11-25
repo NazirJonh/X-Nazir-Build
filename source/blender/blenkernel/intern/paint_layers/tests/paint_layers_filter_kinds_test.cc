@@ -1825,4 +1825,94 @@ TEST_F(PaintLayersFilterKindsTest, node_group_generator_kind_is_a_dynamic_schema
       << "the pattern is the row's own tree, not a shared group a factory makes";
 }
 
+TEST_F(PaintLayersFilterKindsTest, smart_filter_chain_kind_is_a_dynamic_schema_operator)
+{
+  /* The chain: one row for a definition's effect rows, as a content correction or a mask item
+   * (the members fold the mask grey the same way the mask filters do). */
+  Material *ma = BKE_material_add(bmain, "SmartFilterChainKindMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  MaterialPaintLayer *chain = BKE_paint_layers_filter_add(*ma, row, MA_PAINT_LAYER_FILTER_CHAIN);
+  ASSERT_NE(chain, nullptr);
+  EXPECT_TRUE(paint_layer_kind_has_flag(*chain, PAINT_LAYER_KIND_DYNAMIC_SCHEMA));
+  EXPECT_FALSE(paint_layer_kind_has_flag(*chain, PAINT_LAYER_KIND_NEEDS_BAKE));
+  chain->role = MA_PAINT_LAYER_ROLE_EFFECT;
+  EXPECT_TRUE(paint_layer_kind_role_allowed(*chain));
+  chain->role = MA_PAINT_LAYER_ROLE_MASK_ITEM;
+  EXPECT_TRUE(paint_layer_kind_role_allowed(*chain));
+  chain->role = MA_PAINT_LAYER_ROLE_EFFECT;
+}
+
+TEST_F(PaintLayersFilterKindsTest, node_group_vector_param_reads_the_socket_default)
+{
+  Material *ma = BKE_material_add(bmain, "NGVectorDefaultMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  MaterialPaintLayer *group = BKE_paint_layers_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_NODE_GROUP);
+  ASSERT_NE(group, nullptr);
+
+  /* A definition with one vector parameter beside the convention's sockets, its default set on the
+   * socket the way the Shader Editor's RNA would set it. */
+  bNodeTree *tree = bke::node_tree_add_tree(bmain, "NG Vector Default", "ShaderNodeTree");
+  ASSERT_NE(tree, nullptr);
+  tree->tree_interface.add_socket(
+      "Result", "", "NodeSocketColor", NODE_INTERFACE_SOCKET_OUTPUT, nullptr);
+  tree->tree_interface.add_socket(
+      "Input", "", "NodeSocketColor", NODE_INTERFACE_SOCKET_INPUT, nullptr);
+  tree->tree_interface.add_socket(
+      "Offset", "", "NodeSocketVector", NODE_INTERFACE_SOCKET_INPUT, nullptr);
+  bNodeSocketValueVector *vector_data = nullptr;
+  tree->tree_interface.root_panel.foreach_item(
+      [&](bNodeTreeInterfaceItem &item) {
+        if (item.item_type != NodeTreeInterfaceItemType::Socket) {
+          return true;
+        }
+        bNodeTreeInterfaceSocket &socket = reinterpret_cast<bNodeTreeInterfaceSocket &>(item);
+        if (StringRef(socket.name) == "Offset" && socket.socket_data != nullptr) {
+          vector_data = static_cast<bNodeSocketValueVector *>(socket.socket_data);
+        }
+        return true;
+      },
+      /*include_self=*/false);
+  ASSERT_NE(vector_data, nullptr);
+  vector_data->value[0] = 1.0f;
+  vector_data->value[1] = 0.5f;
+  vector_data->value[2] = 0.25f;
+
+  group->kind_tree = tree;
+  const PaintLayerKindInfo *info = paint_layer_kind_of(*group);
+  ASSERT_NE(info, nullptr);
+  int vector_index = -1;
+  for (const int i : IndexRange(info->params_num)) {
+    if (info->params[i].type == PaintLayerKindParamType::Vector) {
+      vector_index = i;
+      break;
+    }
+  }
+  ASSERT_GE(vector_index, 0) << "the interface's vector input is a parameter";
+
+  /* Without a stored value the accessor answers the socket's own default, not a zero: the vector
+   * accessors read the #default_color slots the schema builds, and a schema that left them empty
+   * would read every vector parameter as (0, 0, 0) whatever the tree said. */
+  float vector[3] = {0.0f, 0.0f, 0.0f};
+  paint_layer_kind_param_vector_get(*group, vector_index, vector);
+  EXPECT_FLOAT_EQ(vector[0], 1.0f);
+  EXPECT_FLOAT_EQ(vector[1], 0.5f);
+  EXPECT_FLOAT_EQ(vector[2], 0.25f);
+
+  /* The seed stores the same default, so the panel's first read does not snap the value to zero
+   * and back. */
+  paint_layer_kind_params_init(*group);
+  const IDProperty *prop = IDP_GetPropertyFromGroup(group->system_properties,
+                                                    info->params[vector_index].name);
+  ASSERT_NE(prop, nullptr);
+  ASSERT_EQ(prop->type, IDP_ARRAY);
+  ASSERT_EQ(prop->len, 3);
+  const float *stored = IDP_array_float_get(prop);
+  EXPECT_FLOAT_EQ(stored[0], 1.0f);
+  EXPECT_FLOAT_EQ(stored[1], 0.5f);
+  EXPECT_FLOAT_EQ(stored[2], 0.25f);
+}
+
 }  // namespace blender::bke::tests

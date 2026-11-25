@@ -1056,6 +1056,12 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
                 # A transform effect keeps its mapping as its parameter set: the Mapping panel and
                 # the gizmo edit it, and there is nothing else on the row to draw.
                 return
+            # A chain instance's schema is the aggregate of its definition's members: the sliders
+            # carry the "<member> · <parameter>" labels the descriptor built, and the values are
+            # the instance's own overrides. A payload parameter of a member is not offered to the
+            # instance, so the payload widgets below would edit the chain row's own, unused
+            # payloads -- the unfolding reads the members' -- and are left out.
+            is_chain = layer.filter_type == 'CHAIN'
             if layer.reads_image_slot:
                 # The slot comes first, where the eye lands: the kind reads the image it is given,
                 # and the parameters below are the targets it feeds.
@@ -1066,13 +1072,13 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
                 draw_material_kind_params(layout, layer.kind_params)
             if layer.kind_needs_bake:
                 draw_material_update_now(layout, owner)
-            if layer.ramp_supported:
+            if layer.ramp_supported and not is_chain:
                 layout.template_color_ramp(layer, "kind_ramp", expand=True)
-            if layer.curves_supported:
+            if layer.curves_supported and not is_chain:
                 layout.template_curve_mapping(layer, "kind_curves", type='COLOR', live_update=True)
-            if layer.color_balance_supported:
+            if layer.color_balance_supported and not is_chain:
                 draw_material_color_balance(layout, layer.kind_color_balance)
-            if layer.channel_mixer_supported:
+            if layer.channel_mixer_supported and not is_chain:
                 draw_material_channel_mixer(layout, layer.kind_channel_mixer)
             # The channels it works in, switched like a layer's; Base Color is on to start with.
             layout.separator()
@@ -1098,12 +1104,17 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
         draw_material_layer_height(layout, owner, layer)
 
 
-def _smart_asset_instance_root_rows(ma, instance_id):
+def _smart_asset_instance_root_rows(ma, instance_id, is_filter):
     """The roots of one smart-asset instance: the rows its drop laid down, at any depth.
 
     A drop Into a folder lays its rows nested, so the top-level rows alone miss them. The walk
     stops at a root it collected: its children draw with it, and a root of the same instance
-    nested under it is drawn once, as part of the root's own subtree.
+    nested under it is drawn once, as part of the root's own subtree. A Smart Filter's root is no
+    stack row at all but the chain correction its drop laid on a target, so the corrections hang
+    off each row's effects and answer for the instance through the record the same way. The
+    effects walk is the Filter's alone: the other types lay no roots as corrections, and walking
+    their rows' effects anyway would draw a Material or Layer instance's marker on a correction
+    (a copied one, say) as one of its roots.
     """
     rows = []
 
@@ -1111,6 +1122,9 @@ def _smart_asset_instance_root_rows(ma, instance_id):
         if row.smart_asset_instance_id == instance_id:
             rows.append(row)
             return
+        if is_filter:
+            for effect in row.effects:
+                walk(effect)
         for child in row.children:
             walk(child)
 
@@ -1214,7 +1228,7 @@ class LAYER_MATERIAL_PT_smart_asset_params(LayerMaterialButtonsPanel, Panel):
                 header.label(text=inst.label, icon='SOLO_ON' if is_active else 'MATERIAL')
                 if not body:
                     continue
-                rows = _smart_asset_instance_root_rows(ma, inst.id)
+                rows = _smart_asset_instance_root_rows(ma, inst.id, inst.type == 'FILTER')
                 if not draw_material_smart_asset_rows(body, rows):
                     body.label(text="The asset exposes no parameters", icon='INFO')
             body.separator()

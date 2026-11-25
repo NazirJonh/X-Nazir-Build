@@ -11,6 +11,8 @@
  */
 
 #include "BKE_paint_layers.hh"
+/* The definition-member predicate that guards the writes a Smart Filter definition refuses. */
+#include "BKE_paint_layers_asset.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_curve_patch_object.hh"
 #include "BKE_paint_layers_generate.hh"
@@ -1089,6 +1091,15 @@ MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
   if (!paint_layer_in_stack(ma, owner)) {
     return nullptr;
   }
+  /* A Smart Filter definition member takes no corrections: the chain's unfolding reads the
+   * member's own kind and payloads alone, so a correction hung on it sits there unread -- laid
+   * nowhere, visible nowhere, a silent corruption of the definition the asset owns. The owner is a
+   * stack row here (checked above), which is the one shape the member predicate may be asked on.
+   * The editor paths are refused earlier; this closes the raw BKE one, and the RNA layer reports
+   * the definition contract to a script. */
+  if (BKE_paint_layers_asset_row_is_definition_member(*owner)) {
+    return nullptr;
+  }
   if (!ELEM(source,
             MA_PAINT_LAYER_SOURCE_IMAGE,
             MA_PAINT_LAYER_SOURCE_CONSTANT,
@@ -1099,12 +1110,18 @@ MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
   }
   const bool fill = source == MA_PAINT_LAYER_SOURCE_CONSTANT;
   const bool generates = source == MA_PAINT_LAYER_SOURCE_GENERATOR;
-  MaterialPaintLayer *effect = paint_layer_alloc(ma,
-                                                 name != nullptr ?
-                                                     name :
-                                                     (fill      ? "Correction Fill" :
-                                                      generates ? "Gradient Correction" :
-                                                                  "Correction Paint"));
+  const bool reads_node_group = source == MA_PAINT_LAYER_SOURCE_NODE_GROUP;
+  const char *default_name = "Correction Paint";
+  if (fill) {
+    default_name = "Correction Fill";
+  }
+  else if (generates) {
+    default_name = "Gradient Correction";
+  }
+  else if (reads_node_group) {
+    default_name = "Node Group Correction";
+  }
+  MaterialPaintLayer *effect = paint_layer_alloc(ma, name != nullptr ? name : default_name);
   effect->role = MA_PAINT_LAYER_ROLE_EFFECT;
   effect->source = source;
   BLI_addtail(&owner->effects, effect);
@@ -1168,6 +1185,13 @@ MaterialPaintLayer *BKE_paint_layers_correction_add_material(Material &ma,
   if (!paint_layer_in_stack(ma, owner) || source == nullptr ||
       BKE_paint_layers_material_depends_on(*source, ma))
   {
+    return nullptr;
+  }
+  /* A Smart Filter definition member takes no corrections, a Material-sourced one included: the
+   * unfolding reads the member's own kind and payloads alone, so anything hung on the member sits
+   * unread. The owner is a stack row here, which is the shape the member predicate may be asked
+   * on; the RNA layer reports the contract to a script this refuses. */
+  if (BKE_paint_layers_asset_row_is_definition_member(*owner)) {
     return nullptr;
   }
   MaterialPaintLayer *effect = paint_layer_alloc(ma,
@@ -1806,6 +1830,13 @@ MaterialPaintLayer *BKE_paint_layers_filter_add(Material &ma,
   {
     return nullptr;
   }
+  /* A Smart Filter definition member takes no effects of its own: the member IS the effect the
+   * chain unfolds, and the unfolding reads its kind and payloads alone, so another effect hung on
+   * it sits unread. The owner is a stack row here (checked above), which is the shape the member
+   * predicate may be asked on; the RNA layer reports the contract to a script this refuses. */
+  if (BKE_paint_layers_asset_row_is_definition_member(*owner)) {
+    return nullptr;
+  }
   /* A transform effect moves the maps its owner reads: only a row that lays or reads content of
    * its own takes one, and the owner's own kind is the one place that rule lives. */
   if ((kind->flags & PAINT_LAYER_KIND_TRANSFORMS_INPUT) != 0 &&
@@ -1924,6 +1955,14 @@ bool BKE_paint_layers_remove(Material &ma, MaterialPaintLayer *layer)
   if (!paint_layer_in_stack(ma, layer)) {
     return false;
   }
+  /* A Smart Filter definition member is the chain's saved correction, held at the definition's
+   * stack root for the material's whole life: removing it would take a member out of the chain
+   * every instance unfolds, behind the asset's back. The definition is edited by saving a new one
+   * from a working material, not by unstacking this one; the RNA layer reports the contract to a
+   * script this refuses. */
+  if (BKE_paint_layers_asset_row_is_definition_member(*layer)) {
+    return false;
+  }
 
   /* The cursor is cleared when it names the row or anything freed with it. */
   if (!BLI_uuid_is_nil(ma.active_layer_marker) &&
@@ -1978,6 +2017,13 @@ MaterialPaintLayer *BKE_paint_layers_mask_add(Material &ma,
                                               const float value)
 {
   if (!paint_layer_in_stack(ma, layer) || BKE_paint_layers_mask_base(*layer) != nullptr) {
+    return nullptr;
+  }
+  /* A Smart Filter definition member takes no mask: the unfolding reads the member's kind and
+   * payloads alone, so a mask built under it would fold nowhere and sit unread. The layer is a
+   * stack row here (checked above), which is the shape the member predicate may be asked on; the
+   * RNA layer reports the contract to a script this refuses. */
+  if (BKE_paint_layers_asset_row_is_definition_member(*layer)) {
     return nullptr;
   }
   /* The base mask is a constant item with the Multiply blend, so the row's coverage starts at
@@ -2067,6 +2113,13 @@ MaterialPaintLayer *BKE_paint_layers_mask_item_add(Material &ma,
   if (!paint_layer_in_stack(ma, layer) || BKE_paint_layers_mask_base(*layer) == nullptr) {
     return nullptr;
   }
+  /* A Smart Filter definition member takes no mask corrections: the unfolding reads the member's
+   * kind and payloads alone, so an item hung on its mask would fold nowhere and sit unread. The
+   * layer is a stack row here (checked above), which is the shape the member predicate may be
+   * asked on; the RNA layer reports the contract to a script this refuses. */
+  if (BKE_paint_layers_asset_row_is_definition_member(*layer)) {
+    return nullptr;
+  }
   if (!ELEM(source,
             MA_PAINT_LAYER_SOURCE_IMAGE,
             MA_PAINT_LAYER_SOURCE_CONSTANT,
@@ -2128,6 +2181,14 @@ MaterialPaintLayer *BKE_paint_layers_mask_filter_add(Material &ma,
       BKE_paint_layers_mask_base(*layer) == nullptr ||
       (kind->allowed_roles & paint_layer_role_bit(MA_PAINT_LAYER_ROLE_MASK_ITEM)) == 0)
   {
+    return nullptr;
+  }
+  /* A Smart Filter definition member takes no mask filter: the unfolding reads the member's kind
+   * and payloads alone, so a filter hung on its mask would fold nowhere and sit unread -- a silent
+   * corruption of the definition the asset owns. The layer is a stack row here (checked above),
+   * which is the shape the member predicate may be asked on; the RNA layer reports the contract to
+   * a script this refuses. */
+  if (BKE_paint_layers_asset_row_is_definition_member(*layer)) {
     return nullptr;
   }
   MaterialPaintLayer *item = paint_layer_alloc(ma, name != nullptr ? name : kind->name);
@@ -2637,6 +2698,15 @@ MaterialPaintLayer *BKE_paint_layers_correction_paste(Main &bmain,
   if (!paint_layer_in_stack(ma, target) || !BKE_paint_layers_correction_can_paste(source, *target)) {
     return nullptr;
   }
+  /* A Smart Filter definition member takes no pasted correction: the unfolding reads the member's
+   * kind and payloads alone, so a copy hung on it sits unread. #BKE_paint_layers_correction_can_paste
+   * already refuses any non-layer target, which a member always is; this names the contract at the
+   * paste entry point itself, so it does not lean on that rule's incidental shape. The target is a
+   * stack row here (checked above), which is the shape the member predicate may be asked on; the
+   * RNA layer reports the contract to a script this refuses. */
+  if (BKE_paint_layers_asset_row_is_definition_member(*target)) {
+    return nullptr;
+  }
   /* Why copy the images: a map is painted in place, so a pasted correction sharing its source's
    * image would turn every stroke on one into a stroke on the other. */
   MaterialPaintLayer *copy = paint_layer_item_duplicate(bmain, ma, source);
@@ -2817,11 +2887,25 @@ bool BKE_paint_layers_move(Material &ma,
   if (!paint_layer_in_stack(ma, layer) || anchor == layer) {
     return false;
   }
+  /* A Smart Filter definition member is not the script's to move: the member's place is the
+   * chain's order, which every instance unfolds in, and the definition is managed by the asset.
+   * The layer is a stack row here (checked above), the shape the member predicate may be asked
+   * on; the RNA layer reports the contract to a script this refuses. */
+  if (BKE_paint_layers_asset_row_is_definition_member(*layer)) {
+    return false;
+  }
   if (anchor != nullptr) {
     /* A row moved into its own subtree would walk itself to reach itself. */
     if (!paint_layer_anchor_valid(ma, anchor, place) ||
         BKE_paint_layers_subtree_contains(*layer, anchor->marker))
     {
+      return false;
+    }
+    /* A member as the anchor is refused with it -- placing a working row beside a member would
+     * land it in the definition's root list, between the members the descriptor reads. The
+     * anchor is a stack row here (validated above), so the predicate is asked the shape it
+     * reads. */
+    if (BKE_paint_layers_asset_row_is_definition_member(*anchor)) {
       return false;
     }
   }
@@ -2835,6 +2919,13 @@ bool BKE_paint_layers_move(Material &ma,
 bool BKE_paint_layers_reorder(Material &ma, MaterialPaintLayer *layer, int index)
 {
   if (!paint_layer_in_stack(ma, layer)) {
+    return false;
+  }
+  /* A Smart Filter definition member is not the script's to reorder: the member's place is the
+   * chain's order, which every instance unfolds in, and the definition is managed by the asset.
+   * The layer is a stack row here (checked above), which is the shape the member predicate may be
+   * asked on; the RNA layer reports the contract to a script this refuses. */
+  if (BKE_paint_layers_asset_row_is_definition_member(*layer)) {
     return false;
   }
   PaintLayerList *owner = BKE_paint_layers_owner_list(ma, *layer);
@@ -2871,6 +2962,14 @@ MaterialPaintLayer *BKE_paint_layers_group(Material &ma, const Span<MaterialPain
       return nullptr;
     }
     owner = layer_owner;
+    /* A Smart Filter definition member is not the script's to fold: a folder between the members
+     * would leave the root list the chain descriptor and the unfolding read, taking every member
+     * inside it out of the chain with it. The row is a stack row here (checked above), the shape
+     * the member predicate may be asked on; the RNA layer reports the contract to a script this
+     * refuses. The merge-down edit groups through here, so it refuses with the same rule. */
+    if (BKE_paint_layers_asset_row_is_definition_member(*layer)) {
+      return nullptr;
+    }
   }
 
   /* The members are taken in the order of the list, not of \a layers, so their relative order
@@ -2910,6 +3009,14 @@ bool BKE_paint_layers_ungroup(Material &ma, MaterialPaintLayer *folder)
   }
   PaintLayerList *owner = BKE_paint_layers_owner_list(ma, *folder);
   if (owner == nullptr || !BKE_paint_layers_is_folder(*folder)) {
+    return false;
+  }
+  /* A Smart Filter definition member is not the script's to unstack: an ungroup lifts rows into
+   * the list the chain descriptor and the unfolding read, so a member arriving there would change
+   * the chain behind the asset's back. A proper definition holds no folders (its members are
+   * corrections the member predicate names), so this is the contract stated at the entry point;
+   * the RNA layer reports it to a script this refuses. */
+  if (BKE_paint_layers_asset_row_is_definition_member(*folder)) {
     return false;
   }
 

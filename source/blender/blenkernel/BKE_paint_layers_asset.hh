@@ -27,6 +27,7 @@
 #include "BKE_paint_layers_import.hh"
 
 #include "DNA_ID.h"
+#include "DNA_material_types.h"
 
 namespace blender {
 
@@ -45,9 +46,19 @@ enum class PaintLayerAssetType : int8_t {
   Layer = 2,
   /** One row's mask stack. */
   Mask = 3,
+  /**
+   * A chain of pointwise filter corrections saved as one definition: the asset material's stack
+   * holds the effect rows themselves (their roles kept), and an insert lays a single
+   * #MA_PAINT_LAYER_FILTER_CHAIN row that reads the asset and unfolds the members over the target
+   * row's colour. The members' shapes are restricted -- see
+   * #PaintLayerAssetPortability::chain_unsupported_num -- because the chain's composite unfolding
+   * lays pointwise corrections only.
+   */
+  Filter = 4,
 };
 
-/** The user-facing name of a Smart asset of \a type ("Smart Material", "Smart Layer", "Smart Mask"). */
+/** The user-facing name of a Smart asset of \a type ("Smart Material", "Smart Layer", "Smart
+ * Mask", "Smart Filter"). */
 const char *BKE_paint_layers_asset_type_label(PaintLayerAssetType type);
 
 /**
@@ -78,10 +89,25 @@ struct PaintLayerAssetPortability {
   int mesh_map_num = 0;
   /** Active object masks that will not be saved. */
   int object_mask_num = 0;
+  /**
+   * How many member rows a #PaintLayerAssetType::Filter save judged, informational. A member is a
+   * saved effect row; the count is what a report names when the save was refused for reasons the
+   * members themselves are not to blame for.
+   */
+  int chain_member_num = 0;
+  /**
+   * Blocking, and for a #PaintLayerAssetType::Filter save only (the walk below writes it for no
+   * other type, so the field is zero -- and silent -- everywhere else). A Smart Filter's members
+   * must be pointwise filter corrections: the chain's composite unfolding lays those alone, so a
+   * member of any other shape (a Blur, a transform, a map-coverage operator, an Anchor Point
+   * reader, a row that reads an image slot, a nested chain) or any saved row that is not an effect
+   * row at all (a content layer, a folder) would arrive as a definition the unfolding cannot lay.
+   */
+  int chain_unsupported_num = 0;
 
   bool blocking() const
   {
-    return curve_patch_num > 0 || text_decal_num > 0;
+    return curve_patch_num > 0 || text_decal_num > 0 || chain_unsupported_num > 0;
   }
 };
 
@@ -90,13 +116,51 @@ struct PaintLayerAssetPortability {
  *
  * The walk follows the branch saved by the type: #PaintLayerAssetType::Mask visits only the single
  * row's mask stack, every other type visits rows, effects, mask items and children. An Anchor
- * Point Reader counts as foreign when its marker belongs to no node of the saved branch.
+ * Point Reader counts as foreign when its marker belongs to no node of the saved branch. A Filter
+ * save judges \a rows themselves instead of what hangs under them -- the members are the saved
+ * rows -- and counts every one the chain contract refuses into #chain_unsupported_num.
  */
 PaintLayerAssetPortability BKE_paint_layers_asset_portability_check(
     const Material &source, Span<const MaterialPaintLayer *> rows, PaintLayerAssetType type);
 
 /** The asset type stored on \a ma, or None when it is not a smart asset. */
 PaintLayerAssetType BKE_paint_layers_asset_type_get(const Material &ma);
+
+/**
+ * Whether \a ma is a Smart Filter definition: a Filter asset's material, whose stack holds the
+ * chain's saved member corrections at the root instead of a working stack.
+ *
+ * A definition's stack is not a stack the user works in: the rows are the chain definition the
+ * dynamic descriptor and the composite unfolding read through every instance's
+ * #MaterialPaintLayer::material pointer, and they stay effect rows at the stack root for the
+ * material's whole life. Every path that would write a working row into it (an insert, a new
+ * layer, a save of it as another chain) asks this first and refuses, the way it would refuse a
+ * linked or overridden material: polluting the definition would either change every instance of
+ * the filter behind the user's back (a working row lands in the definition's own composite) or
+ * silently do nothing (a correction the unfolding never reads).
+ */
+bool BKE_paint_layers_asset_is_filter_definition(const Material &ma);
+
+/**
+ * Whether \a row, read as a row of a stack, is a Smart Filter definition member: a stack row
+ * whose role is not #MA_PAINT_LAYER_ROLE_LAYER.
+ *
+ * The members of a Filter definition are corrections saved whole, copied by
+ * #BKE_paint_layers_asset_create into the asset material's stack root with their roles kept --
+ * the one writer that lays non-layer rows into a stack list. An ordinary material's stack lists
+ * (the root and a folder's children) only ever hold layer and folder rows, so a stack walk that
+ * meets a non-layer row in them is looking at a definition member (or at a row an edit made
+ * around the API, which is skipped the same way). Corrections and mask items are not stack rows:
+ * they hang on a row's effects and mask lists, and a caller walking those must not ask this
+ * there, where the non-layer role is the normal shape.
+ *
+ * Stack walks use this to skip members or draw them inert; the material-level question of
+ * whether a walk is even looking at a definition is #BKE_paint_layers_asset_is_filter_definition.
+ */
+inline bool BKE_paint_layers_asset_row_is_definition_member(const MaterialPaintLayer &row)
+{
+  return row.role != MA_PAINT_LAYER_ROLE_LAYER;
+}
 
 /**
  * The Asset Browser catalog a new smart asset of \a type is placed in by default, e.g. for a mask
@@ -144,6 +208,13 @@ const MaterialPaintLayer *BKE_paint_layers_asset_mask_holder_find(const Material
  * predicate behind both the drop's `can_accept` and #BKE_paint_layers_asset_insert, so a gesture
  * the UI accepts cannot fail silently later.
  *
+ * A Filter asset is its own shape: it does not land beside rows like the row-holding types, it
+ * lands ON something, and the aim names which. A stack row takes the chain as that row's
+ * correction (\a place is not read there); one of a row's mask corrections takes it as a mask item
+ * of the mask they belong to, the same aim the image drop reads -- a line beside a mask correction
+ * means the mask. A definition member is refused as the target of either landing, on top of the
+ * refusal a definition material gets whole.
+ *
  * \param r_reason: when the answer is false, a translated hint for the UI; unchanged otherwise.
  */
 bool BKE_paint_layers_asset_can_insert(const Material &dst,
@@ -154,7 +225,8 @@ bool BKE_paint_layers_asset_can_insert(const Material &dst,
 
 /**
  * Create a new Material holding copies of \a rows (or of the single row's mask, for
- * #PaintLayerAssetType::Mask) from \a source.
+ * #PaintLayerAssetType::Mask; or the effect rows as the chain definition's members, for
+ * #PaintLayerAssetType::Filter) from \a source.
  *
  * A Layer asset holds exactly one stack row (a folder counts as one); a Mask asset holds exactly
  * one row's mask. The material is not marked as an asset here: that is the editor's job
@@ -430,6 +502,24 @@ int BKE_paint_layers_asset_instance_record_mask(Material &ma,
                                                 bool add_corrections,
                                                 Span<const MaterialPaintLayer *> imported_items);
 
+/**
+ * Record a fresh instance of a Smart Filter's mask landing: the chain \a imported_items (one item,
+ * the landing lays one) are on \a target's mask, laid over it -- never replacing it, the way the
+ * Add Corrections mode of a Smart Mask drop behaves, so the mode is recorded as that. The record
+ * is the mask instance's shape with the Filter type: it names \a target by its marker and the laid
+ * item by its marker, so the instance panel lists the drop, Make Unique ends its binding through
+ * the item's parameter markers, and a future mask reload can find what this landing laid. A reload
+ * of a Filter instance is a no-op in this version -- the reload refuses the type before it reads
+ * any of the mask members -- so the record is a finding aid, not a contract the reload answers.
+ *
+ * \return the new instance's id.
+ */
+int BKE_paint_layers_asset_instance_record_filter_mask(
+    Material &ma,
+    const Material &source,
+    const MaterialPaintLayer &target,
+    Span<const MaterialPaintLayer *> imported_items);
+
 /** What #BKE_paint_layers_asset_reload came back with. */
 enum class PaintLayerAssetReloadResult : int8_t {
   /** The rows (or the mask) were replaced from the source; parameter values were carried over. */
@@ -473,6 +563,16 @@ bool BKE_paint_layers_mask_branch_has_anchor(const MaterialPaintLayer &row);
  * decides the import mode and flags; the caller only names the destination. File textures are read
  * by reference (#PaintLayerImageImportPolicy::Share): a drop must not mint a copy of the same image
  * every time, and a stroke on a shared map copies it first.
+ *
+ * A Filter asset imports no rows: the insert is the single chain row laid as \a anchor's
+ * correction, or -- when \a anchor names one of a row's mask corrections -- as one mask item of
+ * that row's mask, beside the aimed item (see #BKE_paint_layers_asset_can_insert). Either landing
+ * reads the asset material as its definition, seeds the exposed member values the asset carries
+ * into the instance's own properties, and names what it laid through \a r_result: the chain row in
+ * #PaintLayerImportResult::imported for the content landing, the mask item in
+ * #imported_mask_items with the target row as #first for the mask one. There is deliberately no
+ * plain rows-insert path for the type: the definition's members are corrections, and importing
+ * them as stack rows would lay nothing.
  *
  * \param append_mask: Smart Mask only; lay the asset's corrections over the target's own mask
  * instead of replacing it.

@@ -52,6 +52,7 @@
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_asset.hh"
 #include "BKE_paint_layers_edit.hh"
 #include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_layers_gradient_surface.hh"
@@ -875,6 +876,18 @@ void paint_stack_rows_append(const Material &material,
       overflow = true;
       return;
     }
+    /* A Smart Filter definition's stack holds the chain's saved member corrections at the root,
+     * not a working stack. The members are skipped here, and the same predicate skips them in the
+     * ordinal walk below (#paint_rows_walk), so the rows this build lists and the rows every
+     * ordinal-addressed edit resolves stay one sequence: a member is visible nowhere in the stack
+     * view and reachable by no ordinal. The stack view says why with the note row
+     * #paint_stack_rows_from_description appends; the members' parameters are edited through the
+     * asset's own exposed-parameters panel, and the definition's shape is authored in a working
+     * material before the save. An ordinary material's stack lists hold layer and folder rows
+     * only, so the predicate changes nothing there. */
+    if (BKE_paint_layers_asset_row_is_definition_member(layer)) {
+      continue;
+    }
     const bool folder = BKE_paint_layers_is_folder(layer);
     StackRow row;
     row.ordinal = int16_t(ordinal++);
@@ -1165,6 +1178,27 @@ void paint_stack_rows_from_description(const Material &material,
     overflow_row.icon = ICON_IMAGE_RGB;
     r_rows.append(std::move(overflow_row));
   }
+  else if (BKE_paint_layers_asset_is_filter_definition(material)) {
+    /* The members the walk above skipped are the stack's whole content, so the view would read as
+     * an empty stack and say nothing about why. One inert row carries the note instead: no
+     * identity of its own (nothing to activate, select or remember), no controls, and the
+     * not-supported badge is where the reason lives. It sits after every listed row, so its
+     * ordinal is past the ordinal walk's count and no edit can resolve it to a member. */
+    StackRow note_row;
+    note_row.ordinal = int16_t(ordinal++);
+    note_row.supported = false;
+    note_row.unsupported_reason =
+        "Smart Filter definition: the rows are the filter's saved corrections; edit the filter's "
+        "parameters through the asset's panel";
+    note_row.name = "Smart Filter Definition";
+    /* The chain's own look from the filter table: the row reads as the filter it is, not as a
+     * layer that lost its content. */
+    const PaintKindLook chain_look = paint_look_for_source(
+        MA_PAINT_LAYER_SOURCE_FILTER, PaintLookRole::Content, MA_PAINT_LAYER_FILTER_CHAIN);
+    note_row.icon = chain_look.icon;
+    note_row.glyph = chain_look.glyph;
+    r_rows.append(std::move(note_row));
+  }
 }
 
 namespace {
@@ -1174,6 +1208,14 @@ namespace {
  * its mask's, then what a folder holds. #paint_stack_rows_append hands out the ordinals in this same order, so
  * the two cannot disagree about which row an ordinal names. Stops when \a fn returns false.
  *
+ * The stack lists this walk runs over hold Smart Filter definition members in a definition
+ * material -- effect rows at the root the row builder skips (#paint_stack_rows_append) -- so the
+ * main loop skips them by the same predicate, and the ordinals the two sides hand out stay one
+ * sequence: a member is reachable by no ordinal, and an edit aimed at one is refused by finding
+ * nothing. The corrections and mask items are visited through the effects and mask loops below,
+ * which this skip does not touch: their non-layer role is their normal shape. In an ordinary
+ * material the stack lists hold layer and folder rows only, so the skip never fires there.
+ *
  * \a ListT is the list of rows or its const form, so a caller that needs to edit the row it finds
  * walks the mutable list instead of casting the constness away afterwards.
  */
@@ -1181,6 +1223,9 @@ template<typename ListT, typename Fn> bool paint_rows_walk(ListT &list, const Fn
 {
   using RowT = std::remove_reference_t<decltype(*list.begin())>;
   for (RowT &layer : list) {
+    if (BKE_paint_layers_asset_row_is_definition_member(layer)) {
+      continue;
+    }
     if (!fn(layer)) {
       return false;
     }
@@ -2861,6 +2906,19 @@ class PaintLayersStackSource final : public StackSource,
       return -1;
     }
     const PaintAddKindEntry &entry = entries[kind];
+    Material &material = layers_owner(owner);
+    /* A Smart Filter definition's stack takes no rows of its own: a working row added there sits
+     * between the members, where the chain descriptor skips it and a re-save of the definition
+     * refuses it (the same refusal the RNA `paint_layers.new` gives a definition). The correction
+     * kinds are left alone: they hang on the active row, which the definition's stack cannot make
+     * a member (the members are not listed, so nothing of theirs can be activated), and on a
+     * working row a correction is the ordinary edit it is anywhere. */
+    if (!entry.info.is_effect && BKE_paint_layers_asset_is_filter_definition(material)) {
+      BKE_report(CTX_wm_reports(&C),
+                 RPT_ERROR,
+                 "This material is a Smart Filter definition; its stack cannot take new layers");
+      return -1;
+    }
     /* The kind is created as given: the Effects menu already resolved the role the active slot
      * asks for, so a script that names a kind is not reinterpreted by the current target mode. */
     const PaintLayerAddKind add_kind = entry.kind;
@@ -2882,7 +2940,6 @@ class PaintLayersStackSource final : public StackSource,
     /* A transform effect moves what the row reads: only an owner that lays or reads content takes
      * one, and the warning says so when the Add is refused for it. */
     const bool is_transform = is_filter && paint_filter_is_transform(entry.filter);
-    Material &material = layers_owner(owner);
     MaterialPaintLayer *anchor = (ordinal < 0) ?
                                      nullptr :
                                      paint_description_row_for_ordinal(material, ordinal);
@@ -3713,6 +3770,16 @@ class PaintLayersStackSource final : public StackSource,
                 const int ordinal) const override
   {
     Material &material = layers_owner(owner);
+    /* A folder is a row of the stack, and a Smart Filter definition's stack takes none: a folder
+     * between the members would leave the root list the chain descriptor and the unfolding read,
+     * taking every member inside it out of the chain with it. The same refusal the Add's row
+     * kinds give a definition. */
+    if (BKE_paint_layers_asset_is_filter_definition(material)) {
+      BKE_report(CTX_wm_reports(&C),
+                 RPT_ERROR,
+                 "This material is a Smart Filter definition; its stack cannot take new layers");
+      return -1;
+    }
     MaterialPaintLayer *anchor = (ordinal < 0) ?
                                      nullptr :
                                      paint_description_row_for_ordinal(material, ordinal);

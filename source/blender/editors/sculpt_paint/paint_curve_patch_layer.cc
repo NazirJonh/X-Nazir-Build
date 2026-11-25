@@ -69,6 +69,7 @@
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_asset.hh"
 #include "BKE_paint_layers_curve_patch_object.hh"
 #include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_layers_gradient.hh"
@@ -2520,7 +2521,8 @@ bool paint_stack_row_activate(bContext &C,
     BKE_report(CTX_wm_reports(&C), RPT_ERROR, "Layered material is not editable");
     return false;
   }
-  if (BKE_paint_layers_find(material, row_marker) == nullptr) {
+  const MaterialPaintLayer *row = BKE_paint_layers_find(material, row_marker);
+  if (row == nullptr) {
     return false;
   }
   /* A live session keeps the active row until it is confirmed or cancelled: a switch would leave
@@ -2528,11 +2530,24 @@ bool paint_stack_row_activate(bContext &C,
   if (!curve_patch_layer_row_switch_prepare(C)) {
     return false;
   }
-  /* A live Curve Patch session owns the tool while it runs. A free-standing one was refused above
-   * (or committed, when the User Settings option asks for it). A session of an effect row keeps its
-   * state in the row, so switching away from it just commits it here: every live layer session
-   * but the target row's own commits, whatever object runs it, or it would keep that effect's brush
-   * in the hand after the switch restored the user's own. */
+  /* A Smart Filter definition member cannot become the active row: the members are the chain's
+   * saved corrections, and the stack tools aimed at the active row (the brush target, the slots,
+   * the projection frame) have nothing to put a stroke into on one -- activating it would point
+   * the editor at a row nothing reads. The stack view draws the members inert and refuses the
+   * click there; this is the same refusal for the paths that arrive by marker (a remembered
+   * active row from before the rows were guarded, a script naming one). The row is already in
+   * hand from the existence check above: nothing between runs a lookup that could move it. */
+  if (BKE_paint_layers_asset_row_is_definition_member(*row)) {
+    BKE_report(CTX_wm_reports(&C),
+               RPT_ERROR,
+               "A member of a Smart Filter definition cannot be activated");
+    return false;
+  }
+  /* A live Curve Patch session owns the tool while it runs. Switching the active row away from
+   * its effect is a deliberate step the user can undo, so the session just commits its curves
+   * into the effect and the switch goes on, with no question and no warning. Every live layer
+   * session commits, whatever object runs it: a session on a secondary target's owner would
+   * otherwise keep that effect's brush in the hand after the switch restored the user's own. */
   curve_patch_layer_commit_live_sessions(C, &row_marker);
   BKE_paint_layers_active_set(material, row_marker);
   if (curve_item_index >= 0) {

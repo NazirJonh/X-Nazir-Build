@@ -1309,6 +1309,21 @@ static const PaintLayerKindInfo kinds[] = {
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
               PAINT_LAYER_KIND_MASK_NEEDS_LUMA | PAINT_LAYER_KIND_NO_GPU_BRANCH |
               PAINT_LAYER_KIND_DYNAMIC_SCHEMA)},
+    /* A chain of existing effects the user saved as one reusable definition (a Smart Filter, a
+     * material holding effect rows, read through #MaterialPaintLayer::material). The row stands
+     * for the chain: the composite unfolds the definition's effect rows in order, each carrying
+     * the instance's exposed values, so every consumer sees the ordinary corrections it already
+     * accelerates -- as a content correction of a row, or as a mask item, whose members fold the
+     * mask grey the same way the mask filters do. Not an adjustment: the definition's members are
+     * judged pointwise, and an adjustment row over the stack below it has no pointwise input. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_CHAIN,
+     "Custom Effect",
+     PaintLayerKindCategory::Operator,
+     effect_or_mask_roles,
+     nullptr,
+     0,
+     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_DYNAMIC_SCHEMA)},
     /* The Height laid as a normal: the Sobel gradients of the row's Height, encoded as the
      * tangent-space normal. The one cross-channel effect that lays the channel it reads: it reads
      * the Height (READS_CHANNEL) and lays into the Normal channel, the only one it filters, which

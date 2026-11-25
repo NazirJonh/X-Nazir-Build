@@ -596,6 +596,9 @@ class OUTLINER_MT_smart_asset_save(Menu):
                 ('MATERIAL', "Smart Material", 'ASSET_MANAGER'),
                 ('LAYER', "Smart Layer", 'LAYER_ACTIVE'),
                 ('MASK', "Smart Mask", 'MOD_MASK'),
+                # A Smart Filter saves the selected rows' filter corrections as one chain
+                # definition; the modifier icon is the same family the filter rows draw.
+                ('FILTER', "Smart Filter", 'MOD_BRIGHTCONTRAST'),
         ):
             props = layout.operator(
                 "outliner.stack_layer_smart_asset_save", text=text, icon=icon)

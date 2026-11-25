@@ -944,6 +944,7 @@ if(WITH_GTESTS)
     intern/paint_layers/tests/paint_layers_anchor_point_test.cc
     intern/paint_layers/tests/paint_layers_anchor_point_composite_test.cc
     intern/paint_layers/tests/paint_layers_asset_test.cc
+    intern/paint_layers/tests/paint_layers_chain_test.cc
     intern/paint_layers/tests/paint_layers_blend_tier_test.cc
     intern/paint_layers/tests/paint_layers_correction_bake_test.cc
     intern/paint_layers/tests/paint_layers_curve_patch_test.cc

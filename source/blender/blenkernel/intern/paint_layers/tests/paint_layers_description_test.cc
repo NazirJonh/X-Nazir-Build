@@ -2358,7 +2358,7 @@ TEST_F(PaintLayersDescription, issues_report_a_kind_that_is_unknown_or_not_allow
 
   /* A folder as a correction, and a kind a newer build wrote: both are skipped and both say so. */
   effect->source = MA_PAINT_LAYER_SOURCE_STACK;
-  other->source = 3;
+  other->source = MA_PAINT_LAYER_SOURCE_TEXT + 1;
   BKE_paint_layers_issues_get(ma, issues);
   ASSERT_EQ(issues.size(), 2);
   bool correction = false;

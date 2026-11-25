@@ -297,7 +297,7 @@ static EffectReach bake_coverage_effect_reach(const MaterialPaintLayer &effect)
    * before it, so an edit can move the chain's bake past the edited rectangle only as far as the
    * widest member can move it. A definition that is gone lays nothing, but a bake that was made
    * from one cannot be narrowed: nothing is known about what it held. */
-  if (effect.kind_subtype == MA_PAINT_LAYER_FILTER_CHAIN) {
+  if (paint_layer_effect_is_chain(effect)) {
     const Material *definition = effect.material;
     if (definition == nullptr) {
       return EffectReach::WholeMap;
@@ -389,9 +389,7 @@ static bool bake_coverage_pointwise(const Material &ma,
     if ((effect.flag & MA_PAINT_LAYER_ENABLED) == 0) {
       continue;
     }
-    if (!paint_layer_effect_is_cpu_computed(effect) &&
-        effect.kind_subtype != MA_PAINT_LAYER_FILTER_CHAIN)
-    {
+    if (!paint_layer_effect_is_cpu_computed(effect) && !paint_layer_effect_is_chain(effect)) {
       continue;
     }
     /* An effect that owns its result apart is baked on its own, not inside this row's bake: its

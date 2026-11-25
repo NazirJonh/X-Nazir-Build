@@ -1169,6 +1169,35 @@ static bool paint_layer_anchor_is_mask_landing(const MaterialPaintLayer *anchor)
 }
 
 /**
+ * Whether the mask form of a Smart Filter can lay \a asset: every effect row of the definition is
+ * a pointwise member the mask unfolding describes (#composite_mask_item_chain).
+ *
+ * The mask form skips a CPU-computed member on purpose: a mask item has no effect stage to read the
+ * member's result texture from, and folding a Blur or a node-group filter as a pointwise mask
+ * filter would shade it as a no-op. The save-time contract lets such a member into a definition (the
+ * content form lays it), so the mask landing has to refuse the definition instead of laying a chain
+ * with members silently missing.
+ */
+static bool paint_layer_filter_mask_landable(const Material &asset)
+{
+  bool any = false;
+  for (const MaterialPaintLayer &member : asset.paint_layers) {
+    if (member.role != MA_PAINT_LAYER_ROLE_EFFECT) {
+      /* A definition holds effect rows only; a hand-made one with another shape has no mask
+       * landing either. */
+      return false;
+    }
+    if (!paint_layer_effect_is_smart_filter_member(member) ||
+        paint_layer_effect_is_cpu_computed(member))
+    {
+      return false;
+    }
+    any = true;
+  }
+  return any;
+}
+
+/**
  * Lay the Smart Filter instance as a mask item: one chain row on the mask \a anchor_item belongs
  * to, named after the asset and reading the asset material as its definition -- the mask form of
  * the content landing below, the composite unfolding the definition's members over the mask grey
@@ -1350,6 +1379,11 @@ bool BKE_paint_layers_asset_can_insert(const Material &dst,
       if (BKE_paint_layers_asset_row_is_definition_member(*target)) {
         return fail(TIP_(
             "That layer is a saved member of a Smart Filter definition and takes no corrections"));
+      }
+      if (!paint_layer_filter_mask_landable(asset)) {
+        return fail(TIP_(
+            "This Smart Filter uses effects that cannot be applied to a mask; apply it to the layer "
+            "instead"));
       }
       return true;
     }

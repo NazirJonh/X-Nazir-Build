@@ -457,11 +457,16 @@ static void material_paint_layer_blend_read(BlendDataReader *reader, MaterialPai
     BKE_paint_layers_gradient_ensure(layer);
   }
   BLO_read_struct(reader, MaterialPaintLayerRamp, &layer.ramp);
-  if (BKE_paint_layers_generator_supported(layer)) {
+  if (BKE_paint_layers_generator_supported(layer) &&
+      layer.kind_subtype != MA_PAINT_LAYER_GENERATOR_NODE_GROUP)
+  {
     /* A generator of a kind whose colour band arrived after the file was written gets the default
      * black-to-white ramp. Its parameters need nothing here: a property the file does not carry
      * reads as the schema's default. A Gradient answers false to the ramp check inside, as its band
-     * lives in the payload above. */
+     * lives in the payload above. A node-group generator's schema lives on the definition's tree,
+     * whose pointer lib-link has not remapped yet; the ramp the row carries is read from the file
+     * with the payload, and one a row never had is ensured when its definition is assigned (the
+     * params init), not here. */
     BKE_paint_layers_ramp_ensure(layer);
   }
   BLO_read_struct(reader, MaterialPaintLayerCurves, &layer.curves);

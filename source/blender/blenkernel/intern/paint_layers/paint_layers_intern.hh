@@ -772,6 +772,21 @@ inline bool paint_layer_effect_is_filter(const MaterialPaintLayer &effect)
 }
 
 /**
+ * Whether \a effect is a Smart Filter chain (#MA_PAINT_LAYER_FILTER_CHAIN in the filter source):
+ * one row standing for a definition material whose effect rows the composite unfolds.
+ *
+ * The subtype only names a kind inside its source -- 47 is the chain in the Filter source and an
+ * unknown subtype in every other -- so both halves are read. The live graph has no chain case, which
+ * is why a row carrying one is baked; this predicate is that one test, so the bake, the projection
+ * fold and the input creation cannot disagree about the shape.
+ */
+inline bool paint_layer_effect_is_chain(const MaterialPaintLayer &effect)
+{
+  return effect.source == MA_PAINT_LAYER_SOURCE_FILTER &&
+         effect.kind_subtype == MA_PAINT_LAYER_FILTER_CHAIN;
+}
+
+/**
  * Whether \a row can be a member of a Smart Filter chain: a pointwise colour correction, or a
  * #PAINT_LAYER_KIND_GPU_COMPUTED one the chain unfolds as an effect correction of its own.
  *
@@ -806,7 +821,7 @@ inline bool paint_layer_effect_is_smart_filter_member(const MaterialPaintLayer &
   if (row.role != MA_PAINT_LAYER_ROLE_EFFECT || row.source != MA_PAINT_LAYER_SOURCE_FILTER) {
     return false;
   }
-  if (row.kind_subtype == MA_PAINT_LAYER_FILTER_CHAIN) {
+  if (paint_layer_effect_is_chain(row)) {
     return false;
   }
   if (!paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_ACTS_ON_BELOW)) {
@@ -1095,10 +1110,11 @@ inline bool paint_layer_effect_acts_in_decal_frame(const MaterialPaintLayer &eff
 inline constexpr bool PAINT_LAYERS_BAKE_PROJECTED_EFFECT = true;
 
 /**
- * Material-free half of #paint_layer_row_folds_into_bake: \a row holds a frame, an enabled
- * CPU-computed effect, and is no row that keeps its effects apart (a Material row or an Anchor
- * Point reader, see #paint_layer_effect_owns_result). It can err only toward "projected", so the caller
- * asks for a surface at worst for nothing, never the other way round.
+ * Material-free half of #paint_layer_row_folds_into_bake: \a row holds a frame, an enabled effect
+ * the live graph cannot lay (a CPU-computed kind or a chain, in its effects or its mask), and is no
+ * row that keeps its effects apart (a Material row or an Anchor Point reader, see
+ * #paint_layer_effect_owns_result). It can err only toward "projected", so the caller asks for a
+ * surface at worst for nothing, never the other way round.
  */
 inline bool paint_layer_row_may_fold_into_bake(const MaterialPaintLayer &row)
 {
@@ -1109,7 +1125,16 @@ inline bool paint_layer_row_may_fold_into_bake(const MaterialPaintLayer &row)
     return false;
   }
   for (const MaterialPaintLayer &effect : row.effects) {
-    if ((effect.flag & MA_PAINT_LAYER_ENABLED) != 0 && paint_layer_effect_is_cpu_computed(effect)) {
+    if ((effect.flag & MA_PAINT_LAYER_ENABLED) != 0 &&
+        (paint_layer_effect_is_cpu_computed(effect) || paint_layer_effect_is_chain(effect)))
+    {
+      return true;
+    }
+  }
+  /* A chain in the mask bakes the whole row (#paint_layer_row_bakes_content), so a projected row
+   * carrying one needs the surface for that bake as well. */
+  for (const MaterialPaintLayer &item : row.mask_stack) {
+    if ((item.flag & MA_PAINT_LAYER_ENABLED) != 0 && paint_layer_effect_is_chain(item)) {
       return true;
     }
   }
@@ -1144,7 +1169,12 @@ inline bool paint_layer_row_needs_bake(const MaterialPaintLayer &row)
     return true;
   }
   for (const MaterialPaintLayer &effect : row.effects) {
-    if (paint_layer_effect_is_cpu_computed(effect) || paint_layer_effect_acts_in_decal_frame(effect))
+    /* A chain has no live graph case either: its members are the corrections, and the graph builds
+     * them from the definition at composite time, not from the row. Without the bake the viewport
+     * would silently lay the row without the chain. */
+    if (paint_layer_effect_is_cpu_computed(effect) ||
+        paint_layer_effect_acts_in_decal_frame(effect) ||
+        paint_layer_effect_is_chain(effect))
     {
       return true;
     }
@@ -1153,7 +1183,7 @@ inline bool paint_layer_row_needs_bake(const MaterialPaintLayer &row)
    * live graph builds mask filters from its own cases and has no chain case: the row's bake is
    * what the graph lays, and the bake folds the mask whole. */
   for (const MaterialPaintLayer &item : row.mask_stack) {
-    if (item.kind_subtype == MA_PAINT_LAYER_FILTER_CHAIN) {
+    if (paint_layer_effect_is_chain(item)) {
       return true;
     }
   }
@@ -1172,9 +1202,20 @@ inline bool paint_layer_row_needs_bake(const MaterialPaintLayer &row)
  * substitution and the graph -- so the four cannot disagree about what such a cache holds. Only a
  * row that is baked for its own sake counts: a child of another row's bake is rendered with its
  * mask inside, because the parent's cache is a picture of the stack as it looks.
+ *
+ * A row whose mask holds a Smart Filter chain is the one exception: the live graph has no chain
+ * case, so the mask cannot stay live over a content-only map -- the bake holds the whole row.
  */
 inline bool paint_layer_row_bakes_content(const MaterialPaintLayer &row)
 {
+  /* A chain in the row's mask has no live graph case (#paint_layer_row_needs_bake): the mask it
+   * unfolds can only come from the bake, so the bake holds the whole row instead of its content
+   * alone. A content bake would leave the live mask output building a chain it cannot express. */
+  for (const MaterialPaintLayer &item : row.mask_stack) {
+    if (paint_layer_effect_is_chain(item)) {
+      return false;
+    }
+  }
   return paint_layer_row_needs_bake(row);
 }
 
@@ -1196,9 +1237,10 @@ inline PaintLayerBakeScope paint_layer_bake_scope(const MaterialPaintLayer &row,
 }
 
 /**
- * Whether \a row or a row under it (its children) carries an enabled CPU-computed effect: the one
- * reason a bake folds the projections of nested rows (see #paint_layer_subtree_may_fold_into_bake).
- * A projected stack with no such effect keeps its live graph, so the Auto bake does not start for
+ * Whether \a row or a row under it (its children) carries an enabled effect the live graph cannot
+ * lay -- a CPU-computed effect or a Smart Filter chain, in its effects or its mask: the one reason a
+ * bake folds the projections of nested rows (see #paint_layer_subtree_may_fold_into_bake). A
+ * projected stack with no such effect keeps its live graph, so the Auto bake does not start for
  * stacks that never had one. A row that keeps its effects apart (a Material row, an Anchor Point
  * reader) bakes them on their own, outside this subtree's picture.
  */
@@ -1210,7 +1252,14 @@ inline bool paint_layer_subtree_has_cpu_effect(const MaterialPaintLayer &row)
     return false;
   }
   for (const MaterialPaintLayer &effect : row.effects) {
-    if ((effect.flag & MA_PAINT_LAYER_ENABLED) != 0 && paint_layer_effect_is_cpu_computed(effect)) {
+    if ((effect.flag & MA_PAINT_LAYER_ENABLED) != 0 &&
+        (paint_layer_effect_is_cpu_computed(effect) || paint_layer_effect_is_chain(effect)))
+    {
+      return true;
+    }
+  }
+  for (const MaterialPaintLayer &item : row.mask_stack) {
+    if ((item.flag & MA_PAINT_LAYER_ENABLED) != 0 && paint_layer_effect_is_chain(item)) {
       return true;
     }
   }

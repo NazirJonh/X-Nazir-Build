@@ -105,11 +105,21 @@ static bool bake_row_keeps_effects_apart(const MaterialPaintLayer &layer)
          paint_layer_kind_reads_anchor_point(layer);
 }
 
-/** Whether \a layer carries an enabled CPU-computed effect (Noise, Blur). */
-static bool bake_row_has_cpu_effect(const MaterialPaintLayer &layer)
+/** Whether \a layer has no live graph form: an enabled CPU-computed effect (Noise, Blur), a
+ * Smart Filter chain effect, or a chain in its mask. Such a row shows only from its bake. */
+static bool bake_row_has_no_live_form(const MaterialPaintLayer &layer)
 {
   for (const MaterialPaintLayer &effect : layer.effects) {
-    if ((effect.flag & MA_PAINT_LAYER_ENABLED) != 0 && paint_layer_effect_is_cpu_computed(effect)) {
+    if ((effect.flag & MA_PAINT_LAYER_ENABLED) != 0 &&
+        (paint_layer_effect_is_cpu_computed(effect) || paint_layer_effect_is_chain(effect)))
+    {
+      return true;
+    }
+  }
+  /* A chain mask makes the whole row bake (#paint_layer_row_bakes_content), so its mapping and
+   * transform steps belong inside that bake as well. */
+  for (const MaterialPaintLayer &item : layer.mask_stack) {
+    if ((item.flag & MA_PAINT_LAYER_ENABLED) != 0 && paint_layer_effect_is_chain(item)) {
       return true;
     }
   }
@@ -148,7 +158,7 @@ bool bake_own_mapping_folds(const Material &ma,
   if (bake_row_keeps_effects_apart(layer)) {
     return false;
   }
-  return bake_row_has_cpu_effect(layer);
+  return bake_row_has_no_live_form(layer);
 }
 
 /**
@@ -158,7 +168,7 @@ bool bake_own_mapping_folds(const Material &ma,
  */
 static bool bake_effect_transforms_fold(const MaterialPaintLayer &layer)
 {
-  return !bake_row_keeps_effects_apart(layer) && bake_row_has_cpu_effect(layer);
+  return !bake_row_keeps_effects_apart(layer) && bake_row_has_no_live_form(layer);
 }
 
 /**
@@ -479,9 +489,7 @@ static uint64_t bake_hash_layer(uint64_t h,
    * generation) and every member's own description -- a nested node-group's tree, a member's
    * parameters and payloads -- are what the unfolded corrections were made from. The instance's
    * stored overrides are in `system_properties`, hashed above. */
-  if (layer.source == MA_PAINT_LAYER_SOURCE_FILTER &&
-      layer.kind_subtype == MA_PAINT_LAYER_FILTER_CHAIN && layer.material != nullptr)
-  {
+  if (paint_layer_effect_is_chain(layer) && layer.material != nullptr) {
     const Material &definition = *layer.material;
     h = bake_hash_mix(h, uint64_t(BKE_material_paint_layers_topology_generation(definition)));
     for (const MaterialPaintLayer &member : definition.paint_layers) {
@@ -696,6 +704,11 @@ static bool bake_mapping_blocks(const Material &ma,
   }
   const bool transforms_fold = bake_effect_transforms_fold(layer);
   for (const MaterialPaintLayer &effect : layer.effects) {
+    /* A chain is laid by the row bake, not by the graph; its own mapping is not read by the
+     * unfolding (the members read the row's content), so it must not keep the row live. */
+    if (paint_layer_effect_is_chain(effect)) {
+      continue;
+    }
     /* A Mirror or Transform Mapping effect of a row that bakes a CPU effect is rendered into the
      * bake, like the row's own mapping. */
     if (transforms_fold && paint_layer_kind_transforms_input(effect)) {
@@ -713,6 +726,11 @@ static bool bake_mapping_blocks(const Material &ma,
   }
   if (scope != PaintLayerBakeScope::ContentOnly) {
     for (const MaterialPaintLayer &mask_item : layer.mask_stack) {
+      if (paint_layer_effect_is_chain(mask_item)) {
+        /* The chain mask is laid by the whole-row bake; its own mapping is not read by the
+         * unfolding, and blocking here would leave the row live with no chain case. */
+        continue;
+      }
       if (bake_mapping_blocks(ma, mask_item, PaintLayerBakeScope::Child, cpu_in_subtree)) {
         return true;
       }

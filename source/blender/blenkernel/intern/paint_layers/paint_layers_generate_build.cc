@@ -1305,6 +1305,12 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
        * dead weight in the interface and in the topology the hash is taken from. Its parameters
        * reach the bake and the effect cache through the row's system properties instead. */
       const bool cpu_computed = paint_layer_effect_is_cpu_computed(effect);
+      /* A chain is laid by the row bake, not by the graph (#correction_lay has no chain case), so
+       * its aggregate parameters would be inputs nothing consumes -- the same dead weight a
+       * CPU-computed effect's sockets would be. */
+      if (paint_layer_effect_is_chain(effect)) {
+        continue;
+      }
       /* One that owns its result (a bake of its own, on a row no bake can hold it for) is laid as
        * that map: only its opacity is an input, the toggle and the slider of a value. */
       const bool owns_result = cpu_computed && paint_layer_effect_owns_result(ma_, layer, effect);

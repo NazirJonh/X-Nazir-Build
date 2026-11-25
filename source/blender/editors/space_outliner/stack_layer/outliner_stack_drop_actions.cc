@@ -267,8 +267,15 @@ class ImageToContentCorrectionAction final : public StackDropAction {
     /* A Smart Filter definition member takes no corrections: the chain's unfolding reads the
      * member's own kind and payloads alone, so a Fill correction landed on it would sit there
      * unread -- laid nowhere, visible nowhere. The member rows are drawn inert in the stack, so
-     * the drop aiming at one is a slip the hint explains. */
-    if (BKE_paint_layers_asset_row_is_definition_member(*row)) {
+     * the drop aiming at one is a slip the hint explains.
+     *
+     * The member predicate answers "not a layer", which is also every ordinary correction's role;
+     * a correction hangs on a row and has no owner list, while a definition member sits at the
+     * definition's stack root. The owner-list test keeps the guard from refusing the normal drop
+     * onto a content correction. */
+    if (BKE_paint_layers_owner_list(*material, *row) != nullptr &&
+        BKE_paint_layers_asset_row_is_definition_member(*row))
+    {
       *r_disabled_hint = TIP_(
           "That layer is a saved member of a Smart Filter definition and takes no corrections");
       return false;

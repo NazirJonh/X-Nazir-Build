@@ -445,18 +445,27 @@ def draw_material_kind_params(layout, params):
 
 
 def draw_material_node_group_slot(layout, item):
-    """The definition tree a node-group filter reads, drawn above the parameters it exposes.
+    """The definition tree a node-group kind reads, drawn above the parameters it exposes.
 
     One tree is shared by every row that names it (the definition/instance model), so the slot is
-    the row's own pointer, not a copy: picking another tree re-points this row alone. Returns
-    whether the field was drawn; a mask item draws the same slot as a row.
+    the row's own pointer, not a copy: picking another tree re-points this row alone. A filter, a
+    node-group source (layer or correction) and a node-group generator all read one; a mask item
+    draws the same slot as a row.
     """
-    if item.source != 'FILTER' or item.filter_type != 'NODE_GROUP':
+    reads_tree = (
+        (item.source == 'FILTER' and item.filter_type == 'NODE_GROUP') or
+        item.source == 'NODE_GROUP' or
+        (item.source == 'GENERATOR' and item.generator == 'NODE_GROUP')
+    )
+    if not reads_tree:
         return False
     line = layout.row(align=True)
     line.template_ID(item, "kind_tree", text="Node Group")
+    if item.kind_tree is not None:
+        edit = line.operator("material.paint_layer_node_group_edit", text="", icon='NODETREE')
+        edit.marker = item.marker
     if item.kind_tree is None:
-        layout.label(text="No node group: the filter lays nothing", icon='INFO')
+        layout.label(text="No node group: the row lays nothing", icon='INFO')
     layout.separator()
     return True
 

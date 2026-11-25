@@ -795,6 +795,10 @@ def draw_material_generator_layer(layout, context, owner, layer, draw_channels=T
     """
     # The kind selector comes first: everything below draws from the schema of the kind it shows.
     layout.prop(layer, "generator", text="Pattern")
+    # A node-group pattern is the row's own definition tree: the slot names it, and the slot's
+    # button opens it, the way a node-group filter's tree is edited.
+    if layer.generator == 'NODE_GROUP':
+        draw_material_node_group_slot(layout, layer)
 
     layout.separator()
     header, panel = layout.panel("material_generator_placement", default_closed=False)
@@ -1083,6 +1087,17 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             # The channels it works in, switched like a layer's; Base Color is on to start with.
             layout.separator()
             draw_material_layer_channels(layout, context, owner, layer)
+            return
+        # A node-group source reads a definition the way a node-group filter does: the tree slot
+        # above the parameters its interface exposes. It owns no channel records (what it lays is
+        # the definition's answer), so the channel widget is not drawn; the material's channel set
+        # still decides which of its channels the stack evaluates.
+        if layer.source == 'NODE_GROUP':
+            layout.separator()
+            draw_material_node_group_slot(layout, layer)
+            draw_material_kind_params(layout, layer.kind_params)
+            if layer.kind_needs_bake:
+                draw_material_update_now(layout, owner)
             return
         # A reader has no map either: its records are only the channels it lays.
         if layer.source == 'ANCHOR_POINT':

@@ -2536,8 +2536,15 @@ bool paint_stack_row_activate(bContext &C,
    * the editor at a row nothing reads. The stack view draws the members inert and refuses the
    * click there; this is the same refusal for the paths that arrive by marker (a remembered
    * active row from before the rows were guarded, a script naming one). The row is already in
-   * hand from the existence check above: nothing between runs a lookup that could move it. */
-  if (BKE_paint_layers_asset_row_is_definition_member(*row)) {
+   * hand from the existence check above: nothing between runs a lookup that could move it.
+   *
+   * The member predicate answers "not a layer", which is also every ordinary correction's and mask
+   * item's role; those hang on a row and have no owner list, while a definition member sits at the
+   * definition's stack root. The owner-list test is what keeps this from refusing to activate every
+   * correction in an ordinary material. */
+  if (BKE_paint_layers_owner_list(material, *row) != nullptr &&
+      BKE_paint_layers_asset_row_is_definition_member(*row))
+  {
     BKE_report(CTX_wm_reports(&C),
                RPT_ERROR,
                "A member of a Smart Filter definition cannot be activated");

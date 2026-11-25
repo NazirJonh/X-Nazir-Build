@@ -898,12 +898,18 @@ static void dynamic_kind_descriptor_build_node_group(const PaintLayerKindInfo &s
 }
 
 /**
- * The cheap identity token of a chain definition: the definition's topology generation, plus every
- * member's own definition hash. The generation alone misses a member that is itself a dynamic kind
- * (a node-group filter inside the chain): editing that member's tree moves the member's schema --
- * which is part of the aggregate schema the descriptor answers -- without touching the chain
- * definition's rows, so the fold is what makes the cache notice. A static member answers 0 and
- * mixes nothing in.
+ * The cheap identity token of a chain definition: the definition's topology generation, every
+ * member's marker (the member set and its order) and the member's own definition hash. The
+ * generation alone misses a member that is itself a dynamic kind (a node-group filter inside the
+ * chain): editing that member's tree moves the member's schema -- which is part of the aggregate
+ * schema the descriptor answers -- without touching the chain definition's rows, so the fold is
+ * what makes the cache notice. A static member answers 0 and mixes nothing in for it. The markers
+ * are folded beside it because a definition material usually has no generated stack tree: its
+ * topology generation is 0, and without the member set a script that added or removed a member in
+ * place would keep the old aggregate schema.
+ *
+ * The walk is the one #dynamic_kind_descriptor_build_chain takes -- the definition's top level --
+ * so a hand-made nested row cannot move the identity without moving the schema.
  *
  * The lookup recomputes this before consulting the cache, so it stays a walk over the definition's
  * rows and their memoized tree hashes -- microseconds, not the schema rebuild the identity guards.
@@ -913,14 +919,15 @@ static uint64_t dynamic_kind_chain_identity(const Material &definition)
   const uint64_t generation =
       uint64_t(BKE_material_paint_layers_topology_generation(definition));
   uint64_t identity = node_group_hash_mix(0, generation);
-  BKE_paint_layers_foreach(definition, [&](const MaterialPaintLayer &member,
-                                           const MaterialPaintLayer * /*parent*/) {
+  for (const MaterialPaintLayer &member : definition.paint_layers) {
     if (member.role != MA_PAINT_LAYER_ROLE_EFFECT) {
-      return true;
+      continue;
     }
+    char member_key[UUID_STRING_SIZE];
+    BLI_uuid_format(member_key, member.marker);
+    identity = node_group_hash_mix(identity, get_default_hash(StringRef(member_key)));
     identity = node_group_hash_mix(identity, BKE_paint_layers_node_group_definition_hash(member));
-    return true;
-  });
+  }
   return identity;
 }
 

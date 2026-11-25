@@ -599,8 +599,10 @@ TEST_F(PaintLayersChainTest, chain_with_a_gpu_member_unfolds_an_effect_correctio
   EXPECT_FLOAT_EQ(effect.opacity,
                   BKE_paint_layers_channel_opacity_effective(*member, kChannel));
 
-  /* The prefix describe the GPU job lays from: the chain's input with the Exposure folded in, the
-   * member's own correction describe-only, and no mask (the input describe clears the row's). */
+  /* The prefix describe the GPU job lays from: the chain's input with the Exposure folded in and
+   * no mask (the input describe clears the row's). The member itself is deliberately absent: the
+   * input is what its kernel reads, and naming the member here would make the GPU input render
+   * fetch the member's own (unrendered) result texture and apply it to its own input. */
   PaintMaterialCompositeImageLayer entry;
   ASSERT_TRUE(BKE_paint_layers_chain_member_input_describe(*chained,
                                                            *target,
@@ -612,12 +614,8 @@ TEST_F(PaintLayersChainTest, chain_with_a_gpu_member_unfolds_an_effect_correctio
                                                            entry));
   EXPECT_TRUE(entry.mask_items.is_empty());
   EXPECT_EQ(entry.mask_image, nullptr);
-  ASSERT_EQ(entry.content_corrections.size(), 2);
+  ASSERT_EQ(entry.content_corrections.size(), 1);
   EXPECT_EQ(entry.content_corrections[0].filter, MA_PAINT_LAYER_FILTER_EXPOSURE);
-  EXPECT_EQ(entry.content_corrections[1].filter, MA_PAINT_LAYER_FILTER_BLUR);
-  EXPECT_TRUE(BLI_uuid_equal(entry.content_corrections[1].effect_marker, effect.effect_marker));
-  EXPECT_EQ(entry.content_corrections[1].effect_color, nullptr)
-      << "describe-only names the maps and computes nothing";
 }
 
 /**
@@ -925,6 +923,126 @@ TEST_F(PaintLayersChainTest, a_chain_bake_hash_folds_its_definition)
   BKE_paint_layers_bake_hash(*dst, *row, after_member);
   EXPECT_FALSE(after_member[0] == after_override[0] && after_member[1] == after_override[1])
       << "a definition member's value is part of what the chain lays";
+}
+
+TEST_F(PaintLayersChainTest, a_chain_content_correction_forces_a_row_bake)
+{
+  /* The live graph has no chain case: the members are laid by the composite unfolding, which the
+   * bake samples. Without the bake the viewport would show the row without the chain. */
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  Material *ma = BKE_material_add(bmain, "ChainBake");
+  MaterialPaintLayer *row = add_fill_row(*ma, "Row", white);
+  MaterialPaintLayer *chain = BKE_paint_layers_filter_add(*ma, row, MA_PAINT_LAYER_FILTER_CHAIN);
+  ASSERT_NE(chain, nullptr);
+  EXPECT_TRUE(paint_layer_row_needs_bake(*row));
+}
+
+TEST_F(PaintLayersChainTest, smart_filter_mask_landing_refuses_a_cpu_computed_member)
+{
+  /* A mask item has no effect stage to read a Blur's result from, so the mask form skips such a
+   * member; landing the definition would silently drop it. The drop predicate refuses instead. */
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_fill_row(*src, "Row", white);
+  MaterialPaintLayer *blur = BKE_paint_layers_filter_add(*src, row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_NE(blur, nullptr);
+  const MaterialPaintLayer *member_rows[1] = {blur};
+  Material *asset = BKE_paint_layers_asset_create(
+      *bmain, *src, Span<const MaterialPaintLayer *>(member_rows, 1), PaintLayerAssetType::Filter,
+      "BlurFilter");
+  ASSERT_NE(asset, nullptr);
+
+  Material *dst = BKE_material_add(bmain, "Dst");
+  MaterialPaintLayer *target = add_fill_row(*dst, "Target", white);
+  ASSERT_NE(BKE_paint_layers_mask_add(*dst, target, 1.0f), nullptr);
+  MaterialPaintLayer *mask_item = BKE_paint_layers_mask_filter_add(
+      *dst, target, MA_PAINT_LAYER_FILTER_EXPOSURE);
+  ASSERT_NE(mask_item, nullptr);
+
+  const char *reason = nullptr;
+  EXPECT_FALSE(BKE_paint_layers_asset_can_insert(
+      *dst, *asset, mask_item, PaintLayerPlace::Above, &reason));
+  EXPECT_NE(reason, nullptr);
+
+  /* A pointwise definition lands on the same mask: the refusal is the member's shape, not the
+   * mask landing itself. */
+  MaterialPaintLayer *exposure = BKE_paint_layers_filter_add(
+      *src, row, MA_PAINT_LAYER_FILTER_EXPOSURE, "Exposure");
+  ASSERT_NE(exposure, nullptr);
+  const MaterialPaintLayer *pointwise_rows[1] = {exposure};
+  Material *pointwise_asset = BKE_paint_layers_asset_create(
+      *bmain,
+      *src,
+      Span<const MaterialPaintLayer *>(pointwise_rows, 1),
+      PaintLayerAssetType::Filter,
+      "PointwiseFilter");
+  ASSERT_NE(pointwise_asset, nullptr);
+  reason = nullptr;
+  EXPECT_TRUE(BKE_paint_layers_asset_can_insert(
+      *dst, *pointwise_asset, mask_item, PaintLayerPlace::Above, &reason));
+  EXPECT_EQ(reason, nullptr);
+}
+
+TEST_F(PaintLayersChainTest, a_disabled_chain_lays_no_correction)
+{
+  /* The enabled flag must hide the whole chain even though the opacity now scales the members:
+   * a disabled row must not keep laying them. */
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_fill_row(*src, "Row", white);
+  const ChainMembers members = add_pointwise_members(*src, *row);
+  const MaterialPaintLayer *member_rows[2] = {members.exposure, members.contrast};
+  Material *asset = BKE_paint_layers_asset_create(
+      *bmain, *src, Span<const MaterialPaintLayer *>(member_rows, 2), PaintLayerAssetType::Filter,
+      "DisabledChain");
+  ASSERT_NE(asset, nullptr);
+
+  Material *dst = BKE_material_add(bmain, "Dst");
+  MaterialPaintLayer *target = add_fill_row(*dst, "Target", white);
+  PaintLayerImportResult result;
+  ASSERT_TRUE(BKE_paint_layers_asset_insert(
+      *bmain, *dst, *asset, target, PaintLayerPlace::Above, &result));
+  MaterialPaintLayer *chain = chain_effect_of(*target);
+  ASSERT_NE(chain, nullptr);
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *dst, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  ASSERT_EQ(layers.size(), 1);
+  EXPECT_EQ(layers[0].content_corrections.size(), 2);
+
+  chain->flag &= ~MA_PAINT_LAYER_ENABLED;
+  layers.clear();
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *dst, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  ASSERT_EQ(layers.size(), 1);
+  EXPECT_TRUE(layers[0].content_corrections.is_empty());
+
+  /* The slider is the instance's master factor over every member, the way the mask form folds the
+   * item's effective opacity into its members. */
+  chain->flag |= MA_PAINT_LAYER_ENABLED;
+  chain->opacity = 0.5f;
+  layers.clear();
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *dst, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  ASSERT_EQ(layers.size(), 1);
+  ASSERT_EQ(layers[0].content_corrections.size(), 2);
+  EXPECT_FLOAT_EQ(layers[0].content_corrections[0].opacity, 0.5f);
+  EXPECT_FLOAT_EQ(layers[0].content_corrections[1].opacity, 0.5f);
+}
+
+TEST_F(PaintLayersChainTest, a_chain_mask_item_makes_the_row_bake_whole)
+{
+  /* The live graph has no mask-chain case either, so a ContentOnly bake would leave the mask
+   * output to be built live without the chain. The row's bake has to hold the mask too. */
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  Material *ma = BKE_material_add(bmain, "MaskChainBake");
+  MaterialPaintLayer *row = add_fill_row(*ma, "Row", white);
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 1.0f), nullptr);
+  ASSERT_NE(BKE_paint_layers_mask_filter_add(*ma, row, MA_PAINT_LAYER_FILTER_CHAIN), nullptr);
+  EXPECT_TRUE(paint_layer_row_needs_bake(*row));
+  EXPECT_FALSE(paint_layer_row_bakes_content(*row));
+  EXPECT_EQ(paint_layer_bake_scope(*row, false), PaintLayerBakeScope::WholeRow);
 }
 
 }  // namespace blender::bke::tests

@@ -2904,10 +2904,26 @@ void paint_layer_payload_write(BlendWriter &writer, const MaterialPaintLayer &la
 
 void paint_layer_payload_read(BlendDataReader &reader, MaterialPaintLayer &layer)
 {
+  /* The kind's payload parameters come from the static table, not the row's dynamic descriptor:
+   * this runs while the stored #MaterialPaintLayer::kind_tree pointer is not remapped yet, and a
+   * dynamic kind's lookup would follow it. A dynamic schema exposes no payload parameter by
+   * design, so the static answer is the whole answer a file-load needs. */
+  const PaintLayerKindInfo *kind = paint_layer_kind_find(layer.source, layer.kind_subtype);
+  const auto has_payload_param = [&](const PaintLayerKindParamType type) {
+    if (kind == nullptr) {
+      return false;
+    }
+    for (const int i : IndexRange(kind->params_num)) {
+      if (kind->params[i].type == type) {
+        return true;
+      }
+    }
+    return false;
+  };
   for (const PaintLayerPayloadInfo &info : payload_infos) {
     void **slot = payload_slot(layer, info);
     info.read(&reader, slot);
-    if (*slot == nullptr && paint_layer_kind_has_payload_param(layer, info.type)) {
+    if (*slot == nullptr && has_payload_param(info.type)) {
       *slot = info.create();
     }
   }

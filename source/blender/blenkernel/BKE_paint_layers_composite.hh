@@ -407,9 +407,9 @@ void BKE_paint_layers_effect_input_images(const PaintMaterialCompositeImageLayer
  * publish a CPU-computed kind's answer as a GPU result: uploading this buffer is parity by
  * construction -- the pixels are the kernel's own output, not a re-computation of it.
  *
- * \param effect: an effect row (#MA_PAINT_LAYER_ROLE_EFFECT) a #PAINT_LAYER_KIND_NEEDS_BAKE kind
- *        computes; anything else answers null, as does an effect no row of \a ma carries or whose
- *        input cannot be rendered.
+ * \param effect: a filter effect row (#MA_PAINT_LAYER_ROLE_EFFECT) a #PAINT_LAYER_KIND_NEEDS_BAKE
+ *        kind computes; anything else answers null, as does an effect no row of \a ma carries or
+ *        whose input cannot be rendered. A source kind's answer is its bake map, not this buffer.
  * \param r_width, r_height: the buffer's dimensions, the input's own.
  * \return the cached buffer, computed on a miss. The cache's mutex is never held while an effect
  *         computes, so the compute may render nested slices and nested effects of its own; a caller
@@ -425,10 +425,11 @@ std::shared_ptr<ImBuf> BKE_paint_layers_effect_buffer_result(const Material &ma,
 
 /**
  * Describe the input of a Smart Filter chain's GPU-computed \a member: the chain's content up to
- * \a chain on \a row, with the definition members before \a member folded in (the prefix), and --
- * in \a describe_only -- the member's own correction named beside it. The GPU job's input render
- * and the member's CPU kernel both read this one description, so the pixels they work from cannot
- * drift. Same terms as #BKE_paint_layers_effect_input_describe.
+ * \a chain on \a row, with the definition members before \a member folded in (the prefix). The
+ * member itself is deliberately not named: the description is what its kernel reads, and naming it
+ * would make the GPU input render apply the member to its own (not yet rendered) result. The GPU
+ * job's input render and the member's CPU kernel both read this one description, so the pixels they
+ * work from cannot drift. Same terms as #BKE_paint_layers_effect_input_describe.
  */
 bool BKE_paint_layers_chain_member_input_describe(const Material &ma,
                                                   const MaterialPaintLayer &row,

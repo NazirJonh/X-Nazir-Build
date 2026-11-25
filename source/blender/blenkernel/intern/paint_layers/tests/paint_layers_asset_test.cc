@@ -1223,7 +1223,7 @@ TEST_F(PaintLayersAssetTest, smart_asset_type_rejects_invalid_type_and_future_ve
   ASSERT_NE(asset->id.properties, nullptr);
 
   IDP_ReplaceInGroup(asset->id.properties,
-                     bke::idprop::create("paint_asset_type", int(PaintLayerAssetType::Mask) + 1)
+                     bke::idprop::create("paint_asset_type", int(PaintLayerAssetType::Filter) + 1)
                          .release());
   EXPECT_EQ(BKE_paint_layers_asset_type_get(*asset), PaintLayerAssetType::None);
 

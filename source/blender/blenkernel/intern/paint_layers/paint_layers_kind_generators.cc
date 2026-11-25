@@ -741,9 +741,9 @@ const char *paint_layer_generator_param_socket(const MaterialPaintLayer &row, co
   /* A node-group generator's interface parameters link to the group's own sockets: the dynamic
    * schema stores each parameter's socket identifier as its name, so the identifier is the
    * answer. The placement prefix has no group socket of its own (the placed coordinate rides the
-   * `Coordinate` input the emission links), the ramp is the tail's answer, not the group's, and a
-   * vector parameter is left to its socket default this pass -- the row's group input for it is
-   * made as a float, which a vector socket would refuse. */
+   * `Coordinate` input the emission links) and the ramp is the tail's answer, not the group's.
+   * Every other parameter has a row input typed as its schema type (a Color or a Vector socket),
+   * so each can be linked. */
   if (row.source == MA_PAINT_LAYER_SOURCE_GENERATOR &&
       row.kind_subtype == MA_PAINT_LAYER_GENERATOR_NODE_GROUP)
   {
@@ -751,8 +751,7 @@ const char *paint_layer_generator_param_socket(const MaterialPaintLayer &row, co
     if (schema != nullptr && index >= PAINT_LAYER_GEN_PLACEMENT_NUM &&
         index < schema->params_num)
     {
-      const PaintLayerKindParamType type = schema->params[index].type;
-      if (type != PaintLayerKindParamType::Ramp && type != PaintLayerKindParamType::Vector) {
+      if (schema->params[index].type != PaintLayerKindParamType::Ramp) {
         return schema->params[index].name;
       }
     }

@@ -201,7 +201,12 @@ template<typename Row, typename Ramp> Ramp *generator_channel_ramp_find(Row &row
 
 bool BKE_paint_layers_generator_supported(const MaterialPaintLayer &layer)
 {
-  return paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES);
+  /* The static entry's flag, not the row's dynamic descriptor: this runs while a file is read,
+   * before the stored #MaterialPaintLayer::kind_tree pointer has been remapped, and a dynamic
+   * kind's lookup would follow it. Every generator kind is in the registry table -- the node-group
+   * generator is entry 10 -- so the static answer is the one the descriptor would give. */
+  const PaintLayerKindInfo *kind = paint_layer_kind_find(layer.source, layer.kind_subtype);
+  return kind != nullptr && (kind->flags & PAINT_LAYER_KIND_GENERATES) != 0;
 }
 
 int BKE_paint_layers_generator_space_of(const MaterialPaintLayer &layer)

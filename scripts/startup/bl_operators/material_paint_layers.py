@@ -59,6 +59,88 @@ class _PaintLayerOperator(Operator):
         mat = _context_material(context)
         return mat is not None and mat.is_layered
 
+class MATERIAL_OT_paint_layer_node_group_edit(_PaintLayerOperator):
+    """Open the row's node-group definition in a Shader Editor area.
+
+    The definition is a shader node tree the row reads as its kernel; a Custom Node's graph is edited
+    there. A Shader Editor already open in the window is reused; otherwise the current area is split
+    and the new area becomes a Shader Editor, or a new window is opened when there is no area to
+    split (a background session cannot open one and is refused)."""
+
+    bl_idname = "material.paint_layer_node_group_edit"
+    bl_label = "Edit Node Group"
+    bl_description = "Open the row's node-group definition in a Shader Editor area"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        layer = self._layer(context)
+        if layer is None or layer.kind_tree is None:
+            self.report({'ERROR'}, "The row reads no node group")
+            return {'CANCELLED'}
+        if bpy.app.background:
+            self.report({'ERROR'}, "Cannot open an editor area in the background")
+            return {'CANCELLED'}
+        space = _node_space_ensure(context)
+        if space is None:
+            self.report({'ERROR'}, "Could not open a Shader Editor area")
+            return {'CANCELLED'}
+        try:
+            space.tree_type = 'ShaderNodeTree'
+            space.node_tree = layer.kind_tree
+        except (AttributeError, TypeError, ValueError):
+            self.report({'ERROR'}, "Could not show the node group in the Shader Editor")
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+
+def _node_space_ensure(context):
+    """A #SpaceNode to show a shader tree in, creating an area when the window has none.
+
+    A Shader Editor already open in the current window is reused first: opening another copy beside
+    it would leave the window with two editors over one tree. Otherwise a window area is split --
+    the new area is the one not in the screen's list before the split -- and becomes a node editor;
+    the split runs under an explicit context override, because a script call has no active area.
+    A context with no window area falls back to a new window, which a background session cannot
+    make."""
+    window = context.window
+    if window is not None:
+        screen = window.screen
+        for area in screen.areas:
+            if area.type == 'NODE_EDITOR':
+                return area.spaces.active
+
+        area = getattr(context, "area", None)
+        if area is None and screen.areas:
+            area = screen.areas[0]
+        if area is not None:
+            areas_before = {candidate.as_pointer() for candidate in screen.areas}
+            region = next((candidate for candidate in area.regions
+                           if candidate.type == 'WINDOW'), None)
+            try:
+                with context.temp_override(window=window, area=area, region=region):
+                    bpy.ops.screen.area_split(direction='VERTICAL', factor=0.5)
+            except (RuntimeError, TypeError):
+                pass
+            for candidate in screen.areas:
+                if candidate.as_pointer() not in areas_before:
+                    candidate.type = 'NODE_EDITOR'
+                    return candidate.spaces.active
+
+    try:
+        bpy.ops.wm.window_new()
+    except RuntimeError:
+        return None
+    window_manager = context.window_manager
+    if not window_manager.windows:
+        return None
+    new_window = window_manager.windows[-1]
+    for candidate in new_window.screen.areas:
+        candidate.type = 'NODE_EDITOR'
+        return candidate.spaces.active
+    return None
+
+
+
 
 # Dynamic enum items must stay referenced from Python: Blender keeps raw pointers to the strings of
 # the last returned list, so a list rebuilt on every call leaves the UI reading freed memory.
@@ -1548,6 +1630,7 @@ def unregister():
 classes = (
     MaterialPaintLayersOutput,
     MATERIAL_OT_paint_layers_output_render,
+    MATERIAL_OT_paint_layer_node_group_edit,
     MATERIAL_OT_paint_layer_channel_add,
     MATERIAL_OT_paint_layer_channel_remove,
     MATERIAL_OT_paint_layer_channel_toggle,

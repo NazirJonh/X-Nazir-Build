@@ -1172,8 +1172,7 @@ static bool composite_chain_member_override(const IDProperty &system_properties,
  * contrast and invert rather than one per member. A chain whose members all fail the test lays
  * nothing.
  */
-static void composite_mask_item_chain(const MaskItemDescribeContext &context,
-                                      const MaterialPaintLayer &mask,
+static void composite_mask_item_chain(const MaterialPaintLayer &mask,
                                       Vector<PaintMaterialCompositeMaskItem> &r_items)
 {
   const Material *definition = mask.material;
@@ -1514,10 +1513,10 @@ static void composite_mask_items_describe(
     else if (paint_layer_kind_reads_anchor_point(mask)) {
       composite_mask_item_anchor_point(context, mask, r_items);
     }
-    else if (mask.kind_subtype == MA_PAINT_LAYER_FILTER_CHAIN) {
+    else if (paint_layer_effect_is_chain(mask)) {
       /* The chain unfolds into the mask filters of its definition, ahead of the plain filter
        * branch, which would describe it as one filter of a kind no branch answers. */
-      composite_mask_item_chain(context, mask, r_items);
+      composite_mask_item_chain(mask, r_items);
     }
     else if (paint_layer_kind_is_map_coverage(mask)) {
       composite_mask_item_map_coverage(context, mask, r_items);
@@ -2244,10 +2243,10 @@ static void composite_chain_member_effect_append(const Material &ma,
  * values to the instance not at all).
  *
  * The member's own effective opacity is what scales it, times the \a pass_through_scale the chain
- * row hangs under; the chain row's own opacity is deliberately not folded in (v1: a master opacity
- * would want a multiplicative pass over every member's strength, a refinement the design leaves for
- * later -- toggling the chain row still hides it, through the enabled flag the effective opacity
- * reads).
+ * row hangs under. The content form passes the chain row's own effective opacity in that scale (the
+ * layer's opacity slider scales the whole instance, the way the mask form multiplies its members by
+ * the item's), so a disabled chain is refused by #composite_effect_append before this walk runs and
+ * a lowered opacity fades every member.
  *
  * \a stop_before_member bounds the walk at the definition member it names (null unfolds the whole
  * chain): the members before it are exactly the prefix a GPU-computed member's input folds, and
@@ -2391,18 +2390,31 @@ static void composite_effect_append(
     PaintMaterialCompositeImageLayer &out,
     PaintLayerSurfaceRef painted_object = nullptr)
 {
-  if (effect.kind_subtype == MA_PAINT_LAYER_FILTER_CHAIN) {
+  if (paint_layer_effect_is_chain(effect)) {
     /* The chain's members are the corrections: the definition's effect rows unfold into the
      * corrections the branches below describe one by one -- pointwise filters, and effect
      * corrections for the GPU-computed members -- each carrying the instance's exposed values (the
      * composite-level expansion the design names). The unfolding runs before every other branch on
      * purpose: a chain is none of the shapes below, and describing it as one would wrong the
-     * colour or the coverage. */
+     * colour or the coverage.
+     *
+     * A disabled chain lays nothing. Its opacity is folded into every member below; the enabled
+     * flag is still checked here so the unfold does not compute a member's buffer only to scale its
+     * correction to zero. */
+    if ((effect.flag & MA_PAINT_LAYER_ENABLED) == 0) {
+      return;
+    }
+    /* The chain row's own opacity (its per-channel override included) scales every member, the way
+     * the mask form folds the item's effective opacity into its members: the layer panel draws the
+     * slider for every row, and a control that did nothing would be worse than the small extra
+     * factor. */
+    const float chain_scale = pass_through_scale *
+                              BKE_paint_layers_channel_opacity_effective(effect, channel);
     composite_effect_append_chain(ma,
                                   owner_row,
                                   effect,
                                   channel,
-                                  pass_through_scale,
+                                  chain_scale,
                                   describe_only,
                                   tile_number,
                                   painted_object,
@@ -4184,10 +4196,10 @@ static bool paint_layer_effect_compute(const Material &ma,
  * chain row being a DNA effect of its owner and stopping the walk there -- with the corrections of
  * the members before \a member folded in, so the input of member k is the chain's content with
  * members 0..k-1 laid. The prefix is laid by the same unfolding the description lays
- * (#composite_effect_append_chain_impl, bounded at this member), at the effect input's own
- * pass-through of one, so the canvas a member is computed from is the chain as the composite lays
- * it and never a re-derivation that could drift from the description the CPU composite mixes and
- * the GPU preview renders. A pointwise prefix member lays its filter correction; a GPU-computed
+ * (#composite_effect_append_chain_impl, bounded at this member), at the chain row's own effective
+ * opacity, so the canvas a member is computed from is the chain as the composite lays it and never
+ * a re-derivation that could drift from the description the CPU composite mixes and the GPU
+ * preview renders. A pointwise prefix member lays its filter correction; a GPU-computed
  * one lays its effect correction, whose result comes from the cache under its own composite
  * marker (computed on a miss, named by its maps in describe-only) -- the same recursion the plain
  * path runs when a row chains one CPU-computed effect into the next, terminating because the
@@ -4223,48 +4235,27 @@ static bool paint_layer_chain_member_input_describe(const Material &ma,
     return false;
   }
   /* The prefix, laid into the same entry: the members before this one, as the description carries
-   * them. The tile is resolved once here, the same way the base describe resolved it. */
+   * them. The chain's own effective opacity scales them, exactly as it scales the full
+   * description's members -- the input a member computes from has to be the chain as the composite
+   * lays it, master opacity included. The tile is resolved once here, the same way the base
+   * describe resolved it. */
   const int tile_number = BKE_paint_layers_tile_resolve(
       context.tile_number, nullptr, context.painted_object);
+  const float chain_scale = BKE_paint_layers_channel_opacity_effective(chain, channel);
   composite_effect_append_chain_impl(ma,
                                      &row,
                                      chain,
                                      channel,
-                                     /*pass_through_scale=*/1.0f,
+                                     chain_scale,
                                      describe_only,
                                      tile_number,
                                      context.painted_object,
                                      &member,
                                      r_entry);
-  /* The member's own correction, describe-only: the GPU job's input describe names it beside the
-   * prefix (the unfolding above is bounded before the member). The compute path leaves it out --
-   * the member's kernel is applied to the rendered input after this description. */
-  if (describe_only) {
-    const Material *definition = chain.material;
-    const PaintLayerKindInfo *member_kind = paint_layer_kind_of(member);
-    if (definition != nullptr && member_kind != nullptr &&
-        paint_layer_effect_is_cpu_computed(member) &&
-        paint_layer_effect_is_smart_filter_member(member) &&
-        paint_layer_effect_filters(*definition, member, channel))
-    {
-      const IDProperty *system_properties =
-          (chain.system_properties != nullptr && chain.system_properties->type == IDP_GROUP) ?
-              chain.system_properties :
-              nullptr;
-      composite_chain_member_effect_append(ma,
-                                           row,
-                                           chain,
-                                           member,
-                                           *member_kind,
-                                           system_properties,
-                                           channel,
-                                           /*pass_through_scale=*/1.0f,
-                                           /*describe_only=*/true,
-                                           tile_number,
-                                           context.painted_object,
-                                           r_entry);
-    }
-  }
+  /* The member itself is deliberately not named here. The input is what the member's kernel reads;
+   * adding the member's own correction would make the GPU input render fetch its own result texture
+   * (an unrendered one, or a previous frame's) and apply the member to its own input. The member's
+   * maps are the input maps the prefix and the base already name, so nothing is lost. */
   return true;
 }
 
@@ -4990,7 +4981,10 @@ static std::shared_ptr<ImBuf> paint_layer_chain_member_effect_buffer_get(
     PaintLayerSurfaceRef painted_object)
 {
   /* The maps the input reads and its size, described without rendering anything: the maps go to
-   * the composite cache's subscriptions, the size decides hits. */
+   * the composite cache's subscriptions, the size decides hits. The describe-only form is the one
+   * the GPU job's input uses, so the prefix corrections and the scalar/chain fingerprints built
+   * here match the GPU job's key; it also keeps this dimensions pass from computing a prefix
+   * member's buffer. */
   PaintMaterialCompositeImageLayer dims_entry;
   Vector<Image *> images;
   int width = 0;
@@ -5003,7 +4997,7 @@ static std::shared_ptr<ImBuf> paint_layer_chain_member_effect_buffer_get(
           member,
           channel,
           /*dimensions_only=*/true,
-          /*describe_only=*/false,
+          /*describe_only=*/true,
           dims_entry,
           PaintLayerTileContext{.painted_object = painted_object, .tile_number = tile_number}) ||
       !paint_layer_chain_member_dimensions_resolve(
@@ -6052,7 +6046,12 @@ std::shared_ptr<ImBuf> BKE_paint_layers_effect_buffer_result(const Material &ma,
    * this buffer verbatim, but every #PAINT_LAYER_KIND_NEEDS_BAKE kind is served by the same cache
    * and the question is the same one #composite_effect_append_cpu_computed answers for the CPU
    * composite. A GPU-computed-only or non-effect row has no buffer here to stand for. */
-  if (effect.role != MA_PAINT_LAYER_ROLE_EFFECT || !paint_layer_effect_is_cpu_computed(effect)) {
+  if (effect.role != MA_PAINT_LAYER_ROLE_EFFECT || !paint_layer_effect_is_cpu_computed(effect) ||
+      !paint_layer_effect_is_filter(effect))
+  {
+    /* The kernel only computes a filter. A NEEDS_BAKE source row or correction (a node-group
+     * source) answers from its bake map, not from this cache, and its unchanged input buffer must
+     * not be published as a result. */
     return {};
   }
   /* The effect reads the row it hangs on: the cache's key does not name it, but the input describe
@@ -6112,7 +6111,7 @@ std::shared_ptr<ImBuf> BKE_paint_layers_chain_member_effect_buffer_result(
    * same cache. A pointwise or non-effect row has no buffer here to stand for, and a chain row
    * that is not the member's own is refused, so a stray pointer cannot key a foreign entry. */
   if (member.role != MA_PAINT_LAYER_ROLE_EFFECT || !paint_layer_effect_is_cpu_computed(member) ||
-      chain.kind_subtype != MA_PAINT_LAYER_FILTER_CHAIN)
+      !paint_layer_effect_is_filter(member) || !paint_layer_effect_is_chain(chain))
   {
     return {};
   }

@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <iterator>
 #include <utility>
 
 #include "MEM_guardedalloc.h"
@@ -33,6 +34,7 @@
 #include "BKE_mesh.hh"
 #include "BKE_object.hh"
 #include "BKE_paint_layers_composite.hh"
+#include "BKE_paint_layers_asset.hh"
 #include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_layers_gradient_surface.hh"
@@ -3344,6 +3346,163 @@ TEST_F(PaintLayersBakeTest, an_uncovered_edit_region_is_kept_for_a_neighbourhood
   EXPECT_LE(region[2], uncovered.ymin);
   EXPECT_GE(region[3], uncovered.ymax);
   EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_BAKE_STALE, 0);
+}
+
+namespace {
+
+/**
+ * A chain instance laid on \a row: a Smart Filter definition whose effect members are \a filters,
+ * saved and inserted through the asset path. Null when the definition or the landing failed.
+ */
+MaterialPaintLayer *bake_test_add_chain_instance(
+    Main &bmain,
+    Material &ma,
+    MaterialPaintLayer &row,
+    const char *name,
+    const Span<const eMaterialPaintLayerFilter> filters)
+{
+  Material *src = BKE_material_add(&bmain, name);
+  src->paint_layers_flag |= MA_PAINT_LAYERED;
+  MaterialPaintLayer *holder = BKE_paint_layers_add(
+      *src, "Members", nullptr, PaintLayerPlace::Above);
+  if (holder == nullptr) {
+    return nullptr;
+  }
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  if (BKE_paint_layers_channel_add(*src, holder, PAINT_MATERIAL_CHANNEL_BASE_COLOR) == nullptr ||
+      !BKE_paint_layers_channel_set_value(*src, holder, PAINT_MATERIAL_CHANNEL_BASE_COLOR, white))
+  {
+    return nullptr;
+  }
+  Vector<const MaterialPaintLayer *> members;
+  for (const eMaterialPaintLayerFilter filter : filters) {
+    MaterialPaintLayer *member = BKE_paint_layers_filter_add(*src, holder, filter, nullptr);
+    if (member == nullptr) {
+      return nullptr;
+    }
+    members.append(member);
+  }
+  Material *definition = BKE_paint_layers_asset_create(
+      bmain, *src, members.as_span(), PaintLayerAssetType::Filter, name);
+  if (definition == nullptr) {
+    return nullptr;
+  }
+  PaintLayerImportResult result;
+  if (!BKE_paint_layers_asset_insert(
+          bmain, ma, *definition, &row, PaintLayerPlace::Above, &result))
+  {
+    return nullptr;
+  }
+  for (MaterialPaintLayer &effect : row.effects) {
+    if (effect.kind_subtype == MA_PAINT_LAYER_FILTER_CHAIN) {
+      return &effect;
+    }
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+/**
+ * A chain whose members are all pointwise corrections is a pointwise bake: the composite lays each
+ * member's filter per texel, so an uncovered region cannot move the chain's result.
+ */
+TEST_F(PaintLayersBakeTest, an_uncovered_edit_region_is_dropped_for_a_pointwise_chain)
+{
+  /* The wide map, so the right half is a partial-update chunk of its own: a narrow map reports the
+   * half edit as the whole 256-px chunk it falls in, which is covered. */
+  Image *map = bake_test_add_wide_image(*bmain, "Row");
+  MaterialPaintLayer *row = add_paint_layer("Row", map);
+  const eMaterialPaintLayerFilter filters[] = {MA_PAINT_LAYER_FILTER_EXPOSURE,
+                                               MA_PAINT_LAYER_FILTER_CONTRAST_LUMINOSITY};
+  ASSERT_NE(bake_test_add_chain_instance(*bmain,
+                                         *ma,
+                                         *row,
+                                         "PointwiseChain",
+                                         Span<const eMaterialPaintLayerFilter>(
+                                             filters, int(std::size(filters)))),
+            nullptr);
+  clear_active();
+  const rcti uncovered = bake_test_clear_right_half_alpha(*map);
+  ASSERT_GT(uncovered.xmax, uncovered.xmin);
+
+  bake_test_mark_region(*map, rcti{0, 0, 0, 0});
+  BKE_paint_layers_bake_subscribe(*ma, *row);
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_STALE;
+
+  bake_test_mark_region(*map, uncovered);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  int region[4] = {};
+  EXPECT_FALSE(BKE_paint_layers_bake_changed_region(*ma, *row, region))
+      << "a pointwise chain cannot move through an uncovered region, so it is dropped";
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_BAKE_STALE, 0)
+      << "a dropped region must not make the material stale";
+}
+
+/**
+ * A chain with a neighbourhood member (a Blur) reads past the edited texel through that member, so
+ * the whole chain keeps an uncovered region, as the member alone would.
+ */
+TEST_F(PaintLayersBakeTest, an_uncovered_edit_region_is_kept_for_a_neighbourhood_chain)
+{
+  Image *map = add_image("Row");
+  MaterialPaintLayer *row = add_paint_layer("Row", map);
+  const eMaterialPaintLayerFilter filters[] = {MA_PAINT_LAYER_FILTER_EXPOSURE,
+                                               MA_PAINT_LAYER_FILTER_BLUR};
+  ASSERT_NE(bake_test_add_chain_instance(*bmain,
+                                         *ma,
+                                         *row,
+                                         "BlurChain",
+                                         Span<const eMaterialPaintLayerFilter>(
+                                             filters, int(std::size(filters)))),
+            nullptr);
+  clear_active();
+  const rcti uncovered = bake_test_clear_right_half_alpha(*map);
+  ASSERT_GT(uncovered.xmax, uncovered.xmin);
+
+  bake_test_mark_region(*map, rcti{0, 0, 0, 0});
+  BKE_paint_layers_bake_subscribe(*ma, *row);
+
+  bake_test_mark_region(*map, uncovered);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  int region[4] = {};
+  ASSERT_TRUE(BKE_paint_layers_bake_changed_region(*ma, *row, region))
+      << "a blur member reaches past the edited rectangle, so the region is kept whole";
+  EXPECT_LE(region[0], uncovered.xmin);
+  EXPECT_GE(region[1], uncovered.xmax);
+  EXPECT_LE(region[2], uncovered.ymin);
+  EXPECT_GE(region[3], uncovered.ymax);
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_BAKE_STALE, 0);
+}
+
+/**
+ * A chain with no definition has no answer to fold: nothing is known about what it would lay, so
+ * an uncovered region is kept rather than culled on a guess.
+ */
+TEST_F(PaintLayersBakeTest, an_uncovered_edit_region_is_kept_for_a_chain_without_a_definition)
+{
+  Image *map = add_image("Row");
+  MaterialPaintLayer *row = add_paint_layer("Row", map);
+  MaterialPaintLayer *chain = BKE_paint_layers_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_CHAIN);
+  ASSERT_NE(chain, nullptr);
+  EXPECT_EQ(chain->material, nullptr);
+  clear_active();
+  const rcti uncovered = bake_test_clear_right_half_alpha(*map);
+  ASSERT_GT(uncovered.xmax, uncovered.xmin);
+
+  bake_test_mark_region(*map, rcti{0, 0, 0, 0});
+  BKE_paint_layers_bake_subscribe(*ma, *row);
+
+  bake_test_mark_region(*map, uncovered);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  int region[4] = {};
+  ASSERT_TRUE(BKE_paint_layers_bake_changed_region(*ma, *row, region))
+      << "a chain with no definition is not known to be pointwise, so its region is kept";
+  EXPECT_LE(region[0], uncovered.xmin);
+  EXPECT_GE(region[1], uncovered.xmax);
+  EXPECT_LE(region[2], uncovered.ymin);
+  EXPECT_GE(region[3], uncovered.ymax);
 }
 
 /**

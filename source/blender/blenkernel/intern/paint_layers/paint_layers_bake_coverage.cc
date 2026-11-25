@@ -293,6 +293,42 @@ static bool bake_region_has_coverage(Image &changed_image,
  */
 static EffectReach bake_coverage_effect_reach(const MaterialPaintLayer &effect)
 {
+  /* A chain lays its definition's members one after another, each over the result of the ones
+   * before it, so an edit can move the chain's bake past the edited rectangle only as far as the
+   * widest member can move it. A definition that is gone lays nothing, but a bake that was made
+   * from one cannot be narrowed: nothing is known about what it held. */
+  if (effect.kind_subtype == MA_PAINT_LAYER_FILTER_CHAIN) {
+    const Material *definition = effect.material;
+    if (definition == nullptr) {
+      return EffectReach::WholeMap;
+    }
+    for (const MaterialPaintLayer &member : definition->paint_layers) {
+      if (member.role != MA_PAINT_LAYER_ROLE_EFFECT) {
+        continue;
+      }
+      /* A member the chain's contract refuses is skipped by the unfolding, but a hand-made
+       * definition may hold one: what it would lay is unknown, so the whole map is kept. */
+      if (!paint_layer_effect_is_smart_filter_member(member)) {
+        return EffectReach::WholeMap;
+      }
+      /* A member the contract lets through without a CPU kernel is a pointwise colour
+       * correction: that is the shape the portability test admits, and the composite lays it as
+       * the plain filter branch. The shared reach API answers WholeMap for such a kind because no
+       * GPU pass plan describes it -- the conservative answer a lone row keeps, as it says
+       * nothing about the CPU kernel -- while the chain knows the member is laid per texel and
+       * reads the contract instead. */
+      const EffectReach member_reach = paint_layer_effect_is_cpu_computed(member) ?
+                                           bake_coverage_effect_reach(member) :
+                                           EffectReach::Pointwise;
+      if (member_reach != EffectReach::Pointwise) {
+        return EffectReach::WholeMap;
+      }
+    }
+    return EffectReach::Pointwise;
+  }
+  /* A node-group filter's reach is a property of its graph, not of a filter parameter table: a
+   * graph of per-pixel node functions is pointwise, while a Bevel or Ambient Occlusion anywhere in
+   * it reads a neighborhood and keeps every region. */
   if (effect.kind_subtype == MA_PAINT_LAYER_FILTER_NODE_GROUP) {
     return BKE_paint_layers_node_group_reaches_whole_map(effect) ? EffectReach::WholeMap :
                                                                    EffectReach::Pointwise;
@@ -347,9 +383,14 @@ static bool bake_coverage_pointwise(const Material &ma,
   }
   /* The row's own CPU effects and its children render into its bake, in storage order, each
    * reading the ones before it: any one of them that reads past the edited texel widens the reach
-   * of the whole bake. */
+   * of the whole bake. A chain is not one CPU kind of its own -- its members are -- but its
+   * definition decides how far it reads, so it is asked here beside them. */
   for (const MaterialPaintLayer &effect : row.effects) {
-    if ((effect.flag & MA_PAINT_LAYER_ENABLED) == 0 || !paint_layer_effect_is_cpu_computed(effect))
+    if ((effect.flag & MA_PAINT_LAYER_ENABLED) == 0) {
+      continue;
+    }
+    if (!paint_layer_effect_is_cpu_computed(effect) &&
+        effect.kind_subtype != MA_PAINT_LAYER_FILTER_CHAIN)
     {
       continue;
     }

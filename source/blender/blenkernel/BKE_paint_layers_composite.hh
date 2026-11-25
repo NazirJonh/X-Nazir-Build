@@ -398,6 +398,50 @@ void BKE_paint_layers_effect_input_images(const PaintMaterialCompositeImageLayer
                                           Vector<Image *> &r_images);
 
 /**
+ * Describe the input of a Smart Filter chain's GPU-computed \a member: the chain's content up to
+ * \a chain on \a row, with the definition members before \a member folded in (the prefix), and --
+ * in \a describe_only -- the member's own correction named beside it. The GPU job's input render
+ * and the member's CPU kernel both read this one description, so the pixels they work from cannot
+ * drift. Same terms as #BKE_paint_layers_effect_input_describe.
+ */
+bool BKE_paint_layers_chain_member_input_describe(const Material &ma,
+                                                  const MaterialPaintLayer &row,
+                                                  const MaterialPaintLayer &chain,
+                                                  const MaterialPaintLayer &member,
+                                                  int channel,
+                                                  bool dimensions_only,
+                                                  bool describe_only,
+                                                  PaintMaterialCompositeImageLayer &r_entry,
+                                                  const PaintLayerTileContext &context = {});
+
+/**
+ * The result of the GPU-computed \a member of the Smart Filter chain instance \a chain on its
+ * owner row's content in \a channel, exactly as the CPU effect cache holds it under the member's
+ * composite marker for the composite and the bake: the twin of #BKE_paint_layers_effect_buffer_result
+ * for a member, whose key names the composite marker the unfolding built (the chain row's and the
+ * member's markers hashed together) rather than a DNA marker, and whose input folds the members
+ * before this one. A node-group member reads the instance's exposed values, which live on the
+ * chain row; the kernel gets the member's own properties with those overrides folded in.
+ *
+ * \param row: the stack row the chain hangs on.
+ * \param chain: the chain row itself (#MA_PAINT_LAYER_FILTER_CHAIN).
+ * \param member: the definition member, a CPU-computed kind (#PAINT_LAYER_KIND_NEEDS_BAKE); a
+ *        pointwise or non-effect member answers null, as does a chain row of another kind.
+ * \param r_width, r_height: the buffer's dimensions, the input's own.
+ * \return the cached buffer, computed on a miss, under the same main-thread terms
+ *         #BKE_paint_layers_effect_buffer_result states.
+ */
+std::shared_ptr<ImBuf> BKE_paint_layers_chain_member_effect_buffer_result(
+    const Material &ma,
+    const MaterialPaintLayer &row,
+    const MaterialPaintLayer &chain,
+    const MaterialPaintLayer &member,
+    int channel,
+    int tile_number,
+    int &r_width,
+    int &r_height);
+
+/**
  * The input transforms the transform effects (a Transform Mapping, a Mirror) of \a row lay over
  * its own content: one entry per enabled effect whose own #MaterialPaintLayerMapping remaps, in
  * the effects list's order, each with #enabled set and no projection, and a no-op effect left

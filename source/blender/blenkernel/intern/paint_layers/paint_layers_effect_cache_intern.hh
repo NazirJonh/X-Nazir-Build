@@ -163,8 +163,17 @@ inline bool paint_layer_effect_key_equal(const EffectCacheKey &a, const EffectCa
  * pixels are not part of it -- the sources' versions stand in for those -- so an edit of a value
  * moves it and an edit of a map does not. Defined in `paint_layers_composite.cc`, beside the
  * schema readers it folds.
+ *
+ * \param instance_marker: the composite marker a Smart Filter chain's member is keyed under. A
+ * member row is the definition's own, so two instances of one asset carry the same kind, the same
+ * parameters and the same DNA marker; folding the composite marker -- which hashes the chain row's
+ * own marker in -- is the smallest fold that makes their cache keys differ, here and in the GPU
+ * cache, which builds its key from the same function. Nil (every direct effect) folds nothing and
+ * the hash is the plain one.
  */
-uint64_t paint_layer_effect_hash(const MaterialPaintLayer &effect, int channel);
+uint64_t paint_layer_effect_hash(const MaterialPaintLayer &effect,
+                                 int channel,
+                                 const bUUID &instance_marker = {});
 
 /** \} */
 

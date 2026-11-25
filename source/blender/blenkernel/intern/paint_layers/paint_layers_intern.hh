@@ -1107,6 +1107,14 @@ inline bool paint_layer_row_needs_bake(const MaterialPaintLayer &row)
       return true;
     }
   }
+  /* A chain as a mask item unfolds into pointwise mask filters the composite describes, but the
+   * live graph builds mask filters from its own cases and has no chain case: the row's bake is
+   * what the graph lays, and the bake folds the mask whole. */
+  for (const MaterialPaintLayer &item : row.mask_stack) {
+    if (item.kind_subtype == MA_PAINT_LAYER_FILTER_CHAIN) {
+      return true;
+    }
+  }
   return false;
 }
 

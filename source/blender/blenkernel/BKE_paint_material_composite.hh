@@ -821,11 +821,29 @@ struct PaintMaterialCompositeCorrection : PaintMaterialCompositeConstant {
   /**
    * The marker of the effect row this correction was made from, for a caller that has to name it --
    * the GPU result cache keys its texture on the effect instance, and a parameter hash cannot tell
-   * two effects with the same parameters on two rows apart. Nil for every other correction.
+   * two effects with the same parameters on two rows apart. For a Smart Filter chain's GPU-computed
+   * member the marker is the composite one the unfolding built (the chain row's and the member's
+   * markers hashed together), which is no row of the material at all -- #effect_member below names
+   * the row the cache answer belongs to. Nil for every other correction.
    */
   bUUID effect_marker = {};
-  /** A description hash of the effect's kind and parameters, folded into the stack hash. */
+  /** A description hash of the effect's kind and parameters, folded into the stack hash. A chain
+   * member's folds its composite marker and the instance's stored overrides too, so two instances
+   * of one asset hash apart and an exposed-value edit retires the cached result. */
   uint64_t effect_hash = 0;
+  /**
+   * The Smart Filter chain row a GPU-computed member was unfolded from, and the definition member
+   * row the correction was made from. A chain member is not a DNA row of the material the composite
+   * runs on -- it lives in the definition the chain row reads -- so the marker-based lookups
+   * (#BKE_paint_layers_find, #BKE_paint_layers_correction_owner) cannot resolve it, and the GPU
+   * job walk reads the pair from here: the member for the kind flags, the definition tree and the
+   * CPU answer, the chain row for the owner lookup and the prefix-aware input describe. Both
+   * borrow into live DNA (the chain row holds a user on the definition), valid while the
+   * description is -- the same terms #filter_ramp and #filter_curves borrow under. Null for every
+   * correction made from a DNA row of the material.
+   */
+  const MaterialPaintLayer *effect_chain = nullptr;
+  const MaterialPaintLayer *effect_member = nullptr;
   Image *image = nullptr;
   /**
    * A Text Decal effect's coverage map: the alpha of the rasterized text, read through the same

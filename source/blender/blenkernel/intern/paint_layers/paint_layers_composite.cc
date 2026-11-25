@@ -15,6 +15,7 @@
 #include "BKE_paint_layers_composite.hh"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -410,13 +411,34 @@ bool paint_layer_mask_transform_step_get(const MaterialPaintLayer &item,
 }
 
 /**
+ * The per-parameter override lookup a chain instance's unfolding reads: given a member schema
+ * position, answer whether the instance carries a stored value for it, filling \a r_value with it.
+ * A scalar parameter fills the first slot, a Color or a Vector the first three -- the same three
+ * slots the packing below widens them to, alpha and the fourth left to the typed accessor. An empty
+ * lookup (the ordinary filter packing) answers for nothing.
+ */
+using CompositeFilterParamOverride = FunctionRef<bool(int index, float r_value[3])>;
+
+/**
  * The parameters of \a row's kind in the schema order the evaluator reads them in. A colour is not
  * a scalar: its three channels lay across the three slots at its place in the schema order, the
- * alpha left to the typed accessor (no kernel reads it from this fold). That is the packing the GPU
- * effect pass plan reads the Glow's tint by, and the one consumer of a colour in the array; every
- * reader of the other kinds' numbers reads them by schema index, which the colour does not move.
+ * alpha left to the typed accessor (no kernel reads it from this fold). A vector packs the same
+ * way -- three consecutive slots, no fourth -- so the two non-scalar schemas read by index alike.
+ * That is the packing the GPU effect pass plan reads the Glow's tint by, and the one consumer of
+ * a colour in the array; every reader of the other kinds' numbers reads them by schema index,
+ * which the colour does not move.
+ *
+ * \a overrides is the chain instance's hook: where it answers, the stored override replaces the
+ * member's own value, at the member schema's packed position, whatever the parameter's type. The
+ * lookup runs inside the same walk as the packing, so the Color and Vector widening -- the one
+ * subtlety of the layout -- cannot drift apart between the plain and the overridden read. The
+ * payload folds above the walk (a Color Balance, a Channel Mixer) take no overrides: their values
+ * are payloads the member owns whole, which the chain instance does not carry (v1).
  */
-template<size_t N> static void composite_filter_params(const MaterialPaintLayer &row, float (&r_params)[N])
+template<size_t N>
+static void composite_filter_params(const MaterialPaintLayer &row,
+                                    float (&r_params)[N],
+                                    const CompositeFilterParamOverride &overrides = {})
 {
   if (paint_layer_kind_has_color_balance_param(row)) {
     /* The balance is not a scalar schema: its payload folds into the 12 numbers the composite, the
@@ -443,34 +465,36 @@ template<size_t N> static void composite_filter_params(const MaterialPaintLayer 
   if (const PaintLayerKindInfo *kind = paint_layer_kind_of(row)) {
     int pos = 0;
     for (const int i : IndexRange(kind->params_num)) {
-      if (kind->params[i].type == PaintLayerKindParamType::Color) {
-        /* Three consecutive floats, the schema order kept: the plan reads the Glow's tint here. */
-        float color[4];
-        paint_layer_kind_param_color_get(row, i, color);
-        for (const int c : IndexRange(3)) {
-          if (pos + c < int(N)) {
-            r_params[pos + c] = color[c];
-          }
+      const PaintLayerKindParamType type = kind->params[i].type;
+      /* The override is asked once per parameter, before either packing branch: the same answer
+       * feeds the scalar slot and the triple, so an instance override of a tint cannot land in the
+       * slots the scalar read kept. */
+      float override_value[3] = {0.0f, 0.0f, 0.0f};
+      const bool overridden = overrides && overrides(i, override_value);
+      if (type == PaintLayerKindParamType::Color || type == PaintLayerKindParamType::Vector) {
+        /* Three consecutive floats, the schema order kept: the plan reads the Glow's tint here,
+         * and a vector parameter rides the same way a colour does. The fourth slot stays zero for
+         * a vector, so the array is stable whatever the frame held. */
+        float packed[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        if (overridden) {
+          copy_v3_v3(packed, override_value);
         }
-        pos += 3;
-        continue;
-      }
-      if (kind->params[i].type == PaintLayerKindParamType::Vector) {
-        /* Three consecutive floats, the way a Color widens (see #PaintLayerKindParamType::Vector):
-         * a consumer reading by schema index finds the vector where the layout puts it instead of
-         * a zero in its first slot and a shifted tail. */
-        float vector[3];
-        paint_layer_kind_param_vector_get(row, i, vector);
+        else if (type == PaintLayerKindParamType::Color) {
+          paint_layer_kind_param_color_get(row, i, packed);
+        }
+        else {
+          paint_layer_kind_param_vector_get(row, i, packed);
+        }
         for (const int c : IndexRange(3)) {
           if (pos + c < int(N)) {
-            r_params[pos + c] = vector[c];
+            r_params[pos + c] = packed[c];
           }
         }
         pos += 3;
         continue;
       }
       if (pos < int(N)) {
-        r_params[pos] = paint_layer_kind_param_get(row, i);
+        r_params[pos] = overridden ? override_value[0] : paint_layer_kind_param_get(row, i);
       }
       pos++;
     }
@@ -1118,6 +1142,85 @@ static void composite_mask_item_map_coverage(const MaskItemDescribeContext &cont
 }
 
 /** A filter mask item, or the CPU-computed kind that lays its own grey. */
+/* Defined with the chain unfolding below; the mask-chain unfolding above it reads the same override
+ * view, so the declaration stands here. */
+static bool composite_chain_member_override(const IDProperty &system_properties,
+                                            const MaterialPaintLayer &member,
+                                            const PaintLayerKindInfo &member_kind,
+                                            int index,
+                                            float r_value[3]);
+
+/**
+ * Unfold the chain instance \a mask into the mask filters of its definition: each pointwise
+ * member is appended as the ordinary mask filter it would be if the user had added it by hand,
+ * folding the mask grey the members build up over, with the instance's exposed values read over
+ * the member's own (the same override view the content form unfolds with). The definition gone
+ * lays nothing, as every reader of a missing definition does; a member that fails the pointwise
+ * test the Smart Filter portability saved it with is skipped.
+ *
+ * A CPU-computed member the relaxed contract lets into a chain (a Blur, a node-group filter) is
+ * skipped here on purpose: the content form lays it as an effect correction whose result an effect
+ * stage reads back, but a mask item has no effect stage of its own -- the mask pass has no result
+ * texture to read, which is the same reason the refusal matrix keeps refusing CPU-computed mask
+ * kinds -- and laying its kind as a pointwise mask filter would shade a blur as a no-op. The
+ * save-time contract admits the shape, so this skip is the mask form's defensive half of it; a
+ * definition with such a member still unfolds fully as a content correction.
+ *
+ * The chain item's own opacity scales every member's, so the item's strength is the strength of
+ * the whole chain. Its contrast and invert ride the LAST member alone: both reshape the grey the
+ * chain hands back, and the last member's output is that grey, so the answer is the chain's own
+ * contrast and invert rather than one per member. A chain whose members all fail the test lays
+ * nothing.
+ */
+static void composite_mask_item_chain(const MaskItemDescribeContext &context,
+                                      const MaterialPaintLayer &mask,
+                                      Vector<PaintMaterialCompositeMaskItem> &r_items)
+{
+  const Material *definition = mask.material;
+  if (definition == nullptr) {
+    return;
+  }
+  const IDProperty *system_properties = (mask.system_properties != nullptr &&
+                                         mask.system_properties->type == IDP_GROUP) ?
+                                            mask.system_properties :
+                                            nullptr;
+  const float chain_opacity = BKE_paint_layers_effective_opacity(mask);
+  const float chain_contrast = BKE_paint_layers_mask_contrast_get(mask);
+  const bool chain_invert = paint_layer_mask_item_inverted(mask);
+  int64_t last_appended = -1;
+  for (const MaterialPaintLayer &member : definition->paint_layers) {
+    if (!paint_layer_effect_is_smart_filter_member(member)) {
+      continue;
+    }
+    if (paint_layer_effect_is_cpu_computed(member)) {
+      /* A GPU-computed or node-group member has no mask-item answer: see the comment above. */
+      continue;
+    }
+    const PaintLayerKindInfo *member_kind = paint_layer_kind_of(member);
+    if (member_kind == nullptr) {
+      continue;
+    }
+    PaintMaterialCompositeMaskItem filter;
+    filter.filter = member.kind_subtype;
+    composite_filter_params(member, filter.filter_params, [&](const int index, float r_value[3]) {
+      return system_properties != nullptr &&
+             composite_chain_member_override(
+                 *system_properties, member, *member_kind, index, r_value);
+    });
+    filter.filter_ramp = BKE_paint_layers_ramp_get(member);
+    filter.filter_curves = BKE_paint_layers_curves_get(member);
+    filter.opacity = BKE_paint_layers_effective_opacity(member) * chain_opacity;
+    r_items.append(filter);
+    last_appended = int64_t(r_items.size()) - 1;
+  }
+  if (last_appended >= 0) {
+    /* The chain's own reshape of the grey it hands back, exactly once: contrast and invert after
+     * the last member's filter are the contrast and invert of the chain's answer. */
+    r_items[last_appended].contrast = chain_contrast;
+    r_items[last_appended].invert = chain_invert;
+  }
+}
+
 static void composite_mask_item_filter(const MaskItemDescribeContext &context,
                                        const MaterialPaintLayer &mask,
                                        Vector<PaintMaterialCompositeMaskItem> &r_items)
@@ -1411,6 +1514,11 @@ static void composite_mask_items_describe(
     else if (paint_layer_kind_reads_anchor_point(mask)) {
       composite_mask_item_anchor_point(context, mask, r_items);
     }
+    else if (mask.kind_subtype == MA_PAINT_LAYER_FILTER_CHAIN) {
+      /* The chain unfolds into the mask filters of its definition, ahead of the plain filter
+       * branch, which would describe it as one filter of a kind no branch answers. */
+      composite_mask_item_chain(context, mask, r_items);
+    }
     else if (paint_layer_kind_is_map_coverage(mask)) {
       composite_mask_item_map_coverage(context, mask, r_items);
     }
@@ -1487,6 +1595,19 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
                                                             const rcti *compute_region = nullptr,
                                                             int *r_effect_origin = nullptr,
                                                             bool *r_effect_cropped = nullptr);
+
+/** The chain member's twin, defined beside it: the same cache with the prefix-aware input and the
+ * composite-marker key the unfolding of a GPU-computed member keys its correction on. */
+static std::shared_ptr<ImBuf> paint_layer_chain_member_effect_buffer_get(
+    const Material &ma,
+    const MaterialPaintLayer &row,
+    const MaterialPaintLayer &chain,
+    const MaterialPaintLayer &member,
+    const int channel,
+    const int tile_number,
+    const bool describe_only,
+    Vector<Image *> *r_images,
+    PaintLayerSurfaceRef painted_object = nullptr);
 
 /**
  * Append the CPU-computed effect \a effect to \a out as a correction carrying the map the effect
@@ -1734,6 +1855,524 @@ static bool composite_effect_map_describe(const Material &ma,
 }
 
 /**
+ * The instance's stored override of the member parameter at \a index of \a member_kind, read out of
+ * the chain row's system properties: the key the dynamic descriptor names
+ * (#paint_layer_chain_member_param_key) selects the property, whose shape mirrors what the member's
+ * own accessors store -- a float for a Float, an int for an Int or a choice, a boolean for a switch,
+ * a float array of four (or three) for a Color or a Vector. Anything else -- no property, a payload
+ * parameter (the ramp, the curves, the balance, the mixer), a stale value of the wrong shape -- is
+ * no override at all: the member's own value stands.
+ */
+static bool composite_chain_member_override(const IDProperty &system_properties,
+                                            const MaterialPaintLayer &member,
+                                            const PaintLayerKindInfo &member_kind,
+                                            const int index,
+                                            float r_value[3])
+{
+  if (index < 0 || index >= member_kind.params_num) {
+    return false;
+  }
+  const PaintLayerKindParam &param = member_kind.params[index];
+  switch (param.type) {
+    case PaintLayerKindParamType::Ramp:
+    case PaintLayerKindParamType::Curves:
+    case PaintLayerKindParamType::ColorBalance:
+    case PaintLayerKindParamType::ChannelMixer:
+      /* Payload parameters do not travel to the instance (v1): their values are the member's own,
+       * and the unfolding passes the payloads through whole beside this hook. */
+      return false;
+    default:
+      break;
+  }
+  const std::string key = paint_layer_chain_member_param_key(member.marker, param.name);
+  const IDProperty *prop = IDP_GetPropertyFromGroup(&system_properties, key.c_str());
+  if (prop == nullptr) {
+    return false;
+  }
+  switch (param.type) {
+    case PaintLayerKindParamType::Int:
+    case PaintLayerKindParamType::Enum:
+      if (prop->type != IDP_INT) {
+        return false;
+      }
+      r_value[0] = float(IDP_int_get(prop));
+      return true;
+    case PaintLayerKindParamType::Bool:
+      if (prop->type != IDP_BOOLEAN) {
+        return false;
+      }
+      r_value[0] = IDP_bool_get(prop) ? 1.0f : 0.0f;
+      return true;
+    case PaintLayerKindParamType::Color:
+      if (prop->type != IDP_ARRAY || prop->subtype != IDP_FLOAT || prop->len != 4) {
+        return false;
+      }
+      copy_v3_v3(r_value, IDP_array_float_get(prop));
+      return true;
+    case PaintLayerKindParamType::Vector:
+      if (prop->type != IDP_ARRAY || prop->subtype != IDP_FLOAT || prop->len != 3) {
+        return false;
+      }
+      copy_v3_v3(r_value, IDP_array_float_get(prop));
+      return true;
+    default:
+      /* A Float, the only remaining type: the seed writes the same IDP_FLOAT the member's own
+       * setter does, so a property of another shape is a stale one and reads as absent. */
+      if (prop->type != IDP_FLOAT) {
+        return false;
+      }
+      r_value[0] = IDP_float_get(prop);
+      return true;
+  }
+}
+
+/**
+ * The composite marker of the chain member \a member of the chain instance \a chain: a fresh
+ * #bUUID built deterministically from the two rows' own markers, so the correction a GPU-computed
+ * member lays as an effect correction is stable per (instance, member) -- the cache keys survive
+ * the description being rebuilt every frame -- and unique per instance, because the chain row's
+ * marker is one of the two inputs and no two rows of a material share one. Two instances of the
+ * same asset in one material therefore key apart (each carries its own chain row), while one
+ * instance re-asks across frames and across channels for the same marker the cache filed the
+ * answer under.
+ *
+ * The construction is the task's contract: the two markers' packed bytes are folded by two
+ * independent FNV-1a walks (a plain one and one over a salted stream, so a collision in one fold
+ * is not a collision in the marker), and the two 64-bit answers lay out the #bUUID's fields --
+ * #bUUID::time_low, #bUUID::time_mid and #bUUID::time_hi_and_version from the first, the clock
+ * sequence and the six node bytes from the second. No random generator is involved: the marker is
+ * a pure function of the definition's shape, and nothing about it is stored in the file (it is a
+ * session name for a cache entry, the way the effect markers the description carries are names the
+ * description derives rather than data it owns). An all-zero answer -- two nil markers, or a
+ * collision the birthday bound puts far past any real definition -- is bumped to a non-nil one:
+ * a nil marker reads as "no effect" to #paint_correction_is_effect, and a correction that carries
+ * one is a plain filter, not the member's cache key.
+ */
+static bUUID composite_chain_member_marker(const MaterialPaintLayer &chain,
+                                           const MaterialPaintLayer &member)
+{
+  const auto uuid_halves = [](const bUUID &uuid) {
+    static_assert(sizeof(bUUID) == sizeof(uint64_t[2]),
+                  "the fold reads the uuid's packed 16 bytes");
+    std::array<uint64_t, 2> halves;
+    memcpy(halves.data(), &uuid, sizeof(halves));
+    return halves;
+  };
+  const std::array<uint64_t, 2> chain_halves = uuid_halves(chain.marker);
+  const std::array<uint64_t, 2> member_halves = uuid_halves(member.marker);
+  uint64_t hash_a = fnv1a_offset_basis;
+  uint64_t hash_b = fnv1a_offset_basis ^ 0x9e3779b97f4a7c15ull;
+  for (const int i : IndexRange(2)) {
+    hash_a = fnv1a_mix(hash_a, chain_halves[i]);
+    hash_a = fnv1a_mix(hash_a, member_halves[i]);
+    hash_b = fnv1a_mix(hash_b, chain_halves[i] ^ 0x2545f4914f6cdd1dull);
+    hash_b = fnv1a_mix(hash_b, member_halves[i] ^ 0x2545f4914f6cdd1dull);
+  }
+  bUUID marker;
+  marker.time_low = uint32_t(hash_a);
+  marker.time_mid = uint16_t(hash_a >> 32);
+  marker.time_hi_and_version = uint16_t(hash_a >> 48);
+  marker.clock_seq_hi_and_reserved = uint8_t(hash_b);
+  marker.clock_seq_low = uint8_t(hash_b >> 8);
+  for (const int i : IndexRange(6)) {
+    marker.node[i] = uint8_t(hash_b >> (16 + 8 * i));
+  }
+  if (BLI_uuid_is_nil(marker)) {
+    marker.time_low = 1;
+  }
+  return marker;
+}
+
+/**
+ * A fingerprint of the instance's stored overrides of \a member's parameters: the chain row's
+ * system properties under the member keys (#paint_layer_chain_member_param_key), name and value
+ * both, folded in the definition order the group holds. The member's own values ride the base
+ * effect hash (its packed parameters fold), so this fold is what makes an exposed-value edit
+ * retire the cached result of a member whose kernel reads no packed schema -- the node-group
+ * filter takes its parameters from its IDProperties directly, which no packed walk sees. A
+ * property of a shape this fold does not name (a group, an id) still moves the hash by its name
+ * and type, which is enough: the kernel-side merge below replaces by name whatever the member's
+ * schema reads.
+ */
+static uint64_t composite_chain_member_overrides_hash(const MaterialPaintLayer &chain,
+                                                      const MaterialPaintLayer &member)
+{
+  uint64_t hash = fnv1a_offset_basis;
+  const IDProperty *system_properties = (chain.system_properties != nullptr &&
+                                         chain.system_properties->type == IDP_GROUP) ?
+                                            chain.system_properties :
+                                            nullptr;
+  if (system_properties == nullptr) {
+    return hash;
+  }
+  char member_prefix[UUID_STRING_SIZE];
+  BLI_uuid_format(member_prefix, member.marker);
+  const blender::StringRef member_prefix_key(member_prefix);
+  const auto mix = [&](const uint64_t value) {
+    hash = fnv1a_mix(hash, value);
+  };
+  for (const IDProperty *prop = static_cast<const IDProperty *>(
+           system_properties->data.group.first);
+       prop != nullptr;
+       prop = prop->next)
+  {
+    const blender::StringRef prop_name(prop->name);
+    if (!prop_name.startswith(member_prefix_key)) {
+      continue;
+    }
+    const blender::StringRef name = prop_name.drop_prefix(member_prefix_key.size());
+    /* #DefaultHash has no #StringRef specialization, and this fold is part of a cache key: keep
+     * hashing through #StringRefNull, safe here because the name points into the property's
+     * null-terminated name buffer. */
+    mix(get_default_hash(blender::StringRefNull(name.data())));
+    mix(uint64_t(prop->type));
+    switch (prop->type) {
+      case IDP_INT:
+        mix(uint64_t(IDP_int_get(prop)));
+        break;
+      case IDP_FLOAT: {
+        uint32_t bits;
+        const float value = IDP_float_get(prop);
+        memcpy(&bits, &value, sizeof(bits));
+        mix(bits);
+        break;
+      }
+      case IDP_DOUBLE:
+        mix(uint64_t(IDP_double_get(prop)));
+        break;
+      case IDP_BOOLEAN:
+        mix(uint64_t(IDP_bool_get(prop) ? 1 : 0));
+        break;
+      case IDP_ARRAY: {
+        mix(uint64_t(prop->len));
+        if (prop->subtype == IDP_FLOAT || prop->subtype == IDP_DOUBLE) {
+          const size_t stride = (prop->subtype == IDP_FLOAT) ? sizeof(float) : sizeof(double);
+          const char *data = static_cast<const char *>(prop->data.pointer);
+          for (const int i : IndexRange(prop->len)) {
+            uint64_t bits = 0;
+            memcpy(&bits, data + i * stride, stride);
+            mix(bits);
+          }
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  return hash;
+}
+
+/**
+ * The parameters the node-group kernel reads for the chain member \a member of the instance \a
+ * chain: the member's own properties, with the instance's stored overrides folded in under the
+ * plain parameter names the member's schema reads. A chain member is not a row of the material the
+ * composite runs on, so the kernel cannot read the instance's exposed values where a direct
+ * effect's kernel reads its row's own; the unfolding hands them over with this merged group
+ * instead. The copy carries the member's payloads (a ramp the interface laid down) whole -- the
+ * override keys only ever name schema parameters, the same names the packed override hook reads.
+ *
+ * \return a group the caller owns and frees with #IDP_FreeProperty, or null when the member has no
+ * parameters at all and the instance stores no override for it: the kernel then reads the member's
+ * own (absent) properties, exactly as an untouched direct effect does.
+ */
+static IDProperty *composite_chain_member_parameters(const MaterialPaintLayer &chain,
+                                                     const MaterialPaintLayer &member)
+{
+  IDProperty *merged = nullptr;
+  if (member.system_properties != nullptr && member.system_properties->type == IDP_GROUP) {
+    merged = IDP_CopyProperty(member.system_properties);
+  }
+  if (merged == nullptr) {
+    IDPropertyTemplate empty = {0};
+    merged = IDP_New(IDP_GROUP, &empty, "chain-member-parameters");
+  }
+  const IDProperty *system_properties = (chain.system_properties != nullptr &&
+                                         chain.system_properties->type == IDP_GROUP) ?
+                                            chain.system_properties :
+                                            nullptr;
+  if (system_properties != nullptr) {
+    char member_prefix[UUID_STRING_SIZE];
+    BLI_uuid_format(member_prefix, member.marker);
+    const blender::StringRef member_prefix_key(member_prefix);
+    for (const IDProperty *prop = static_cast<const IDProperty *>(
+             system_properties->data.group.first);
+         prop != nullptr;
+         prop = prop->next)
+    {
+      const blender::StringRef prop_name(prop->name);
+      if (!prop_name.startswith(member_prefix_key)) {
+        continue;
+      }
+      /* The stored value replaces the member's own under the plain parameter name: the same
+       * replacement the packed override hook makes for the schema-driven kinds, one level shallower
+       * because the kernel reads the group directly. */
+      IDProperty *copy = IDP_CopyProperty(prop);
+      /* The key is `<member uuid>:<parameter name>`; the colon is the separator, not part of the
+       * parameter name the kernel and the backend's identifier bind read. */
+      blender::StringRef param_name = prop_name.drop_prefix(member_prefix_key.size());
+      if (param_name.startswith(":")) {
+        param_name = param_name.drop_prefix(1);
+      }
+      /* #BLI_strncpy reads a C string, and a StringRef carries no terminator of its own; the
+       * name points into the property's null-terminated name buffer, so its data() is one. */
+      BLI_strncpy(copy->name, param_name.data(), sizeof(copy->name));
+      IDP_ReplaceInGroup(merged, copy);
+    }
+  }
+  return merged;
+}
+
+/**
+ * The instance-unique hash of the chain member \a member of the instance \a chain: the member's
+ * own effect hash, folded with the composite marker the correction is keyed under (two instances
+ * of one asset in one material carry the same definition member, so only the marker separates
+ * their keys) and with the instance's stored overrides (an exposed-value edit retires the cached
+ * result, and moves the stack hash and the GPU chain hash with it). The one hash the member's
+ * correction carries and its cache entry keys on, so the CPU and the GPU caches -- which read the
+ * same field -- can never disagree about what the member's answer is a function of.
+ */
+static uint64_t paint_layer_chain_member_effect_hash(const MaterialPaintLayer &chain,
+                                                     const MaterialPaintLayer &member,
+                                                     const int channel)
+{
+  const uint64_t hash = paint_layer_effect_hash(
+      member, channel, composite_chain_member_marker(chain, member));
+  return fnv1a_mix(hash, composite_chain_member_overrides_hash(chain, member));
+}
+
+/**
+ * Append one GPU-computed chain member's effect correction to \a out: the member's kind and packed
+ * parameters (the instance's overrides included), the composite marker the effect caches key the
+ * answer under, and the member/chain pair the GPU job walk resolves it by. \a describe_only names
+ * the maps and computes nothing. Shared by the unfolding and by the member input's describe, which
+ * names the member beside its prefix.
+ */
+static void composite_chain_member_effect_append(const Material &ma,
+                                                 const MaterialPaintLayer &owner_row,
+                                                 const MaterialPaintLayer &chain,
+                                                 const MaterialPaintLayer &member,
+                                                 const PaintLayerKindInfo &member_kind,
+                                                 const IDProperty *system_properties,
+                                                 const int channel,
+                                                 const float pass_through_scale,
+                                                 const bool describe_only,
+                                                 const int tile_number,
+                                                 PaintLayerSurfaceRef painted_object,
+                                                 PaintMaterialCompositeImageLayer &out)
+{
+  const auto override_lookup = [&](const int index, float r_value[3]) {
+    return system_properties != nullptr &&
+           composite_chain_member_override(
+               *system_properties, member, member_kind, index, r_value);
+  };
+  PaintMaterialCompositeCorrection effect_correction;
+  effect_correction.filter = member.kind_subtype;
+  composite_filter_params(member, effect_correction.filter_params, override_lookup);
+  effect_correction.filter_ramp = BKE_paint_layers_ramp_get(member);
+  effect_correction.filter_curves = BKE_paint_layers_curves_get(member);
+  effect_correction.effect_marker = composite_chain_member_marker(chain, member);
+  effect_correction.effect_hash = paint_layer_chain_member_effect_hash(chain, member, channel);
+  effect_correction.effect_result_has_alpha = paint_layer_kind_result_has_alpha(member);
+  /* The pair the GPU job walk resolves the member by: a composite marker is no row of the material,
+   * so the walk cannot look it up the way it looks a direct effect up. Both pointers borrow into
+   * live DNA for the description's lifetime, as the ramp and the curves above do. */
+  effect_correction.effect_chain = &chain;
+  effect_correction.effect_member = &member;
+  /* The result the correction mixes: the member's kernel over the chain's content with the members
+   * before this one folded in, cached under the composite marker. Describe-only leaves the buffer
+   * out and names the maps instead -- the combined preview falls back to nothing for the plan kinds
+   * it computes itself, and reads the same maps for its own input describe. The member never owns
+   * its result (a definition member is not baked; the row's bake holds the chain whole), so no bake
+   * map is asked for. */
+  effect_correction.effect_color = paint_layer_chain_member_effect_buffer_get(ma,
+                                                                              owner_row,
+                                                                              chain,
+                                                                              member,
+                                                                              channel,
+                                                                              tile_number,
+                                                                              describe_only,
+                                                                              &effect_correction.effect_images,
+                                                                              painted_object);
+  if (!describe_only && effect_correction.effect_color == nullptr) {
+    /* The input could not be rendered or the kernel gave no answer: the correction is left out,
+     * as a direct effect's is, and the members after it lay over the content without it. */
+    return;
+  }
+  effect_correction.opacity = BKE_paint_layers_channel_opacity_effective(member, channel) *
+                              pass_through_scale;
+  out.content_corrections.append(effect_correction);
+}
+
+/**
+ * Unfold the chain instance \a chain into the corrections of its definition: the definition's
+ * effect rows are appended in stack order, each as the ordinary correction it would be if the user
+ * had added it by hand -- a pointwise filter for the pointwise members, an effect correction keyed
+ * on a composite marker for the GPU-computed ones (#paint_layer_effect_is_smart_filter_member
+ * judges the shape, and the portability saved the definition with the same test, so the two can
+ * never disagree about what travels) -- with the instance's exposed values read over the member's
+ * own.
+ *
+ * This is the design's "chain as one plan-job" realized at the description level. The unfolding
+ * does not build a concatenated plan of its own: each GPU-computed member becomes an effect
+ * correction the machinery already knows how to collect, cache, plan and dispatch, exactly like a
+ * built-in GPU effect on the row. The ordering the chain promises comes from the definition order
+ * the corrections are appended in, and the one-input-render economy the design wants comes from
+ * each member's input folding the corrections of the members before it (the prefix, below), whose
+ * results the input render reads from the caches the earlier members published. A literal single
+ * plan-job -- one job whose pass plan is the concatenation of its members' plans, one input render
+ * for the whole chain -- remains possible later, but it needs no shader change and no plan-structure
+ * change to be approximated by the per-member jobs, so v3 ships those: the same mechanism the
+ * built-in GPU effects run on, with no new pass kind and no new dispatch path.
+ *
+ * The definition is the material the row reads (#MaterialPaintLayer::material); null -- a
+ * definition gone from the file -- lays nothing, the same answer a Material row with no source
+ * gives, rather than a chain that filters with nothing. Every member is judged by the same test
+ * the Smart Filter portability saved it with (#paint_layer_effect_is_smart_filter_member), so a
+ * definition edited past its contract cannot lay a correction the branches below cannot answer:
+ * the member is skipped, the way a row whose kind this build does not know is. A chain with a
+ * member this build refuses (a NEEDS_BAKE kind with neither a GPU pass nor a precomputed answer)
+ * previews without it -- the portability still blocks the shape at save time, so the skip is the
+ * defensive tail of the contract, not the path a conforming definition takes.
+ *
+ * The instance's values ride the member's own packing: the packed walk is handed the lookup that
+ * reads #MaterialPaintLayer::system_properties under the member key the descriptor named
+ * (#paint_layer_chain_member_param_key), so an override lands at the member schema's packed
+ * position and a Color or a Vector widens the same three slots the plain read widens. The member's
+ * payloads travel whole -- the ramp and the curves are the member's, as are a Color Balance's and a
+ * Channel Mixer's folds, which the override hook deliberately never answers (v1 exposes their
+ * values to the instance not at all).
+ *
+ * The member's own effective opacity is what scales it, times the \a pass_through_scale the chain
+ * row hangs under; the chain row's own opacity is deliberately not folded in (v1: a master opacity
+ * would want a multiplicative pass over every member's strength, a refinement the design leaves for
+ * later -- toggling the chain row still hides it, through the enabled flag the effective opacity
+ * reads).
+ *
+ * \a stop_before_member bounds the walk at the definition member it names (null unfolds the whole
+ * chain): the members before it are exactly the prefix a GPU-computed member's input folds, and
+ * the same function lays both the description's corrections and the prefix's, so the input a
+ * member is computed from is the chain as the composite lays it, never a re-derivation that could
+ * drift. The prefix ask runs at a pass-through of one -- the effect input's own scale -- and is
+ * the reason the GPU member branch needs \a ma, \a describe_only and the tile context at all: the
+ * member's result is a buffer the effect cache computes (or, in describe-only, a correction that
+ * only names its maps), which the pointwise branch never needs.
+ */
+static void composite_effect_append_chain_impl(const Material &ma,
+                                               const MaterialPaintLayer *owner_row,
+                                               const MaterialPaintLayer &chain,
+                                               const int channel,
+                                               const float pass_through_scale,
+                                               const bool describe_only,
+                                               const int tile_number,
+                                               PaintLayerSurfaceRef painted_object,
+                                               const MaterialPaintLayer *stop_before_member,
+                                               PaintMaterialCompositeImageLayer &out)
+{
+  const Material *definition = chain.material;
+  if (definition == nullptr) {
+    return;
+  }
+  /* The instance's overrides live at the top level of the row's system properties, keyed by the
+   * member key; the group is borrowed once and asked per member parameter below. A missing
+   * property is not an override: the member's own value stands, which is what an unexposed or
+   * untouched parameter reads as. */
+  const IDProperty *system_properties = (chain.system_properties != nullptr &&
+                                         chain.system_properties->type == IDP_GROUP) ?
+                                            chain.system_properties :
+                                            nullptr;
+  for (const MaterialPaintLayer &member : definition->paint_layers) {
+    if (stop_before_member != nullptr &&
+        BLI_uuid_equal(member.marker, stop_before_member->marker))
+    {
+      break;
+    }
+    if (!paint_layer_effect_is_smart_filter_member(member)) {
+      continue;
+    }
+    if (!paint_layer_effect_filters(*definition, member, channel)) {
+      continue;
+    }
+    const PaintLayerKindInfo *member_kind = paint_layer_kind_of(member);
+    if (member_kind == nullptr) {
+      continue;
+    }
+    const auto override_lookup = [&](const int index, float r_value[3]) {
+      return system_properties != nullptr &&
+             composite_chain_member_override(
+                 *system_properties, member, *member_kind, index, r_value);
+    };
+    if (!paint_layer_effect_is_cpu_computed(member)) {
+      /* A pointwise member rides the plain path, which keys nothing per instance: its correction
+       * is the filter the evaluator's own branch lays. */
+      PaintMaterialCompositeCorrection filter;
+      filter.filter = member.kind_subtype;
+      composite_filter_params(member, filter.filter_params, override_lookup);
+      filter.filter_ramp = BKE_paint_layers_ramp_get(member);
+      filter.filter_curves = BKE_paint_layers_curves_get(member);
+      filter.opacity = BKE_paint_layers_channel_opacity_effective(member, channel) *
+                       pass_through_scale;
+      out.content_corrections.append(filter);
+      continue;
+    }
+    /* A GPU-computed member (a Blur, or the node-group filter the effect stage serves from the CPU
+     * cache) becomes an effect correction, the shape #composite_effect_append_cpu_computed lays
+     * for a direct effect -- the correction carries the member's kind and packed parameters (the
+     * instance's overrides included), the result beside them, and the composite marker the effect
+     * caches key the answer under. The correction pass mixes it in the order the definition holds,
+     * and the GPU job walk collects it like any other marked correction: one effect job per
+     * member, its plan the member's own. */
+    if (owner_row == nullptr) {
+      /* The input is the owner row's content up to the chain: a description without one cannot
+       * name it, so the member is left out, exactly as a CPU-computed effect of a standalone
+       * corrections-row description is. */
+      continue;
+    }
+    composite_chain_member_effect_append(ma,
+                                         *owner_row,
+                                         chain,
+                                         member,
+                                         *member_kind,
+                                         system_properties,
+                                         channel,
+                                         pass_through_scale,
+                                         describe_only,
+                                         tile_number,
+                                         painted_object,
+                                         out);
+  }
+}
+
+/**
+ * Unfold the chain instance \a chain into the corrections of its definition, for the composite's
+ * description of \a owner_row (null from a standalone corrections-row description, where a
+ * GPU-computed member has no owner content to read and is left out): the whole chain, every member
+ * the contract lets through, in definition order. See #composite_effect_append_chain_impl for the
+ * shape of the corrections.
+ */
+static void composite_effect_append_chain(const Material &ma,
+                                          const MaterialPaintLayer *owner_row,
+                                          const MaterialPaintLayer &chain,
+                                          const int channel,
+                                          const float pass_through_scale,
+                                          const bool describe_only,
+                                          const int tile_number,
+                                          PaintLayerSurfaceRef painted_object,
+                                          PaintMaterialCompositeImageLayer &out)
+{
+  composite_effect_append_chain_impl(ma,
+                                     owner_row,
+                                     chain,
+                                     channel,
+                                     pass_through_scale,
+                                     describe_only,
+                                     tile_number,
+                                     painted_object,
+                                     /*stop_before_member=*/nullptr,
+                                     out);
+}
+
+/**
  * Append the content correction \a effect to \a out as the evaluator reads it in \a channel: a filter,
  * or a map, flat colour, source or slice laid by the correction's own blend and opacity. Nothing is
  * appended for a correction that lays nothing here, as the generator builds nothing for it.
@@ -1752,6 +2391,24 @@ static void composite_effect_append(
     PaintMaterialCompositeImageLayer &out,
     PaintLayerSurfaceRef painted_object = nullptr)
 {
+  if (effect.kind_subtype == MA_PAINT_LAYER_FILTER_CHAIN) {
+    /* The chain's members are the corrections: the definition's effect rows unfold into the
+     * corrections the branches below describe one by one -- pointwise filters, and effect
+     * corrections for the GPU-computed members -- each carrying the instance's exposed values (the
+     * composite-level expansion the design names). The unfolding runs before every other branch on
+     * purpose: a chain is none of the shapes below, and describing it as one would wrong the
+     * colour or the coverage. */
+    composite_effect_append_chain(ma,
+                                  owner_row,
+                                  effect,
+                                  channel,
+                                  pass_through_scale,
+                                  describe_only,
+                                  tile_number,
+                                  painted_object,
+                                  out);
+    return;
+  }
   if (effect.source == MA_PAINT_LAYER_SOURCE_NODE_GROUP) {
     /* A node-group source lays the shader-bake's answer over the content it reads, at the row's
      * blend and opacity -- the same maps the row lays. The kind carries NEEDS_BAKE (the live graph
@@ -2778,6 +3435,34 @@ bool paint_layer_effect_dimensions_resolve(Span<PaintMaterialCompositeImageLayer
   return r_from_slot;
 }
 
+/**
+ * The size a chain member's input is computed at: the described input's own size, or -- when the
+ * owner row carries no map to measure (a flat Fill) -- the material's canvas, the size the row's
+ * own bake uses. False when neither names a positive size.
+ */
+static bool paint_layer_chain_member_dimensions_resolve(
+    const Material &ma,
+    Span<PaintMaterialCompositeImageLayer> input,
+    const MaterialPaintLayer &member,
+    const int tile_number,
+    int &r_width,
+    int &r_height,
+    bool &r_from_slot)
+{
+  if (paint_layer_effect_dimensions_resolve(
+          input, member, tile_number, r_width, r_height, r_from_slot))
+  {
+    return true;
+  }
+  const int canvas = int(ma.paint_layers_image_size);
+  if (canvas <= 0) {
+    return false;
+  }
+  r_width = r_height = canvas;
+  r_from_slot = false;
+  return true;
+}
+
 /** An RGBA float buffer of \a width x \a height, owned by the returned shared pointer. */
 static std::shared_ptr<ImBuf> anchor_slice_buffer_new(const int width, const int height)
 {
@@ -3193,9 +3878,14 @@ static std::atomic<size_t> g_paint_layer_effect_partial_compute_count{0};
 /**
  * A description hash of the effect: the kind and the parameters in its schema order. The input's
  * pixels are not part of it -- the sources' versions stand in for those -- so an edit of a value
- * moves it and an edit of a map does not.
+ * moves it and an edit of a map does not. \a instance_marker is the composite marker a Smart Filter
+ * chain's member is keyed under (see the declaration in `paint_layers_effect_cache_intern.hh`):
+ * the member's kind, parameters and DNA marker are the definition's own, so the marker is the one
+ * fold that tells two instances of one asset apart in both effect caches. Nil folds nothing.
  */
-uint64_t paint_layer_effect_hash(const MaterialPaintLayer &effect, const int channel)
+uint64_t paint_layer_effect_hash(const MaterialPaintLayer &effect,
+                                 const int channel,
+                                 const bUUID &instance_marker)
 {
   uint64_t hash = 1469598103934665603ull;
   const auto mix_u32 = [&](const uint32_t value) {
@@ -3216,6 +3906,17 @@ uint64_t paint_layer_effect_hash(const MaterialPaintLayer &effect, const int cha
     const uint64_t source_hash = UUID(effect.anchor_point_source).hash();
     mix_u32(uint32_t(source_hash));
     mix_u32(uint32_t(source_hash >> 32));
+  }
+  /* The instance fold comes before the parameters, so the plain hash (a nil marker) and the
+   * instanced one never collide on the same parameters: the marker's halves join the fold here,
+   * the same two-u64 shape the GPU plan's fingerprint folds a uuid by. */
+  if (!BLI_uuid_is_nil(instance_marker)) {
+    uint64_t marker_halves[2];
+    memcpy(marker_halves, &instance_marker, sizeof(marker_halves));
+    mix_u32(uint32_t(marker_halves[0]));
+    mix_u32(uint32_t(marker_halves[0] >> 32));
+    mix_u32(uint32_t(marker_halves[1]));
+    mix_u32(uint32_t(marker_halves[1] >> 32));
   }
   float params[PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM] = {};
   composite_filter_params(effect, params);
@@ -3474,6 +4175,195 @@ static bool paint_layer_effect_compute(const Material &ma,
   r_synced = map_sources_snapshot(images);
   r_color = std::move(color);
   perf_total.note("kind=%d size=%dx%d region=full", int(effect.kind_subtype), width, height);
+  return true;
+}
+
+/**
+ * The input of the Smart Filter chain member \a member of the instance \a chain: the owner row's
+ * content up to the chain row -- the same base the chain row's own input describe builds, the
+ * chain row being a DNA effect of its owner and stopping the walk there -- with the corrections of
+ * the members before \a member folded in, so the input of member k is the chain's content with
+ * members 0..k-1 laid. The prefix is laid by the same unfolding the description lays
+ * (#composite_effect_append_chain_impl, bounded at this member), at the effect input's own
+ * pass-through of one, so the canvas a member is computed from is the chain as the composite lays
+ * it and never a re-derivation that could drift from the description the CPU composite mixes and
+ * the GPU preview renders. A pointwise prefix member lays its filter correction; a GPU-computed
+ * one lays its effect correction, whose result comes from the cache under its own composite
+ * marker (computed on a miss, named by its maps in describe-only) -- the same recursion the plain
+ * path runs when a row chains one CPU-computed effect into the next, terminating because the
+ * prefix shrinks by one member per level.
+ *
+ * This is the one description the member's CPU effect cache renders from and the GPU preview's
+ * member job lays from (#BKE_paint_layers_chain_member_input_describe is its public form), so the
+ * two cannot disagree about what a chain member is computed on -- the contract
+ * #BKE_paint_layers_effect_input_describe holds for a direct effect, held here for a member.
+ *
+ * The input channel is the chain row's own (#paint_layer_effect_input_channel of the chain): the
+ * chain works in the channel the description works in, and a member's kernel runs over that
+ * canvas. A cross-channel member (a Height To Normal) reads the chain's working canvas rather than
+ * the row's map of its input channel -- the chain has no cross-channel plumbing (v3 keeps the one
+ * canvas the chain input names); such a member on a colour channel is refused by the gates the
+ * unfolding runs before this point anyway.
+ */
+static bool paint_layer_chain_member_input_describe(const Material &ma,
+                                                    const MaterialPaintLayer &row,
+                                                    const MaterialPaintLayer &chain,
+                                                    const MaterialPaintLayer &member,
+                                                    const int channel,
+                                                    const bool dimensions_only,
+                                                    const bool describe_only,
+                                                    PaintMaterialCompositeImageLayer &r_entry,
+                                                    const PaintLayerTileContext &context)
+{
+  /* The base is the chain's own input, described exactly as the chain row's would be: the row's
+   * content up to the chain's marker, the row's opacity, mask and blend cleared. */
+  if (!BKE_paint_layers_effect_input_describe(
+          ma, row, chain, channel, dimensions_only, describe_only, r_entry, context))
+  {
+    return false;
+  }
+  /* The prefix, laid into the same entry: the members before this one, as the description carries
+   * them. The tile is resolved once here, the same way the base describe resolved it. */
+  const int tile_number = BKE_paint_layers_tile_resolve(
+      context.tile_number, nullptr, context.painted_object);
+  composite_effect_append_chain_impl(ma,
+                                     &row,
+                                     chain,
+                                     channel,
+                                     /*pass_through_scale=*/1.0f,
+                                     describe_only,
+                                     tile_number,
+                                     context.painted_object,
+                                     &member,
+                                     r_entry);
+  /* The member's own correction, describe-only: the GPU job's input describe names it beside the
+   * prefix (the unfolding above is bounded before the member). The compute path leaves it out --
+   * the member's kernel is applied to the rendered input after this description. */
+  if (describe_only) {
+    const Material *definition = chain.material;
+    const PaintLayerKindInfo *member_kind = paint_layer_kind_of(member);
+    if (definition != nullptr && member_kind != nullptr &&
+        paint_layer_effect_is_cpu_computed(member) &&
+        paint_layer_effect_is_smart_filter_member(member) &&
+        paint_layer_effect_filters(*definition, member, channel))
+    {
+      const IDProperty *system_properties =
+          (chain.system_properties != nullptr && chain.system_properties->type == IDP_GROUP) ?
+              chain.system_properties :
+              nullptr;
+      composite_chain_member_effect_append(ma,
+                                           row,
+                                           chain,
+                                           member,
+                                           *member_kind,
+                                           system_properties,
+                                           channel,
+                                           /*pass_through_scale=*/1.0f,
+                                           /*describe_only=*/true,
+                                           tile_number,
+                                           context.painted_object,
+                                           r_entry);
+    }
+  }
+  return true;
+}
+
+/**
+ * Render the input of the chain member \a member and apply its kernel, into a buffer of the
+ * input's own size. The twin of #paint_layer_effect_compute for a Smart Filter chain's
+ * GPU-computed member: the same input render, the same region contract -- the whole buffer, a
+ * neighbourhood reads past an edited rectangle -- and the member's kernel over it, the parameters
+ * a node-group member reads taken from the merged view the instance's overrides make
+ * (#composite_chain_member_parameters). A kernel that answers false leaves no answer to cache, the
+ * same rule the plain path holds.
+ */
+static bool paint_layer_chain_member_effect_compute(const Material &ma,
+                                                    const MaterialPaintLayer &row,
+                                                    const MaterialPaintLayer &chain,
+                                                    const MaterialPaintLayer &member,
+                                                    const int channel,
+                                                    const int tile_number,
+                                                    std::shared_ptr<ImBuf> &r_color,
+                                                    Vector<AnchorSliceSource> &r_synced,
+                                                    PaintLayerSurfaceRef painted_object)
+{
+  bke::paint_perf::ScopedTimer perf_total("effect.cpu.total");
+  PaintMaterialCompositeImageLayer entry;
+  std::shared_ptr<ImBuf> color;
+  int width = 0;
+  int height = 0;
+  {
+    bke::paint_perf::ScopedTimer perf_input("effect.cpu.input");
+    if (!paint_layer_chain_member_input_describe(
+            ma,
+            row,
+            chain,
+            member,
+            channel,
+            /*dimensions_only=*/false,
+            /*describe_only=*/false,
+            entry,
+            PaintLayerTileContext{.painted_object = painted_object, .tile_number = tile_number}))
+    {
+      return false;
+    }
+    bool from_slot = false;
+    if (!paint_layer_chain_member_dimensions_resolve(
+            ma,
+            Span<PaintMaterialCompositeImageLayer>(&entry, 1),
+            member,
+            tile_number,
+            width,
+            height,
+            from_slot))
+    {
+      return false;
+    }
+    color = anchor_slice_buffer_new(width, height);
+    if (color == nullptr) {
+      return false;
+    }
+    /* A row with no map has no content to render: the slot's own size gave the canvas, and the
+     * kernel lays its result over the empty buffer. */
+    if (!from_slot) {
+      Vector<float> coverage(int64_t(width) * height);
+      if (!BKE_paint_material_composite_eval_row_content(
+              entry, color->float_data_for_write(), coverage.data(), nullptr, channel))
+      {
+        return false;
+      }
+    }
+    perf_input.note("kind=%d size=%dx%d region=full", int(member.kind_subtype), width, height);
+  }
+  /* The member's kernel, over the chain's content with the prefix laid. A node-group member reads
+   * the instance's exposed values, which live on the chain row under the member keys: the merged
+   * group is built for the kernel call and freed when it is done, the lifetime the backend's
+   * synchronous render covers. Every other kind reads no parameters_override and runs on the
+   * member's own schema exactly as a direct effect of the same kind does. */
+  /* Every CPU-computed member reads its schema parameters through the row's group, and the
+   * instance's exposed values live on the chain row: the merge is handed to the kernel for all of
+   * them (the kernel applies it to the kind's own accessors, not only the node-group branch). A
+   * pointwise member never reaches here; its values ride the packed description instead. */
+  IDProperty *kernel_parameters = composite_chain_member_parameters(chain, member);
+  const bool answered = paint_layer_effect_kernel_apply(
+      *color, member, /*for_mask=*/false, tile_number, kernel_parameters);
+  if (kernel_parameters != nullptr) {
+    IDP_FreeProperty(kernel_parameters);
+  }
+  if (!answered) {
+    return false;
+  }
+  /* The versions are taken after the render, the plain path's rule. The member reads no slot of
+   * its own -- the contract refuses the kinds that do -- so the append folds nothing beside the
+   * input's maps, and the maps include the prefix's own corrections' maps. */
+  Vector<Image *> images;
+  paint_layer_effect_input_images_append(
+      member, images, [&](Vector<Image *> &r_input_images) {
+        BKE_paint_layers_effect_input_images(entry, r_input_images);
+      });
+  r_synced = map_sources_snapshot(images);
+  r_color = std::move(color);
+  perf_total.note("kind=%d size=%dx%d region=full", int(member.kind_subtype), width, height);
   return true;
 }
 
@@ -4069,6 +4959,103 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
     }
   }
   return color;
+}
+
+/**
+ * The result of the GPU-computed \a member of the Smart Filter chain instance \a chain on its
+ * owner row's content in \a channel, as a float RGBA buffer at the input's size, scene linear, the
+ * input's content alpha in the fourth component. The twin of #paint_layer_effect_buffer_get for a
+ * chain member: the same cache, the same get-or-compute cycle, keyed on the member's composite
+ * marker and the instance-unique hash, with the input described through the prefix the members
+ * before it lay (#paint_layer_chain_member_input_describe). Describe-only answers nothing but the
+ * maps, the plain path's contract.
+ *
+ * The key's chain half folds the input's preceding effect corrections' markers and hashes -- the
+ * DNA effects before the chain row, and the members before this one -- which is the same fold the
+ * GPU key carries (#BKE_paint_layers_effect_chain_hash): an edit of an upstream effect's
+ * definition moves no packed parameter, so the scalar hash alone would keep serving a result
+ * computed from the old answer, and the chain hash is what retires it. The plain path leaves the
+ * half at zero (a direct effect's key holds its own hash, and the composite re-describes under it);
+ * a member's input is built from other effects' results by construction, so the half is its key.
+ */
+static std::shared_ptr<ImBuf> paint_layer_chain_member_effect_buffer_get(
+    const Material &ma,
+    const MaterialPaintLayer &row,
+    const MaterialPaintLayer &chain,
+    const MaterialPaintLayer &member,
+    const int channel,
+    const int tile_number,
+    const bool describe_only,
+    Vector<Image *> *r_images,
+    PaintLayerSurfaceRef painted_object)
+{
+  /* The maps the input reads and its size, described without rendering anything: the maps go to
+   * the composite cache's subscriptions, the size decides hits. */
+  PaintMaterialCompositeImageLayer dims_entry;
+  Vector<Image *> images;
+  int width = 0;
+  int height = 0;
+  bool dims_from_slot = false;
+  if (!paint_layer_chain_member_input_describe(
+          ma,
+          row,
+          chain,
+          member,
+          channel,
+          /*dimensions_only=*/true,
+          /*describe_only=*/false,
+          dims_entry,
+          PaintLayerTileContext{.painted_object = painted_object, .tile_number = tile_number}) ||
+      !paint_layer_chain_member_dimensions_resolve(
+          ma,
+          Span<PaintMaterialCompositeImageLayer>(&dims_entry, 1),
+          member,
+          tile_number,
+          width,
+          height,
+          dims_from_slot))
+  {
+    return {};
+  }
+  paint_layer_effect_input_images_append(
+      member, images, [&](Vector<Image *> &r_input_images) {
+        BKE_paint_layers_effect_input_images(dims_entry, r_input_images);
+      });
+  if (r_images != nullptr) {
+    *r_images = images;
+  }
+  if (describe_only) {
+    return {};
+  }
+
+  const bUUID member_marker = composite_chain_member_marker(chain, member);
+  EffectCacheKey key{ma.id.session_uid,
+                     member_marker,
+                     channel,
+                     tile_number,
+                     paint_layer_chain_member_effect_hash(chain, member, channel)};
+  /* The two fingerprints the GPU key carries, from the same description: the scalar content the
+   * input's maps do not cover, and the ordered fingerprint of the effects whose results feed this
+   * input. See the comment above the function for why the chain half is the member's key and the
+   * plain path's zero. */
+  key.key_extras.input_scalar_hash = BKE_paint_layers_effect_input_scalar_hash(dims_entry);
+  key.key_extras.chain_hash = BKE_paint_layers_effect_chain_hash(
+      Span<const PaintMaterialCompositeCorrection>(dims_entry.content_corrections.data(),
+                                                   dims_entry.content_corrections.size()),
+      member_marker);
+  std::shared_ptr<ImBuf> result = paint_layer_effect_cache_get_or_compute(
+      g_paint_effect_cache,
+      g_paint_effect_cache_mutex,
+      key,
+      width,
+      height,
+      images,
+      g_paint_effect_cache_budget,
+      [&](std::shared_ptr<ImBuf> &r_color, Vector<PaintLayerEffectSource> &r_synced) {
+        return paint_layer_chain_member_effect_compute(
+            ma, row, chain, member, channel, tile_number, r_color, r_synced, painted_object);
+      });
+  return result;
 }
 
 void paint_layer_owned_effect_cache_drop(const Material &ma,
@@ -5021,6 +6008,61 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
     return "an adjustment filter the preview shader has no branch for is read";
   }
   return nullptr;
+}
+
+bool BKE_paint_layers_chain_member_input_describe(const Material &ma,
+                                                  const MaterialPaintLayer &row,
+                                                  const MaterialPaintLayer &chain,
+                                                  const MaterialPaintLayer &member,
+                                                  const int channel,
+                                                  const bool dimensions_only,
+                                                  const bool describe_only,
+                                                  PaintMaterialCompositeImageLayer &r_entry,
+                                                  const PaintLayerTileContext &context)
+{
+  /* The same describe the member's CPU effect cache renders from: the owner row's content up to
+   * the chain, with the members before this one folded in. The GPU preview's member job asks it
+   * describe-only, so its input render lays the prefix's effect results from the GPU caches the
+   * earlier members' jobs published, exactly as the CPU compute lays them from the CPU cache's
+   * buffers -- one describe, two backends. */
+  return paint_layer_chain_member_input_describe(
+      ma, row, chain, member, channel, dimensions_only, describe_only, r_entry, context);
+}
+
+std::shared_ptr<ImBuf> BKE_paint_layers_chain_member_effect_buffer_result(
+    const Material &ma,
+    const MaterialPaintLayer &row,
+    const MaterialPaintLayer &chain,
+    const MaterialPaintLayer &member,
+    const int channel,
+    const int tile_number,
+    int &r_width,
+    int &r_height)
+{
+  r_width = 0;
+  r_height = 0;
+  /* A CPU-computed member only: the GPU preview asks for the node-group filter, whose answer is
+   * this buffer verbatim, but every member kind the contract lets into a chain is served by the
+   * same cache. A pointwise or non-effect row has no buffer here to stand for, and a chain row
+   * that is not the member's own is refused, so a stray pointer cannot key a foreign entry. */
+  if (member.role != MA_PAINT_LAYER_ROLE_EFFECT || !paint_layer_effect_is_cpu_computed(member) ||
+      chain.kind_subtype != MA_PAINT_LAYER_FILTER_CHAIN)
+  {
+    return {};
+  }
+  /* The cached buffer, computed on a miss under the composite marker: the cache's mutex is never
+   * held while an effect computes, so the compute below may render nested slices and nested
+   * effects of its own. The preview's gather calls this on the main thread, the thread the bake
+   * computes on too, so the nested renders run under the same terms as every other effect
+   * compute. */
+  std::shared_ptr<ImBuf> buffer = paint_layer_chain_member_effect_buffer_get(
+      ma, row, chain, member, channel, tile_number, /*describe_only=*/false, nullptr);
+  if (buffer == nullptr) {
+    return {};
+  }
+  r_width = buffer->x;
+  r_height = buffer->y;
+  return buffer;
 }
 
 /* -------------------------------------------------------------------- */

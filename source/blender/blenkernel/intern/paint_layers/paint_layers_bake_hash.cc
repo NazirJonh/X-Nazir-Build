@@ -479,6 +479,27 @@ static uint64_t bake_hash_layer(uint64_t h,
    * generation) and every member's own description -- a nested node-group's tree, a member's
    * parameters and payloads -- are what the unfolded corrections were made from. The instance's
    * stored overrides are in `system_properties`, hashed above. */
+  if (layer.source == MA_PAINT_LAYER_SOURCE_FILTER &&
+      layer.kind_subtype == MA_PAINT_LAYER_FILTER_CHAIN && layer.material != nullptr)
+  {
+    const Material &definition = *layer.material;
+    h = bake_hash_mix(h, uint64_t(BKE_material_paint_layers_topology_generation(definition)));
+    for (const MaterialPaintLayer &member : definition.paint_layers) {
+      if (member.role != MA_PAINT_LAYER_ROLE_EFFECT) {
+        continue;
+      }
+      /* The marker keys the instance's overrides to the member, so which member a row was made
+       * from is part of the answer; the kind and its payloads are the member's own. */
+      h = bake_hash_mix(h, uint64_t(UUID(member.marker).hash()));
+      h = bake_hash_mix(h, uint8_t(member.source));
+      h = bake_hash_mix(h, uint16_t(member.kind_subtype));
+      h = bake_hash_idprops(h, member.system_properties);
+      h = bake_hash_mix(h, paint_layer_payload_hash(member));
+      const uint64_t member_definition_hash = BKE_paint_layers_node_group_definition_hash(member);
+      h = bake_hash_mix(h, uint32_t(member_definition_hash));
+      h = bake_hash_mix(h, uint32_t(member_definition_hash >> 32));
+    }
+  }
   if (layer.ramp != nullptr) {
     h = bake_hash_mix(h, paint_layer_ramp_hash(layer.ramp->band));
   }

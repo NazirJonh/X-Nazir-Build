@@ -524,10 +524,14 @@ bool combined_effect_jobs_render(const Material &ma,
        * names the passes that use them: the Color Match's reduction pyramid sums its levels up
        * from the input -- sums a 4K canvas overflows a half float with -- and the Fill Area's
        * label field stamps coordinates the width of the canvas, past what a half float numbers
-       * exactly. Both are canvas-sized, so every pyramid level and every field fits into one, and
-       * the job's scratch defer above hands them back to the pool with the rest. The reduction is
-       * RGBA32F (a colour sum and a weight sum); the field is RG32F (#effect_field_texture_format),
-       * the label being a 2D coordinate, so its pair costs half the bytes. */
+       * exactly. The field pair is canvas-sized, so every label fits into one. The reduction pair
+       * needs only its levels 1 and up: level 0 is the job's input texture, so level 1 -- the
+       * canvas halved -- is the largest thing the pair ever holds, and
+       * #effect_reduce_texture_size sizes it there (a 4K reduce pair is 2x64 MiB, not 2x256 MiB).
+       * The job's scratch defer above hands both pairs back to the pool with the rest. The
+       * reduction is RGBA32F (a colour sum and a weight sum); the field is RG32F
+       * (#effect_field_texture_format), the label being a 2D coordinate, so its pair costs half
+       * the bytes. */
       bool plan_reduces = false;
       bool plan_floods = false;
       for (const PaintLayerEffectPass &pass : job.passes) {
@@ -537,10 +541,11 @@ bool combined_effect_jobs_render(const Material &ma,
                        pass.kind == ePaintLayerEffectPass::FloodStep;
       }
       const auto job_acquire_pair = [&](gpu::Texture *(&pair)[2],
+                                        const int2 size,
                                         const gpu::TextureFormat format,
                                         const char *name) -> bool {
         for (gpu::Texture *&half : pair) {
-          half = passes.pool.acquire_texture_2d(canvas, 1, format, passes.accum_usage, name);
+          half = passes.pool.acquire_texture_2d(size, 1, format, passes.accum_usage, name);
           if (half == nullptr) {
             return false;
           }
@@ -579,12 +584,14 @@ bool combined_effect_jobs_render(const Material &ma,
       job_scratch.append(job.flood_placeholder);
       if (plan_reduces &&
           !job_acquire_pair(job.reduce_pair,
+                            effect_reduce_texture_size(canvas),
                             gpu::TextureFormat::SFLOAT_32_32_32_32,
                             "combined_effect_reduce"))
       {
         return gpu_refuse("an effect reduction texture could not be allocated");
       }
       if (plan_floods && !job_acquire_pair(job.field_pair,
+                                           canvas,
                                            effect_field_texture_format,
                                            "combined_effect_field"))
       {

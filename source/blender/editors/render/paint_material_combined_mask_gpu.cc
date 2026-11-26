@@ -223,10 +223,11 @@ static bool mask_gpu_result_compute(const MaterialPaintLayer &effect,
     return acquire_with_usage(name, usage);
   };
   const auto acquire_pair = [&](const char *name,
+                                const int2 size,
                                 const gpu::TextureFormat format,
                                 gpu::Texture *(&pair)[2]) -> bool {
     for (gpu::Texture *&half : pair) {
-      half = pool.acquire_texture_2d(int2(width, height), 1, format, usage, name);
+      half = pool.acquire_texture_2d(size, 1, format, usage, name);
       if (half == nullptr) {
         return false;
       }
@@ -268,12 +269,20 @@ static bool mask_gpu_result_compute(const MaterialPaintLayer &effect,
     acquired = ring[0] != nullptr && ring[1] != nullptr;
   }
   if (acquired && plan_reduces) {
-    acquired = acquire_pair(
-        "combined_mask_reduce", gpu::TextureFormat::SFLOAT_32_32_32_32, reduce);
+    /* The reduction's level 0 is the input canvas above, so its pair holds levels 1 and up and is
+     * only the canvas halved (#effect_reduce_texture_size). */
+    acquired = acquire_pair("combined_mask_reduce",
+                            effect_reduce_texture_size(int2(width, height)),
+                            gpu::TextureFormat::SFLOAT_32_32_32_32,
+                            reduce);
   }
   if (acquired && plan_floods) {
-    /* The label field is a 2D coordinate: RG32F, half the bytes of the reduction's RGBA32F pair. */
-    acquired = acquire_pair("combined_mask_field", effect_field_texture_format, field);
+    /* The label field is a 2D coordinate: RG32F, half the bytes of the reduction's RGBA32F pair.
+     * The labels are canvas texels, so the pair stays canvas-sized. */
+    acquired = acquire_pair("combined_mask_field",
+                            int2(width, height),
+                            effect_field_texture_format,
+                            field);
   }
   if (!acquired) {
     mask_bake_refuse("scratch");

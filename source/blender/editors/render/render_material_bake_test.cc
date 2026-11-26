@@ -682,4 +682,41 @@ TEST(EffectFieldFormatTest, field_pair_is_rg32f_half_of_rgba32f)
   EXPECT_EQ(canvas_texels * rgba_bytes * 2, int64_t(2) * 256 * 1024 * 1024);
 }
 
+/**
+ * The Color Match's reduction pair holds only levels 1 and up -- level 0 is the job's own input
+ * texture -- so its halves are the canvas halved, not the whole canvas. A 4K reduce pair drops from
+ * 2 x 256 MiB to 2 x 64 MiB. The ceil allocation keeps an odd canvas's last texel addressable; the
+ * levels themselves are dispatched at the floor shift, so a 4095 canvas allocates 2048 but writes at
+ * most 2047. The size is a named helper both dispatchers allocate through, so this pins what the
+ * accounting there claims.
+ */
+TEST(EffectFieldFormatTest, reduce_pair_is_half_canvas)
+{
+  using namespace blender::ed::material_combined;
+  const int rgba_bytes = gpu::to_bytesize(
+      gpu::to_data_format(gpu::TextureFormat::SFLOAT_32_32_32_32));
+  EXPECT_EQ(rgba_bytes, 16);
+
+  /* A 4K canvas: level 1 is 2048 x 2048 texels, two halves. */
+  const int2 reduce_4k = effect_reduce_texture_size(int2(4096, 4096));
+  EXPECT_EQ(reduce_4k.x, 2048);
+  EXPECT_EQ(reduce_4k.y, 2048);
+  const int64_t reduce_4k_bytes = int64_t(reduce_4k.x) * reduce_4k.y * rgba_bytes * 2;
+  EXPECT_EQ(reduce_4k_bytes, int64_t(128) * 1024 * 1024);
+  /* The canvas-sized pair the reduce used to hold, for the contrast the saving is measured by. */
+  const int64_t canvas_pair_bytes = int64_t(4096) * 4096 * rgba_bytes * 2;
+  EXPECT_EQ(canvas_pair_bytes, int64_t(512) * 1024 * 1024);
+
+  /* An odd canvas ceils up so its last texel is addressable, though the level dispatch floors. */
+  const int2 reduce_odd = effect_reduce_texture_size(int2(4095, 4095));
+  EXPECT_EQ(reduce_odd.x, 2048);
+  EXPECT_EQ(reduce_odd.y, 2048);
+  EXPECT_GT(reduce_odd.x, 4095 >> 1);
+
+  /* A one-texel canvas still asks for a valid texture. */
+  const int2 reduce_one = effect_reduce_texture_size(int2(1, 1));
+  EXPECT_EQ(reduce_one.x, 1);
+  EXPECT_EQ(reduce_one.y, 1);
+}
+
 }  // namespace blender::ed::material_bake::tests

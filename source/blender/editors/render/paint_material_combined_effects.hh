@@ -315,6 +315,20 @@ inline constexpr gpu::TextureFormat effect_field_texture_format = gpu::TextureFo
  * is 2x128 MiB instead of the old 2x256 MiB; the format test pins the saving. */
 
 /**
+ * The size of one half of the Color Match's reduction pair. The pyramid's level 0 -- the canvas --
+ * is the pass's own input texture (`ReduceStart` reads #GpuEffectJob::input), so the pair only ever
+ * holds levels 1 and up, and its largest, level 1, is the canvas halved: both halves need no more
+ * room than that, not the whole canvas. The ceil keeps an odd canvas's last texel addressable while
+ * the levels themselves are dispatched at the canvas's floor shift (`EffectPassBuffers::rect_for`),
+ * so a 4095 canvas allocates 2048 but still writes at most 2047 columns. A 4K reduce pair is
+ * therefore 2x64 MiB instead of 2x256 MiB; the format/accounting test pins the saving.
+ */
+inline int2 effect_reduce_texture_size(const int2 canvas)
+{
+  return int2(std::max((canvas.x + 1) / 2, 1), std::max((canvas.y + 1) / 2, 1));
+}
+
+/**
  * One effect the preview has to have a GPU result for, with everything its pass needs. The stages
  * below fill the textures in: the cache's result first, then -- only when the cache had none or the
  * input moved -- the content the effect reads and the kernel's answer.
@@ -342,15 +356,17 @@ struct GpuEffectJob {
   gpu::Texture *slot_texture = nullptr;
   /**
    * The float32 halves the Color Match's reduction pyramid and the Fill Area's label field
-   * ping-pong through, canvas-sized (every pyramid level and every field fits into one), acquired
-   * only when the plan names the passes that use them and handed back to the pool when the job's
-   * dispatches end, like #input. Full float, not half: a pyramid level sums the canvas up -- a 4K
-   * one overflows a half float with -- and a field label carries coordinates the width of the
-   * canvas, past what a half float numbers exactly.
+   * ping-pong through, acquired only when the plan names the passes that use them and handed back
+   * to the pool when the job's dispatches end, like #input. Full float, not half: a pyramid level
+   * sums the canvas up -- a 4K one overflows a half float with -- and a field label carries
+   * coordinates the width of the canvas, past what a half float numbers exactly.
    *
-   * The reduction pair is RGBA32F (the colour sum and the weight sum); the field pair is
-   * #effect_field_texture_format (RG32F), the label being a 2D coordinate -- half the bytes of the
-   * old RGBA32F field (a 4K field pair is 2x128 MiB instead of 2x256 MiB).
+   * The field pair is canvas-sized (every label is a canvas texel). The reduction pair, however,
+   * is #effect_reduce_texture_size: its level 0 is the job's input texture, so the halves hold
+   * levels 1 and up and are only the canvas halved. The reduction pair is RGBA32F (the colour sum
+   * and the weight sum); the field pair is #effect_field_texture_format (RG32F), the label being a
+   * 2D coordinate -- half the bytes of the old RGBA32F field (a 4K field pair is 2x128 MiB instead
+   * of 2x256 MiB, and a 4K reduce pair 2x64 MiB instead of 2x256 MiB).
    */
   gpu::Texture *reduce_pair[2] = {nullptr, nullptr};
   gpu::Texture *field_pair[2] = {nullptr, nullptr};
@@ -800,8 +816,9 @@ class EffectPassBuffers {
   gpu::Texture *result_;
   /** The slot map the plan's slot fetch reads, borrowed from the image's cache for the job. */
   gpu::Texture *slot_;
-  /** The float32 halves the reduction and the flooding ping-pong through; both canvas-sized, so
-   * every pyramid level and every field fits. */
+  /** The float32 halves the reduction and the flooding ping-pong through. The field halves are
+   * canvas-sized (every label is a canvas texel); the reduction halves are the canvas halved
+   * (#effect_reduce_texture_size), their level 0 being the job's input rather than the pair. */
   gpu::Texture *reduce_[2];
   /** The float32 halves the flooding's init and steps write into, the same ping-pong terms. */
   gpu::Texture *field_[2];

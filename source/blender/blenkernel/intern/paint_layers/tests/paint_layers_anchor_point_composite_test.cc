@@ -50,6 +50,23 @@
 
 namespace blender::bke::tests {
 
+/** Render a slice through the public entry point and hand back its float colour: the shape the
+ * pixel tests below read. The cache may hand a half slice back; this materializes it once. */
+static bool slice_render_float(const Material &ma,
+                               const MaterialPaintLayer &reader,
+                               const int channel,
+                               std::shared_ptr<ImBuf> *r_color,
+                               std::shared_ptr<ImBuf> *r_coverage,
+                               const int *dst_rect = nullptr)
+{
+  PaintLayerSliceColor color;
+  if (!BKE_paint_layers_slice_render(ma, reader, channel, &color, r_coverage, dst_rect)) {
+    return false;
+  }
+  *r_color = paint_layer_slice_color_read_float(color);
+  return *r_color != nullptr;
+}
+
 class PaintLayersAnchorPointCompositeTest : public PaintLayersTestBase {
  protected:
   void TearDown() override
@@ -319,7 +336,8 @@ TEST_F(PaintLayersAnchorPointCompositeTest, corr_reader_always_reads_bake_maps)
   ASSERT_NE(correction, nullptr);
   EXPECT_EQ(correction->image, reader->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
   EXPECT_EQ(correction->anchor_point_coverage_image, reader->bake->coverage);
-  EXPECT_EQ(correction->grey_buffer, nullptr);
+  EXPECT_EQ(correction->grey_buffer.floats, nullptr);
+  EXPECT_EQ(correction->grey_buffer.halfs, nullptr);
   EXPECT_FLOAT_EQ(correction->opacity, 1.0f)
       << "the coverage map already holds the reader's opacity; it is not applied twice";
 
@@ -356,7 +374,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, corr_reader_never_renders_live)
   ASSERT_NE(correction, nullptr);
   EXPECT_EQ(correction->image, nullptr);
   EXPECT_EQ(correction->anchor_point_coverage_image, nullptr);
-  ASSERT_NE(correction->grey_buffer, nullptr);
+  ASSERT_NE(correction->grey_buffer.floats, nullptr);
   ASSERT_NE(correction->anchor_point_coverage, nullptr);
 }
 
@@ -480,7 +498,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, baked_and_live_reader_layer_match)
       *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
   const PaintMaterialCompositeImageLayer *described = find_layer_reader(layers, reader->marker);
   ASSERT_NE(described, nullptr);
-  EXPECT_EQ(described->anchor_point_color, nullptr) << "the description reads the baked map";
+  EXPECT_EQ(described->anchor_point_color.floats, nullptr) << "the description reads the baked map";
   EXPECT_EQ(described->color_image, reader->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
   EXPECT_EQ(described->mask_image, reader->bake->coverage);
 
@@ -526,7 +544,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, baked_and_live_correction_reader_mat
       *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
   const PaintMaterialCompositeCorrection *described = find_correction_reader(layers, reader->marker);
   ASSERT_NE(described, nullptr);
-  EXPECT_EQ(described->grey_buffer, nullptr) << "the description reads the baked maps";
+  EXPECT_EQ(described->grey_buffer.floats, nullptr) << "the description reads the baked maps";
   EXPECT_EQ(described->image, reader->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
   EXPECT_EQ(described->anchor_point_coverage_image, reader->bake->coverage);
 
@@ -573,7 +591,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, baked_and_live_mask_reader_match)
       *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
   const PaintMaterialCompositeMaskItem *described = find_mask_reader(layers, reader->marker);
   ASSERT_NE(described, nullptr);
-  EXPECT_EQ(described->grey_buffer, nullptr) << "the description reads the baked map";
+  EXPECT_EQ(described->grey_buffer.floats, nullptr) << "the description reads the baked map";
   EXPECT_EQ(described->image, reader->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
 
   Vector<float> baked;
@@ -639,7 +657,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, slice_content_stops_before_marker)
 
   std::shared_ptr<ImBuf> color;
   std::shared_ptr<ImBuf> coverage;
-  ASSERT_TRUE(BKE_paint_layers_slice_render(
+  ASSERT_TRUE(slice_render_float(
       *ma, *reader, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &color, &coverage));
   ASSERT_NE(color, nullptr);
   const float *pixel = color->float_data();
@@ -663,7 +681,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, slice_mask_includes_base_mask)
 
   std::shared_ptr<ImBuf> color;
   std::shared_ptr<ImBuf> coverage;
-  ASSERT_TRUE(BKE_paint_layers_slice_render(
+  ASSERT_TRUE(slice_render_float(
       *ma, *reader, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &color, &coverage));
   ASSERT_NE(color, nullptr);
   const float *pixel = color->float_data();
@@ -671,6 +689,56 @@ TEST_F(PaintLayersAnchorPointCompositeTest, slice_mask_includes_base_mask)
   EXPECT_NEAR(pixel[1], 0.25f, 1e-5f);
   EXPECT_NEAR(pixel[2], 0.25f, 1e-5f);
   EXPECT_NEAR(pixel[3], 1.0f, 1e-5f);
+}
+
+TEST_F(PaintLayersAnchorPointCompositeTest, mask_sampler_reads_the_half_mask_slice)
+{
+  /* A live mask reader rests as FP16 in the slice cache: the strokes' sampler must read it per
+   * texel and lay the same grey as the float form, without materializing the slice. */
+  MaterialPaintLayer *source = add_layer_with_image("Source", add_image("Source", 4, 255, 0, 0));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, source, 0.5f), nullptr);
+  MaterialPaintLayer *mask_point = add_point(*source, PaintLayerAnchorPointList::MaskStack);
+  ASSERT_NE(mask_point, nullptr);
+  MaterialPaintLayer *owner = add_layer_with_image("Owner", add_image("Owner", 4, 0, 255, 0));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, owner, 1.0f), nullptr);
+  MaterialPaintLayer *reader = add_reader(
+      *owner, PaintLayerAnchorPointList::MaskStack, mask_point->marker);
+  ASSERT_NE(reader, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *reader, MA_PAINT_LAYER_BAKE_NEVER));
+
+  PaintLayerSliceColor color;
+  std::shared_ptr<ImBuf> coverage;
+  /* The first render fills the cache and hands its fresh float result back: that is the independent
+   * float reference. The next call is a hit and hands the resting FP16 storage. */
+  ASSERT_TRUE(BKE_paint_layers_slice_render(
+      *ma, *reader, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &color, &coverage));
+  ASSERT_NE(color.floats, nullptr);
+  ASSERT_FALSE(color.is_half());
+  std::shared_ptr<ImBuf> float_reference = color.floats;
+  ASSERT_TRUE(BKE_paint_layers_slice_render(
+      *ma, *reader, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &color, &coverage));
+  ASSERT_TRUE(color.is_half()) << "a resting live slice is FP16";
+
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(BKE_paint_layers_row_dimensions(
+      *ma, *owner, PAINT_MATERIAL_CHANNEL_BASE_COLOR, width, height));
+  ASSERT_EQ(float_reference->x, width);
+  ASSERT_EQ(float_reference->y, height);
+
+  PaintLayersMaskSampler sampler(*ma, *owner);
+  sampler.tile_acquire(1001, width, height);
+  for (int y = 0; y < height; y++) {
+    for (int x = 0; x < width; x++) {
+      const float *float_texel = float_reference->float_data() + (int64_t(y) * width + x) * 4;
+      /* The evaluator reads the grey as the mean of RGB and weights by alpha, so compare with the
+       * float reference's mean (alpha one here makes it the same value). */
+      const float float_grey = (float_texel[0] + float_texel[1] + float_texel[2]) / 3.0f;
+      EXPECT_NEAR(sampler.sample(1001, x, y), float_grey, 2e-3f)
+          << "texel " << x << "," << y;
+    }
+  }
+  EXPECT_NEAR(sampler.sample(1001, 1, 1), 0.5f, 2e-3f);
 }
 
 TEST_F(PaintLayersAnchorPointCompositeTest, slice_ignores_source_opacity_and_enabled)
@@ -686,7 +754,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, slice_ignores_source_opacity_and_ena
 
   std::shared_ptr<ImBuf> color;
   std::shared_ptr<ImBuf> coverage;
-  ASSERT_TRUE(BKE_paint_layers_slice_render(
+  ASSERT_TRUE(slice_render_float(
       *ma, *reader, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &color, &coverage));
   ASSERT_NE(color, nullptr);
   const int64_t count = int64_t(color->x) * color->y * 4;
@@ -699,7 +767,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, slice_ignores_source_opacity_and_ena
   paint_layer_anchor_point_slice_cache_clear();
   std::shared_ptr<ImBuf> hidden_color;
   std::shared_ptr<ImBuf> hidden_coverage;
-  ASSERT_TRUE(BKE_paint_layers_slice_render(
+  ASSERT_TRUE(slice_render_float(
       *ma, *reader, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &hidden_color, &hidden_coverage));
   ASSERT_NE(hidden_color, nullptr);
   for (int64_t i = 0; i < count; i++) {
@@ -732,7 +800,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, reader_layer_keeps_own_effects)
       *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
   const PaintMaterialCompositeImageLayer *layer = find_layer_reader(layers, reader->marker);
   ASSERT_NE(layer, nullptr);
-  ASSERT_NE(layer->anchor_point_color, nullptr);
+  ASSERT_NE(layer->anchor_point_color.floats, nullptr);
   ASSERT_EQ(layer->content_corrections.size(), 1)
       << "the reader's own corrections are laid over the slice";
 
@@ -777,7 +845,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, reader_layer_equals_source_without_u
   paint_layer_anchor_point_slice_cache_clear();
   std::shared_ptr<ImBuf> slice_color;
   std::shared_ptr<ImBuf> slice_coverage;
-  ASSERT_TRUE(BKE_paint_layers_slice_render(
+  ASSERT_TRUE(slice_render_float(
       *ma, *reader, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &slice_color, &slice_coverage));
   ASSERT_NE(slice_color, nullptr);
   EXPECT_NEAR(slice_color->float_data()[0], 1.0f, 1e-5f);
@@ -792,10 +860,11 @@ TEST_F(PaintLayersAnchorPointCompositeTest, reader_layer_equals_source_without_u
       *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
   const PaintMaterialCompositeImageLayer *layer = find_layer_reader(layers, reader->marker);
   ASSERT_NE(layer, nullptr);
-  ASSERT_NE(layer->anchor_point_color, nullptr);
-  ASSERT_NE(layer->anchor_point_color.get(), slice_color.get());
+  ASSERT_NE(layer->anchor_point_color.floats, nullptr);
+  ASSERT_NE(layer->anchor_point_color.floats.get(), slice_color.get());
   for (int i = 0; i < slice_color->x * slice_color->y * 4; i++) {
-    EXPECT_FLOAT_EQ(layer->anchor_point_color->float_data()[i], slice_color->float_data()[i]);
+    EXPECT_FLOAT_EQ(layer->anchor_point_color.floats->float_data()[i],
+                    slice_color->float_data()[i]);
   }
 }
 
@@ -815,9 +884,9 @@ TEST_F(PaintLayersAnchorPointCompositeTest, slice_cache_coverage_layout_is_scala
   std::shared_ptr<ImBuf> full_coverage;
   std::shared_ptr<ImBuf> partial_color;
   std::shared_ptr<ImBuf> partial_coverage;
-  ASSERT_TRUE(BKE_paint_layers_slice_render(
+  ASSERT_TRUE(slice_render_float(
       *ma, *reader, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &full_color, &full_coverage));
-  ASSERT_TRUE(BKE_paint_layers_slice_render(
+  ASSERT_TRUE(slice_render_float(
       *ma, *reader, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &partial_color, &partial_coverage, rect));
   ASSERT_NE(full_coverage, nullptr);
   ASSERT_NE(partial_coverage, nullptr);
@@ -870,11 +939,11 @@ TEST_F(PaintLayersAnchorPointCompositeTest, slice_cache_same_key_two_inserts_cou
       ready.fetch_add(1);
       while (ready.load() < 2) {
       }
-      r_ok = BKE_paint_layers_slice_render(*ma,
-                                          *reader,
-                                          PAINT_MATERIAL_CHANNEL_BASE_COLOR,
-                                          &r_color,
-                                          &r_coverage);
+      r_ok = slice_render_float(*ma,
+                                *reader,
+                                PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                &r_color,
+                                &r_coverage);
     };
     std::thread first(render, std::ref(first_color), std::ref(first_coverage), std::ref(first_ok));
     std::thread second(
@@ -887,7 +956,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, slice_cache_same_key_two_inserts_cou
     ASSERT_NE(second_color, nullptr);
     EXPECT_EQ(paint_layer_anchor_point_slice_cache_entry_count(), 1)
         << "round " << round << ": the second insert reuses the rendered entry";
-    const size_t pair_bytes = size_t(first_color->x) * first_color->y * sizeof(float[4]) +
+    const size_t pair_bytes = size_t(first_color->x) * first_color->y * sizeof(uint16_t[4]) +
                               size_t(first_color->x) * first_color->y * sizeof(float);
     EXPECT_EQ(paint_layer_anchor_point_slice_cache_bytes(), pair_bytes)
         << "round " << round << ": the bytes are counted once";
@@ -910,7 +979,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, normal_slice_not_renormalized)
 
   std::shared_ptr<ImBuf> color;
   std::shared_ptr<ImBuf> coverage;
-  ASSERT_TRUE(BKE_paint_layers_slice_render(
+  ASSERT_TRUE(slice_render_float(
       *ma, *reader, PAINT_MATERIAL_CHANNEL_NORMAL, &color, &coverage));
   ASSERT_NE(color, nullptr);
   const float *pixel = color->float_data();
@@ -1064,7 +1133,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, slice_describe_equals_slice_render_i
 
   std::shared_ptr<ImBuf> color;
   std::shared_ptr<ImBuf> coverage;
-  ASSERT_TRUE(BKE_paint_layers_slice_render(
+  ASSERT_TRUE(slice_render_float(
       *ma, *reader, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &color, &coverage));
   ASSERT_NE(color, nullptr);
 
@@ -1971,7 +2040,8 @@ TEST_F(PaintLayersAnchorPointCompositeTest, describe_only_reader_has_descriptor_
             paint_layer_anchor_point_slice_hash(*ma, *reader, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
   EXPECT_FALSE(layer->grey_input_images.is_empty())
       << "a describe-only reader still subscribes to the maps its slice is rendered from";
-  EXPECT_EQ(layer->anchor_point_color, nullptr) << "no CPU slice is rendered for the GPU path";
+  EXPECT_EQ(layer->anchor_point_color.floats, nullptr)
+      << "no CPU slice is rendered for the GPU path";
   EXPECT_EQ(layer->anchor_point_coverage, nullptr);
 }
 
@@ -2016,7 +2086,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, full_description_unchanged_by_descri
       *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, full));
   const PaintMaterialCompositeImageLayer *full_layer = find_layer_reader(full, reader->marker);
   ASSERT_NE(full_layer, nullptr);
-  ASSERT_NE(full_layer->anchor_point_color, nullptr);
+  ASSERT_NE(full_layer->anchor_point_color.floats, nullptr);
   ASSERT_NE(full_layer->anchor_point_coverage, nullptr);
 
   Vector<PaintMaterialCompositeImageLayer> described;
@@ -2038,7 +2108,8 @@ TEST_F(PaintLayersAnchorPointCompositeTest, full_description_unchanged_by_descri
   const PaintMaterialCompositeImageLayer *after_layer = find_layer_reader(
       full_after, reader->marker);
   ASSERT_NE(after_layer, nullptr);
-  EXPECT_NE(after_layer->anchor_point_color, nullptr)
+  EXPECT_TRUE(after_layer->anchor_point_color.floats != nullptr ||
+              after_layer->anchor_point_color.halfs != nullptr)
       << "a CPU description after a describe-only pass still renders its slice";
 }
 
@@ -2474,6 +2545,95 @@ TEST_F(PaintLayersAnchorPointCompositeTest,
       PAINT_MATERIAL_CHANNEL_BASE_COLOR, baked, baked_width, baked_height));
   EXPECT_NEAR(linear_pixel(baked, baked_width, 1, 1)[1], bottom[1], 2.0f / 255.0f);
   EXPECT_NEAR(linear_pixel(baked, baked_width, 6, 1)[1], 1.0f, 2.0f / 255.0f);
+}
+
+TEST_F(PaintLayersAnchorPointCompositeTest, a_mask_effect_reads_a_half_slice_like_the_float_one)
+{
+  /* The mask effect's input slice rests as FP16 once the cache is warm: the per-texel decode must
+   * hand the kernel the same Normal the fresh float slice did, texel for texel. */
+  Image *normal = add_image("Source Normal", 8, 128, 128, 255, 255, true);
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(normal, nullptr, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    uchar *pixels = ibuf->byte_data_for_write();
+    for (const int y : IndexRange(8)) {
+      for (const int x : IndexRange(8)) {
+        if (x >= 4) {
+          pixels[(int64_t(y) * 8 + x) * 4 + 2] = 0;
+        }
+      }
+    }
+    BKE_image_release_ibuf(normal, ibuf, lock);
+  }
+  MaterialPaintLayer *source = add_layer_with_image(
+      "Source", normal, PAINT_MATERIAL_CHANNEL_NORMAL);
+  MaterialPaintLayer *point = add_point(*source);
+  ASSERT_NE(point, nullptr);
+  MaterialPaintLayer *owner = add_layer_with_image("Owner", add_image("Owner", 8, 0, 255, 0));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, owner, 1.0f), nullptr);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_filter_add(
+      *ma, owner, MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK, "Normal to Mask");
+  ASSERT_NE(item, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_anchor_point_source_set(*ma, item, point->marker));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*item,
+                                             PAINT_LAYER_NORMAL_TO_MASK_MODE,
+                                             PAINT_LAYER_NORMAL_TO_MASK_SLOPE));
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *item, MA_PAINT_LAYER_BAKE_NEVER));
+
+  /* The grey the mask effect lays, one scalar per texel, read from the description. */
+  const auto grey_values = [&](Vector<float> &r_values) {
+    Vector<PaintMaterialCompositeImageLayer> layers;
+    if (!BKE_paint_layers_composite_image_layers(
+            *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers))
+    {
+      return false;
+    }
+    for (const PaintMaterialCompositeImageLayer &layer : layers) {
+      for (const PaintMaterialCompositeMaskItem &mask_item : layer.mask_items) {
+        if (mask_item.effect_filter != MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK) {
+          continue;
+        }
+        const ImBuf *grey = mask_item.grey_buffer.floats.get();
+        if (grey == nullptr || grey->float_data() == nullptr || grey->x <= 0 || grey->y <= 0) {
+          return false;
+        }
+        const int channels = grey->channels == 0 ? 4 : grey->channels;
+        const int64_t texels = int64_t(grey->x) * grey->y;
+        r_values.reserve(texels);
+        for (const int64_t i : IndexRange(texels)) {
+          r_values.append(grey->float_data()[i * channels]);
+        }
+        return true;
+      }
+    }
+    return false;
+  };
+
+  /* The first describe renders the slice fresh and leaves the FP16 form resting in the cache; the
+   * grey it lays is the float reference. */
+  Vector<float> float_grey;
+  ASSERT_TRUE(grey_values(float_grey)) << "the item lays its grey";
+  ASSERT_FALSE(float_grey.is_empty());
+
+  PaintLayerSliceColor warmed;
+  std::shared_ptr<ImBuf> warmed_coverage;
+  ASSERT_TRUE(BKE_paint_layers_slice_render(
+      *ma, *item, PAINT_MATERIAL_CHANNEL_NORMAL, &warmed, &warmed_coverage));
+  ASSERT_TRUE(warmed.is_half()) << "the warmed slice rests as FP16";
+
+  /* Drop the grey the float slice made, so the next describe decodes the half slice texel by
+   * texel through the kernel. */
+  BKE_paint_layers_mask_effect_cache_free_all();
+  Vector<float> half_grey;
+  ASSERT_TRUE(grey_values(half_grey));
+  ASSERT_EQ(half_grey.size(), float_grey.size());
+  float max_grey = 0.0f;
+  for (const int64_t i : IndexRange(float_grey.size())) {
+    EXPECT_NEAR(half_grey[i], float_grey[i], 2e-3f) << "grey texel " << i;
+    max_grey = std::max(max_grey, float_grey[i]);
+  }
+  EXPECT_GT(max_grey, 0.5f) << "the slope field is not flat, so the comparison is meaningful";
 }
 
 /** \} */

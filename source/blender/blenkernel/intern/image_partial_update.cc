@@ -57,6 +57,7 @@
 
 #include "IMB_imbuf_types.hh"
 
+#include "BLI_assert.h"
 #include "BLI_bit_vector.hh"
 #include "BLI_listbase.h"
 #include "BLI_rect.h"
@@ -668,9 +669,16 @@ void BKE_image_partial_update_mark_region(Image *image,
                                           const ImBuf *image_buffer,
                                           const rcti *updated_region)
 {
+  /* The register keys its changesets by the tile's number and cannot describe "no tile"; a caller
+   * without one has no rectangle of the canvas to mark. Refuse before the journal record so a
+   * rejected call leaves no partial update behind. */
+  if (image_tile == nullptr) {
+    BLI_assert_msg(false, "BKE_image_partial_update_mark_region needs the edited tile");
+    return;
+  }
   /* Only the first tile is a rectangle of the canvas a cache stores; an edit of another tile can
    * only be answered by recomputing everything. */
-  const bool first_tile = image_tile == nullptr || image_tile->tile_number == 1001;
+  const bool first_tile = image_tile->tile_number == 1001;
   image_pixel_change_record(image, first_tile ? updated_region : nullptr, image_buffer);
   PartialUpdateRegisterImpl *partial_updater = unwrap(image_partial_update_register_ensure(image));
   partial_updater->update_resolution(image_tile, image_buffer);

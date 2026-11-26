@@ -1810,7 +1810,9 @@ static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
   if (eMaterialPaintLayerSource(source) == MA_PAINT_LAYER_SOURCE_ANCHOR_POINT) {
     /* A reader row lands at the anchor's position, the way the Outliner's Add does: the new row
      * takes the anchor's place and the anchor sits under it. The anchor itself stays named for the
-     * policy's owner lookup; an add with no anchor makes the reader at the top of the stack. */
+     * policy's owner lookup; an add with no anchor makes the reader at the top of the stack.
+     * `place` is not consulted for this source: the reader is always inserted relative to the
+     * anchor, so a caller-supplied place is ignored (see the RNA description of the method). */
     params.insert_after = params.anchor;
   }
   params.place = PaintLayerPlace(place);
@@ -5673,20 +5675,28 @@ static MaterialPaintLayer *rna_anchor_point_marker_add(PointerRNA ptr,
 {
   const bool mask = list == PaintLayerAnchorPointList::MaskStack;
   MaterialPaintLayer *layer = nullptr;
-  if (Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer)) {
-    PaintLayerAddParams params;
-    params.kind = PaintLayerAddKind::AnchorPoint;
-    params.anchor = layer;
-    params.anchor_point_list = list;
-    params.name = (name != nullptr && name[0] != '\0') ? name : nullptr;
-    if (MaterialPaintLayer *marker = BKE_paint_layers_add_with_policy(*ma, params)) {
-      return marker;
-    }
+  Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer);
+  if (ma == nullptr) {
+    BKE_report(reports,
+               RPT_ERROR,
+               mask ? "Only a layer of the stack takes a mask item" :
+                      "Only a layer of the stack takes a content effect");
+    return nullptr;
   }
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::AnchorPoint;
+  params.anchor = layer;
+  params.anchor_point_list = list;
+  params.name = (name != nullptr && name[0] != '\0') ? name : nullptr;
+  if (MaterialPaintLayer *marker = BKE_paint_layers_add_with_policy(*ma, params)) {
+    return marker;
+  }
+  /* The owner was valid, so the refusal came from the add policy (a definition member, or an
+   * allocation that failed), not from the item's place in the stack. Report that cause. */
   BKE_report(reports,
              RPT_ERROR,
-             mask ? "Only a layer of the stack takes a mask item" :
-                    "Only a layer of the stack takes a content effect");
+             mask ? "Could not add the Anchor Point to this layer's mask" :
+                    "Could not add the Anchor Point to this layer");
   return nullptr;
 }
 
@@ -5836,6 +5846,10 @@ static MaterialPaintLayer *rna_MaterialPaintLayer_anchor_point_add(PointerRNA pt
       BKE_report(reports,
                  RPT_ERROR,
                  "An Anchor Point marker belongs in a layer's effects or mask");
+      return nullptr;
+    }
+    if (!ELEM(list, rna_anchor_point_list_effects, rna_anchor_point_list_mask)) {
+      BKE_report(reports, RPT_ERROR, "Unknown Anchor Point list");
       return nullptr;
     }
     target_list = (list == rna_anchor_point_list_mask) ? PaintLayerAnchorPointList::MaskStack :
@@ -9596,7 +9610,8 @@ static void rna_def_material_paint_layers(BlenderRNA *brna, PropertyRNA *cprop)
       func,
       "Add a paint layer relative to an anchor row. The Filter source names the filter to apply "
       "below the row, the Generator source the pattern it lays; the other sources report the "
-      "filter and generator as an error when given");
+      "filter and generator as an error when given. An Anchor Point reader always lands at its "
+      "anchor's position, so \"place\" is ignored for that source");
   RNA_def_function_flag(func, FUNC_USE_MAIN | FUNC_USE_REPORTS);
   RNA_def_string(func,
                  "name",

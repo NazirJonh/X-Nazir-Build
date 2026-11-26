@@ -626,6 +626,7 @@ set(SRC
   BKE_paint_layers_node_group.hh
   BKE_paint_layers_object_mask.hh
   BKE_paint_layers_shader_bake.hh
+  BKE_paint_layers_slice.hh
   BKE_paint_layers_source_graph.hh
   BKE_paint_layers_target.hh
   BKE_paint_layers_tile.hh

@@ -410,7 +410,7 @@ static bool mask_effect_anchor_slice_input(const Material &ma,
 {
   const int input_channel = paint_layer_effect_input_channel(effect,
                                                              PAINT_MATERIAL_CHANNEL_BASE_COLOR);
-  std::shared_ptr<ImBuf> slice_color;
+  PaintLayerSliceColor slice_color;
   std::shared_ptr<ImBuf> slice_coverage;
   if (!BKE_paint_layers_slice_render(ma,
                                      effect,
@@ -424,21 +424,25 @@ static bool mask_effect_anchor_slice_input(const Material &ma,
   {
     return false;
   }
-  if (slice_color == nullptr || slice_color->float_data() == nullptr) {
+  /* The slice rests half or float; each canvas texel decodes the one source texel it samples, so a
+   * half slice is never materialized whole. A byte-only buffer (possible in the type, though not
+   * produced by today's render) is sampled through the same per-texel read rather than refused: its
+   * branch is straight and needs no premultiplied decode. */
+  int src_width = 0;
+  int src_height = 0;
+  paint_layer_slice_color_dimensions(slice_color, src_width, src_height);
+  if (src_width <= 0 || src_height <= 0) {
     return false;
   }
-  const float *src = slice_color->float_data();
-  const int src_width = slice_color->x;
-  const int src_height = slice_color->y;
   float *pixels = color->float_data_for_write();
   threading::parallel_for(IndexRange(height), 64, [&](const IndexRange range) {
     for (const int y : range) {
       const int src_y = paint_layer_nearest_resample_texel(y, height, src_height);
-      const float *src_row = src + int64_t(src_y) * src_width * 4;
       float *dst_row = pixels + int64_t(y) * width * 4;
       for (const int x : IndexRange(width)) {
         const int src_x = paint_layer_nearest_resample_texel(x, width, src_width);
-        const float *texel = src_row + int64_t(src_x) * 4;
+        float texel[4];
+        paint_layer_slice_color_sample(slice_color, int64_t(src_y) * src_width + src_x, texel);
         dst_row[int64_t(x) * 4 + 0] = texel[0];
         dst_row[int64_t(x) * 4 + 1] = texel[1];
         dst_row[int64_t(x) * 4 + 2] = texel[2];

@@ -14,6 +14,7 @@
 #include "testing/testing.h"
 
 #include <array>
+#include <cstdint>
 
 #include "MEM_guardedalloc.h"
 
@@ -36,6 +37,7 @@
 #include "BLI_fileops.h"
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
+#include "BLI_math_half.hh"
 #include "BLI_path_utils.hh"
 #include "BLI_string.h"
 #include "BLI_uuid.h"
@@ -753,6 +755,54 @@ TEST(PaintMaterialMaskFactor, map_coverage_item_without_a_map_matches_nothing)
   const Span<PaintMaterialCompositeMaskBuffer> items(&item, 1);
   /* Not a pass-through: a missing map restricts everything. */
   EXPECT_FLOAT_EQ(BKE_paint_material_mask_factor_eval(items, no_samples, no_coverage, 0), 0.0f);
+}
+
+TEST(PaintMaterialMaskFactor, half_sample_matches_the_float_sample)
+{
+  /* The same texel as FP16 and as float: grey 0.5, opaque. A half-resting slice is read per texel
+   * by the strokes, so the two forms must lay the same factor, invert/contrast included. */
+  const float float_texel[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+  uint16_t half_texel[4];
+  math::float_to_half_array(float_texel, half_texel, 4);
+  const std::array<const float *, 1> float_samples = {float_texel};
+  const std::array<const float *, 1> no_float_samples = {nullptr};
+  const std::array<const uint16_t *, 1> half_samples = {half_texel};
+  const std::array<const float *, 1> no_coverage = {nullptr};
+  PaintMaterialCompositeMaskBuffer item;
+  const Span<PaintMaterialCompositeMaskBuffer> items(&item, 1);
+  auto eval_float = [&]() {
+    return BKE_paint_material_mask_factor_eval(items, float_samples, no_coverage, 0);
+  };
+  auto eval_half = [&]() {
+    return BKE_paint_material_mask_factor_eval(
+        items, no_float_samples, half_samples, no_coverage, 0);
+  };
+
+  const float via_float = eval_float();
+  EXPECT_NEAR(eval_half(), via_float, 2e-3f);
+
+  /* The half read carries the same weight: alpha one keeps the item's opacity. */
+  item.opacity = 0.5f;
+  EXPECT_NEAR(eval_half(), eval_float(), 2e-3f);
+
+  /* Invert and contrast reshape the grey after the read, the same for both forms. */
+  item.opacity = 1.0f;
+  item.invert = true;
+  item.contrast = 2.0f;
+  EXPECT_NEAR(eval_half(), eval_float(), 2e-3f);
+
+  /* A float sample wins over a half one when both are present: the half reads grey 0.25 and the
+   * float grey 0.5, so only the float (0.5) can be the answer. */
+  const float low_float_texel[4] = {0.25f, 0.25f, 0.25f, 1.0f};
+  uint16_t low_half_texel[4];
+  math::float_to_half_array(low_float_texel, low_half_texel, 4);
+  const std::array<const uint16_t *, 1> low_half_samples = {low_half_texel};
+  item.invert = false;
+  item.contrast = 1.0f;
+  EXPECT_NEAR(BKE_paint_material_mask_factor_eval(
+                  items, float_samples, low_half_samples, no_coverage, 0),
+              via_float,
+              2e-3f);
 }
 
 /* \} */

@@ -35,6 +35,7 @@
 #include "BLI_map.hh"
 #include "BLI_math_base.h"
 #include "BLI_math_color_blend.h"
+#include "BLI_math_half.hh"
 #include "BLI_math_interp.hh"
 #include "BLI_math_color.h"
 #include "BLI_math_geom.h"
@@ -1254,6 +1255,7 @@ static float composite_filter_color(const int16_t filter,
 
 float BKE_paint_material_mask_factor_eval(const Span<PaintMaterialCompositeMaskBuffer> items,
                                           const Span<const float *> item_samples,
+                                          const Span<const uint16_t *> item_half_samples,
                                           const Span<const float *> coverage_samples,
                                           const int64_t pixel_index,
                                           const PaintMaterialCompositeTexel &texel)
@@ -1308,7 +1310,10 @@ float BKE_paint_material_mask_factor_eval(const Span<PaintMaterialCompositeMaskB
       continue;
     }
     const float *sample = item_samples[item_i];
-    if (item.effect_filter != 0 && sample == nullptr) {
+    const uint16_t *half_sample = item_i < item_half_samples.size() ?
+                                      item_half_samples[item_i] :
+                                      nullptr;
+    if (item.effect_filter != 0 && sample == nullptr && half_sample == nullptr) {
       /* A CPU-computed effect whose grey is not there (a size the tile does not match, a bake not
        * written yet): the mask stays as it is below, instead of the constant replacing it. */
       continue;
@@ -1316,6 +1321,7 @@ float BKE_paint_material_mask_factor_eval(const Span<PaintMaterialCompositeMaskB
     /* A Gradient has no map: its ramp is computed at the texel, so no canvas-sized buffer of it
      * exists. A texel outside the surface's islands samples as zero, which covers nothing. */
     float gradient_rgba[4];
+    float half_rgba[4];
     const float *c = nullptr;
     if (item.gradient.enabled) {
       BKE_paint_material_generator_sample(item.gradient,
@@ -1328,6 +1334,15 @@ float BKE_paint_material_mask_factor_eval(const Span<PaintMaterialCompositeMaskB
     }
     else if (sample != nullptr) {
       c = sample + pixel_index * 4;
+    }
+    else if (half_sample != nullptr) {
+      /* The resting FP16 texel, decoded here: the slice is never materialized for the mask. */
+      const uint16_t *pixel = half_sample + pixel_index * 4;
+      half_rgba[0] = math::half_to_float(pixel[0]);
+      half_rgba[1] = math::half_to_float(pixel[1]);
+      half_rgba[2] = math::half_to_float(pixel[2]);
+      half_rgba[3] = math::half_to_float(pixel[3]);
+      c = half_rgba;
     }
     float gray = clamp_f(item.constant_gray, 0.0f, 1.0f);
     float weight = opacity;
@@ -1356,6 +1371,16 @@ float BKE_paint_material_mask_factor_eval(const Span<PaintMaterialCompositeMaskB
   return mask_factor;
 }
 
+float BKE_paint_material_mask_factor_eval(const Span<PaintMaterialCompositeMaskBuffer> items,
+                                          const Span<const float *> item_samples,
+                                          const Span<const float *> coverage_samples,
+                                          const int64_t pixel_index,
+                                          const PaintMaterialCompositeTexel &texel)
+{
+  return BKE_paint_material_mask_factor_eval(
+      items, item_samples, {}, coverage_samples, pixel_index, texel);
+}
+
 static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
                                    const rcti &tile,
                                    const float *folder_color,
@@ -1382,8 +1407,13 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
       }
     }
   }
-  else if (layer.color_ibuf != nullptr) {
-    composite_decode_tile(layer.color_ibuf, layer.color_colorspace_name, tile, r_color);
+  else if (layer.color_slice != nullptr || layer.color_ibuf != nullptr) {
+    if (layer.color_slice != nullptr) {
+      paint_layer_slice_color_decode_tile(*layer.color_slice, tile, r_color);
+    }
+    else {
+      composite_decode_tile(layer.color_ibuf, layer.color_colorspace_name, tile, r_color);
+    }
     if (layer.normal_directx) {
       for (int64_t i = 0; i < count; i++) {
         r_color[i * 4 + 1] = 1.0f - r_color[i * 4 + 1];
@@ -1420,7 +1450,8 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
    * is its own alpha, with no mask map to say otherwise, and a painted map both cover by the map's
    * alpha; a transparent texel shows what is below. */
   for (int64_t i = 0; i < count; i++) {
-    const bool own_alpha = (layer.color_alpha_coverage && layer.color_ibuf != nullptr) ||
+    const bool own_alpha = (layer.color_alpha_coverage && (layer.color_ibuf != nullptr ||
+                                                          layer.color_slice != nullptr)) ||
                            (mask == nullptr && layer.mask_from_alpha);
     float content = own_alpha ? clamp_f(r_color[i * 4 + 3], 0.0f, 1.0f) : 1.0f;
     if (layer.gradient.enabled) {
@@ -1526,7 +1557,8 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
       continue;
     }
     if ((correction.ibuf == nullptr && !correction.has_constant_color &&
-         correction.grey_buffer == nullptr && !correction.gradient.enabled) ||
+         correction.grey_buffer == nullptr && correction.grey_slice == nullptr &&
+         !correction.gradient.enabled) ||
         correction.opacity <= 0.0f)
     {
       continue;
@@ -1535,7 +1567,19 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
     Vector<float> anchor_coverage_tile;
     const float *anchor_slice = nullptr;
     const float *anchor_coverage = nullptr;
-    if (correction.grey_buffer != nullptr) {
+    if (correction.grey_slice != nullptr) {
+      anchor_slice_storage.resize(count * 4);
+      paint_layer_slice_color_decode_tile(
+          *correction.grey_slice, tile, anchor_slice_storage.data());
+      anchor_slice = anchor_slice_storage.data();
+      if (correction.anchor_point_coverage != nullptr) {
+        anchor_coverage_tile.resize(count * 4);
+        composite_decode_tile(
+            correction.anchor_point_coverage, nullptr, tile, anchor_coverage_tile.data());
+        anchor_coverage = anchor_coverage_tile.data();
+      }
+    }
+    else if (correction.grey_buffer != nullptr) {
       anchor_slice_storage.resize(count * 4);
       composite_decode_tile(
           correction.grey_buffer, nullptr, tile, anchor_slice_storage.data());
@@ -1665,7 +1709,17 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
     Vector<const float *> coverage_samples(item_count, nullptr);
     for (const int item_i : IndexRange(item_count)) {
       const PaintMaterialCompositeMaskBuffer &item = layer.mask_items[item_i];
-      if (item.ibuf != nullptr) {
+      if (item.grey_slice != nullptr) {
+        /* A tile-sized float transient, not a full-canvas materialization. The 5-argument float
+         * eval is kept on purpose: the half eval does no premultiplied straighten (this composite
+         * path needs one) and reads `pixel_index * 4` with no row stride, while the tile is a
+         * sub-rectangle of the full slice. */
+        item_storage[item_i].resize(count * 4);
+        paint_layer_slice_color_decode_tile(
+            *item.grey_slice, tile, item_storage[item_i].data());
+        item_samples[item_i] = item_storage[item_i].data();
+      }
+      else if (item.ibuf != nullptr) {
         item_storage[item_i].resize(count * 4);
         composite_decode_tile(item.ibuf, item.colorspace_name, tile, item_storage[item_i].data());
         item_samples[item_i] = item_storage[item_i].data();
@@ -1831,7 +1885,15 @@ static bool composite_layer_validate_linear(const PaintMaterialCompositeLayer &l
      * the same UV. */
     return false;
   }
-  if (layer.color_ibuf != nullptr) {
+  if (layer.color_slice != nullptr) {
+    int slice_width = 0;
+    int slice_height = 0;
+    paint_layer_slice_color_dimensions(*layer.color_slice, slice_width, slice_height);
+    if (slice_width != width || slice_height != height) {
+      return false;
+    }
+  }
+  else if (layer.color_ibuf != nullptr) {
     if (!composite_ibuf_is_rgba(layer.color_ibuf, width, height)) {
       return false;
     }
@@ -1860,8 +1922,16 @@ static bool composite_layer_validate_linear(const PaintMaterialCompositeLayer &l
     {
       return false;
     }
-    if (item.grey_buffer != nullptr &&
-        !composite_mask_ibuf_is_valid(item.grey_buffer, width, height))
+    if (item.grey_slice != nullptr) {
+      int slice_width = 0;
+      int slice_height = 0;
+      paint_layer_slice_color_dimensions(*item.grey_slice, slice_width, slice_height);
+      if (slice_width != width || slice_height != height) {
+        return false;
+      }
+    }
+    else if (item.grey_buffer != nullptr &&
+             !composite_mask_ibuf_is_valid(item.grey_buffer, width, height))
     {
       return false;
     }
@@ -1884,8 +1954,16 @@ static bool composite_layer_validate_linear(const PaintMaterialCompositeLayer &l
     {
       return false;
     }
-    if (correction.grey_buffer != nullptr &&
-        !composite_ibuf_is_rgba(correction.grey_buffer, width, height))
+    if (correction.grey_slice != nullptr) {
+      int slice_width = 0;
+      int slice_height = 0;
+      paint_layer_slice_color_dimensions(*correction.grey_slice, slice_width, slice_height);
+      if (slice_width != width || slice_height != height) {
+        return false;
+      }
+    }
+    else if (correction.grey_buffer != nullptr &&
+             !composite_ibuf_is_rgba(correction.grey_buffer, width, height))
     {
       return false;
     }
@@ -2871,6 +2949,103 @@ static ImBuf *composite_buffer_to_eval_grid(ImBuf *ibuf,
 }
 
 /**
+ * Resample a half slice onto a \a dst_width x \a dst_height evaluation grid, as a half slice: the
+ * identity-mapping twin of #composite_resample_mapped, bilinear with Repeat edges, no colorspace
+ * (a slice is scene linear). The taps are filtered as they rest -- premultiplied, like the float
+ * path filters before it straightens -- so the reduced grid keeps the octave's preview-grade read
+ * without ever materializing the whole source.
+ *
+ * The result is FP16, so it is packed with #float_to_half_make_finite_array and saturated to
+ * ±65504 with NaN read as zero, as every half rest is. The float twin #composite_resample_mapped
+ * keeps such out-of-range and NaN values as they are: for an HDR or NaN source the half and float
+ * descriptions of one row differ at exactly those texels, by design (the half form has to stay
+ * finite for the GPU read).
+ */
+static PaintLayerSliceColor composite_slice_resample_eval_grid(const PaintLayerSliceColor &src,
+                                                               const int dst_width,
+                                                               const int dst_height)
+{
+  PaintLayerSliceColor result;
+  const PaintLayerSliceHalf &source = *src.halfs;
+  const int src_width = source.width;
+  const int src_height = source.height;
+  if (src_width <= 0 || src_height <= 0 || dst_width <= 0 || dst_height <= 0) {
+    return result;
+  }
+  auto half = std::make_shared<PaintLayerSliceHalf>();
+  half->width = dst_width;
+  half->height = dst_height;
+  half->pixels = Array<uint16_t>(int64_t(dst_width) * dst_height * 4);
+  auto wrap_texel = [](const int i, const int n) {
+    const int r = i % n;
+    return r < 0 ? r + n : r;
+  };
+  Vector<float> row(int64_t(dst_width) * 4);
+  for (int y = 0; y < dst_height; y++) {
+    const float sv = (float(y) + 0.5f) / float(dst_height) * float(src_height) - 0.5f;
+    const int y0 = int(floorf(sv));
+    const float b = sv - float(y0);
+    for (int x = 0; x < dst_width; x++) {
+      const float su = (float(x) + 0.5f) / float(dst_width) * float(src_width) - 0.5f;
+      const int x0 = int(floorf(su));
+      const float a = su - float(x0);
+      const int64_t t00 = int64_t(wrap_texel(y0, src_height)) * src_width +
+                          wrap_texel(x0, src_width);
+      const int64_t t10 = int64_t(wrap_texel(y0, src_height)) * src_width +
+                          wrap_texel(x0 + 1, src_width);
+      const int64_t t01 = int64_t(wrap_texel(y0 + 1, src_height)) * src_width +
+                          wrap_texel(x0, src_width);
+      const int64_t t11 = int64_t(wrap_texel(y0 + 1, src_height)) * src_width +
+                          wrap_texel(x0 + 1, src_width);
+      for (const int k : IndexRange(4)) {
+        const float c00 = math::half_to_float(source.pixels[t00 * 4 + k]);
+        const float c10 = math::half_to_float(source.pixels[t10 * 4 + k]);
+        const float c01 = math::half_to_float(source.pixels[t01 * 4 + k]);
+        const float c11 = math::half_to_float(source.pixels[t11 * 4 + k]);
+        row[int64_t(x) * 4 + k] = (1.0f - a) * (1.0f - b) * c00 + a * (1.0f - b) * c10 +
+                                  (1.0f - a) * b * c01 + a * b * c11;
+      }
+    }
+    math::float_to_half_make_finite_array(
+        row.data(), half->pixels.data() + int64_t(y) * dst_width * 4, size_t(dst_width) * 4);
+  }
+  result.halfs = std::move(half);
+  return result;
+}
+
+/**
+ * The half slice an evaluation reads at \a eval_width x \a eval_height: the description's own
+ * storage when the grid matches, else an owned half resample held by \a r_locks. Null for a float
+ * slice, which takes the ordinary #ImBuf path.
+ */
+static const PaintLayerSliceColor *composite_slice_to_eval_grid(
+    const PaintLayerSliceColor &slice,
+    const int eval_width,
+    const int eval_height,
+    Vector<CompositeImageLock> &r_locks)
+{
+  if (!slice.is_half()) {
+    return nullptr;
+  }
+  int width = 0;
+  int height = 0;
+  paint_layer_slice_color_dimensions(slice, width, height);
+  if (width == eval_width && height == eval_height) {
+    return &slice;
+  }
+  PaintLayerSliceColor resampled = composite_slice_resample_eval_grid(
+      slice, eval_width, eval_height);
+  if (resampled.halfs == nullptr) {
+    return nullptr;
+  }
+  CompositeImageLock lock;
+  lock.slice = std::make_shared<PaintLayerSliceColor>(std::move(resampled));
+  const PaintLayerSliceColor *result = lock.slice.get();
+  r_locks.append(std::move(lock));
+  return result;
+}
+
+/**
  * Acquire the buffers of \a image_layers into \a r_layers for the linear evaluator, which takes
  * float buffers and constant layers. A folder is acquired through its children, and left out when
  * nothing it holds paints.
@@ -2906,7 +3081,8 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
                             std::make_move_iterator(children.end()));
     }
     else if (!composite_layer_has_content(image_layer, image_layer.color_image != nullptr) &&
-             image_layer.anchor_point_color == nullptr)
+             image_layer.anchor_point_color.floats == nullptr &&
+             image_layer.anchor_point_color.halfs == nullptr)
     {
       continue;
     }
@@ -2944,13 +3120,22 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
        * evaluator has to decode what it is actually handed. */
       layer.color_colorspace_name = composite_buffer_colorspace_name(layer.color_ibuf);
     }
-    else if (image_layer.anchor_point_color != nullptr) {
+    else if (image_layer.anchor_point_color.halfs != nullptr) {
+      /* A half slice: the evaluator decodes the tile it reads, and a reduced grid gets an owned
+       * half resample instead of materializing the source. */
+      layer.color_slice = composite_slice_to_eval_grid(
+          image_layer.anchor_point_color, ref_width, ref_height, r_locks);
+      if (layer.color_slice == nullptr) {
+        return false;
+      }
+    }
+    else if (image_layer.anchor_point_color.floats != nullptr) {
       /* A slice is already in canvas space and scene linear: read it as it is, with no mapping and
        * no colorspace conversion. The image-layer description owns the buffer; the evaluator's
        * layer only borrows it for this call. A reduced grid reads an owned resample of it instead,
        * the slice itself staying untouched. */
       layer.color_ibuf = composite_buffer_to_eval_grid(
-          image_layer.anchor_point_color.get(), ref_width, ref_height, r_locks);
+          image_layer.anchor_point_color.floats.get(), ref_width, ref_height, r_locks);
       layer.color_colorspace_name = composite_buffer_colorspace_name(layer.color_ibuf);
     }
     if (image_layer.mask_image != nullptr) {
@@ -3027,11 +3212,20 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
         buffer.ibuf = composite_buffer_to_eval_grid(buffer.ibuf, ref_width, ref_height, r_locks);
         buffer.colorspace_name = composite_buffer_colorspace_name(buffer.ibuf);
       }
-      else if (item.grey_buffer != nullptr) {
+      else if (item.grey_buffer.halfs != nullptr) {
+        /* A half slice: the evaluator decodes the tile it reads; a reduced grid gets an owned half
+         * resample, the slice itself staying untouched. */
+        buffer.grey_slice = composite_slice_to_eval_grid(
+            item.grey_buffer, ref_width, ref_height, r_locks);
+        if (buffer.grey_slice == nullptr) {
+          return false;
+        }
+      }
+      else if (item.grey_buffer.floats != nullptr) {
         /* A slice is already in canvas space and scene linear; the description owns the buffer. A
          * reduced grid reads an owned resample of it, the slice itself staying untouched. */
         buffer.ibuf = composite_buffer_to_eval_grid(
-            item.grey_buffer.get(), ref_width, ref_height, r_locks);
+            item.grey_buffer.floats.get(), ref_width, ref_height, r_locks);
         buffer.colorspace_name = composite_buffer_colorspace_name(buffer.ibuf);
       }
       buffer.map_coverage = item.map_coverage;
@@ -3085,7 +3279,8 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
     }
     for (const PaintMaterialCompositeCorrection &correction : image_layer.content_corrections) {
       if (correction.image == nullptr && !correction.has_constant_color && correction.filter == 0 &&
-          correction.grey_buffer == nullptr && !correction.gradient.enabled)
+          correction.grey_buffer.floats == nullptr && correction.grey_buffer.halfs == nullptr &&
+          !correction.gradient.enabled)
       {
         continue;
       }
@@ -3125,11 +3320,24 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
                 std::begin(buffer.filter_params));
       buffer.blend = correction.blend;
       buffer.opacity = correction.opacity;
-      if (correction.grey_buffer != nullptr) {
+      if (correction.grey_buffer.halfs != nullptr) {
+        /* A half slice: the evaluator decodes the tile it reads; a reduced grid gets an owned half
+         * resample, the slice itself staying untouched. */
+        buffer.grey_slice = composite_slice_to_eval_grid(
+            correction.grey_buffer, ref_width, ref_height, r_locks);
+        if (buffer.grey_slice == nullptr) {
+          return false;
+        }
+        if (correction.anchor_point_coverage != nullptr) {
+          buffer.anchor_point_coverage = composite_buffer_to_eval_grid(
+              correction.anchor_point_coverage.get(), ref_width, ref_height, r_locks);
+        }
+      }
+      else if (correction.grey_buffer.floats != nullptr) {
         /* A slice is already in canvas space and scene linear; the description owns both buffers.
          * A reduced grid reads owned resamples of them, the slices staying untouched. */
         buffer.grey_buffer = composite_buffer_to_eval_grid(
-            correction.grey_buffer.get(), ref_width, ref_height, r_locks);
+            correction.grey_buffer.floats.get(), ref_width, ref_height, r_locks);
         buffer.anchor_point_coverage = composite_buffer_to_eval_grid(
             correction.anchor_point_coverage.get(), ref_width, ref_height, r_locks);
       }
@@ -3187,8 +3395,8 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
         }
       }
       /* The flat colour belongs to the chain above: a slice, a map or a gradient has none. */
-      if (correction.grey_buffer == nullptr && correction.image == nullptr &&
-          !correction.gradient.enabled) {
+      if (correction.grey_buffer.floats == nullptr && correction.grey_buffer.halfs == nullptr &&
+          correction.image == nullptr && !correction.gradient.enabled) {
         buffer.has_constant_color = true;
         copy_v4_v4(buffer.constant_color, correction.constant_color);
       }
@@ -3575,11 +3783,12 @@ static bool composite_stack_bottom_layer_info(Span<PaintMaterialCompositeImageLa
     }
     if (size_image == nullptr) {
       /* A reader that rendered its slice has no map of its own: the slice is its canvas. */
-      if (layer.anchor_point_color != nullptr && layer.anchor_point_color->x > 0 &&
-          layer.anchor_point_color->y > 0)
-      {
-        r_width = layer.anchor_point_color->x;
-        r_height = layer.anchor_point_color->y;
+      int slice_width = 0;
+      int slice_height = 0;
+      paint_layer_slice_color_dimensions(layer.anchor_point_color, slice_width, slice_height);
+      if (slice_width > 0 && slice_height > 0) {
+        r_width = slice_width;
+        r_height = slice_height;
         return true;
       }
       if (layer.empty_base_size > 0) {

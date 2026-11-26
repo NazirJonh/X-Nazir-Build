@@ -29,6 +29,7 @@
 #include <mutex>
 #include <utility>
 
+#include "BLI_assert.h"
 #include "BLI_hash.hh"
 #include "BLI_index_range.hh"
 #include "BLI_listbase_iterator.hh"
@@ -1080,7 +1081,7 @@ static void composite_mask_item_anchor_point(const MaskItemDescribeContext &cont
     /* In describe-only mode the reader keeps its descriptor, hash and subscriptions; the
      * slice buffers belong to the GPU slot pass instead of the CPU cache. */
     if (!context.describe_only) {
-      std::shared_ptr<ImBuf> slice_color;
+      PaintLayerSliceColor slice_color;
       std::shared_ptr<ImBuf> slice_coverage;
       if (!BKE_paint_layers_slice_render(
               ma,
@@ -1098,7 +1099,7 @@ static void composite_mask_item_anchor_point(const MaskItemDescribeContext &cont
       const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, mask);
       item.grey_buffer = (ref.target == PaintLayerAnchorPointTarget::Mask) ?
                              std::move(slice_color) :
-                             std::move(slice_coverage);
+                             paint_layer_slice_color_pack(std::move(slice_coverage), false);
     }
     item.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, mask, read_channel);
     BKE_paint_layers_anchor_point_slice_images(ma, mask, item.grey_input_images);
@@ -1260,14 +1261,14 @@ static void composite_mask_item_filter(const MaskItemDescribeContext &context,
                                  effect.image);
     }
     else {
-      effect.grey_buffer = paint_layer_mask_effect_buffer_get(ma,
-                                                             context.layer,
-                                                             mask,
-                                                             context.describe_only,
-                                                             &effect.grey_input_images,
-                                                             context.tile_number,
-                                                             context.painted_object);
-      if (!context.describe_only && effect.grey_buffer == nullptr) {
+      effect.grey_buffer.floats = paint_layer_mask_effect_buffer_get(ma,
+                                                                     context.layer,
+                                                                     mask,
+                                                                     context.describe_only,
+                                                                     &effect.grey_input_images,
+                                                                     context.tile_number,
+                                                                     context.painted_object);
+      if (!context.describe_only && effect.grey_buffer.floats == nullptr) {
         /* The input could not be rendered: the item is left out, as the generator leaves a
          * filter it cannot express out of the live graph. */
         return;
@@ -3224,26 +3225,40 @@ void PaintLayersMaskSampler::tile_acquire(const int tile_number,
   tile.items.resize(item_count, nullptr);
   tile.coverage.resize(item_count, nullptr);
   tile.item_samples.resize(item_count, nullptr);
+  tile.item_half_samples.resize(item_count, nullptr);
+  tile.half_slices.resize(item_count);
   tile.coverage_samples.resize(item_count, nullptr);
   for (const int i : items_.index_range()) {
     const PaintMaterialCompositeMaskItem &item = items_[i];
-    if (item.grey_buffer != nullptr) {
-      /* A slice is already in canvas space and the description keeps its buffer alive: take an
-       * ImBuf reference so the tile's destructor can release it like any other acquired map. A
-       * slice of another size than the tile is not sampled, as for a painted map below. A mask
-       * effect's grey is one scalar channel, so it is expanded into an owned RGBA sample buffer
-       * (alpha one) that the shared mask arithmetic reads. */
-      if (item.grey_buffer->x == ref_width && item.grey_buffer->y == ref_height) {
-        if (item.grey_buffer->channels == 1) {
-          if (ImBuf *expanded = mask_grey_sample_buffer_new(*item.grey_buffer)) {
-            tile.items[i] = expanded;
-            tile.item_samples[i] = expanded->float_data();
-          }
+    if (item.grey_buffer.floats != nullptr || item.grey_buffer.halfs != nullptr) {
+      /* A slice is already in canvas space and the description keeps its buffer alive, and a
+       * slice of another size than the tile is not sampled, as for a painted map below. A float
+       * RGBA slice takes an ImBuf reference so the tile's destructor can release it like any
+       * other acquired map; a mask effect's grey is one scalar channel, so it is expanded into an
+       * owned RGBA sample buffer (alpha one) that the shared mask arithmetic reads. A half slice
+       * rests in the description: the tile shares it and the evaluator decodes one texel at a
+       * time, so no full float canvas is made here. */
+      int grey_width = 0;
+      int grey_height = 0;
+      paint_layer_slice_color_dimensions(item.grey_buffer, grey_width, grey_height);
+      if (grey_width == ref_width && grey_height == ref_height) {
+        if (item.grey_buffer.is_half()) {
+          tile.item_half_samples[i] = item.grey_buffer.halfs->pixels.data();
+          tile.half_slices[i] = item.grey_buffer.halfs;
         }
         else {
-          IMB_refImBuf(item.grey_buffer.get());
-          tile.items[i] = item.grey_buffer.get();
-          tile.item_samples[i] = item.grey_buffer->float_data();
+          std::shared_ptr<ImBuf> floats = paint_layer_slice_color_read_float(item.grey_buffer);
+          if (floats != nullptr && floats->channels == 1) {
+            if (ImBuf *expanded = mask_grey_sample_buffer_new(*floats)) {
+              tile.items[i] = expanded;
+              tile.item_samples[i] = expanded->float_data();
+            }
+          }
+          else if (floats != nullptr) {
+            IMB_refImBuf(floats.get());
+            tile.items[i] = floats.get();
+            tile.item_samples[i] = floats->float_data();
+          }
         }
       }
     }
@@ -3313,6 +3328,7 @@ float PaintLayersMaskSampler::sample(const int tile_number, const int x, const i
   const int64_t pixel_index = int64_t(y) * tile.width + x;
   return BKE_paint_material_mask_factor_eval(buffers_.as_span(),
                                              tile.item_samples,
+                                             tile.item_half_samples,
                                              tile.coverage_samples,
                                              pixel_index,
                                              {x, y, tile.width, tile.height});
@@ -3359,11 +3375,11 @@ static void anchor_slice_images_get(const Material &ma,
 }
 
 /**
- * Total memory the slice cache may hold, counted as it is allocated: a colour buffer of four floats
- * per pixel and a coverage buffer of one, so one 4K pair is 320 MiB. A composite of the shaded
- * channels needs one pair per channel of a reader at once, and an entry evicted between two
- * channels is rendered whole again; 4 GiB holds the working set of a reader at 4K and keeps the
- * few most recent others. A pair larger than the budget is never cached.
+ * Total memory the slice cache may hold, counted as it is allocated: an FP16 colour buffer of four
+ * components per pixel and a coverage buffer of one float, so one 4K pair is 192 MiB. A composite
+ * of the shaded channels needs one pair per channel of a reader at once, and an entry evicted
+ * between two channels is rendered whole again; 4 GiB holds the working set of a reader at 4K and
+ * keeps the few most recent others. A pair larger than the budget is never cached.
  */
 constexpr size_t PAINT_LAYER_ANCHOR_SLICE_CACHE_BYTES =
     size_t(bke::paint_cache::anchor_slice_cache_default_bytes);
@@ -3373,16 +3389,16 @@ static size_t g_anchor_slice_cache_budget = PAINT_LAYER_ANCHOR_SLICE_CACHE_BYTES
 
 struct AnchorSliceCacheEntry {
   AnchorSliceCacheKey key;
-  std::shared_ptr<ImBuf> color;
+  PaintLayerSliceColor color;
   std::shared_ptr<ImBuf> coverage;
   /** The maps the buffers were rendered from, with the versions they had. */
   Vector<AnchorSliceSource> synced;
   size_t bytes = 0;
 };
 
-static size_t anchor_slice_color_bytes(const ImBuf *ibuf)
+static size_t anchor_slice_color_bytes(const PaintLayerSliceColor &color)
 {
-  return ibuf != nullptr ? size_t(ibuf->x) * size_t(ibuf->y) * sizeof(float[4]) : 0;
+  return paint_layer_slice_color_bytes(color);
 }
 
 /** Coverage is one float per texel: the slice's content coverage is a scalar plane. */
@@ -3694,28 +3710,27 @@ static bool anchor_slice_dimensions(const Material &ma,
 }
 
 /**
- * Render the slice of \a reader on \a tile_number into the buffers, which are already of the
- * slice's size: the whole of them when \a rect is null, else the rectangle (x0, y0, x1, y1),
- * leaving the rest as it is. False when the slice cannot be rendered there.
+ * Render the rectangle (x0, y0, x1, y1) of the slice of \a reader on \a tile_number into straight
+ * RGBA and coverage planes `region_w` wide, one row per rendered region row. \a width and \a height
+ * are the slice's own size, which the mask sampler reads its tile at.
  */
-static bool anchor_slice_fill(const Material &ma,
-                              const MaterialPaintLayer &reader,
-                              const int channel,
-                              const PaintLayerAnchorPointRef &ref,
-                              const int *rect,
-                              ImBuf &color,
-                              ImBuf &coverage,
-                              PaintLayerSurfaceRef painted_object,
-                              const int tile_number)
+static bool anchor_slice_render_region(const Material &ma,
+                                       const MaterialPaintLayer &reader,
+                                       const int channel,
+                                       const PaintLayerAnchorPointRef &ref,
+                                       const int *rect,
+                                       const int width,
+                                       const int height,
+                                       float *r_color,
+                                       float *r_coverage,
+                                       const int region_w,
+                                       PaintLayerSurfaceRef painted_object,
+                                       const int tile_number)
 {
-  const int width = color.x;
-  const int height = color.y;
   int rx0, ry0, rx1, ry1;
   if (!anchor_slice_region_get(rect, width, height, rx0, ry0, rx1, ry1)) {
     return false;
   }
-  float *color_pixels = color.float_data_for_write();
-  float *coverage_pixels = coverage.float_data_for_write();
 
   if (ref.target == PaintLayerAnchorPointTarget::Mask) {
     /* The slice reads the stack straight, the base's switch included (see
@@ -3726,14 +3741,14 @@ static bool anchor_slice_fill(const Material &ma,
     sampler.tile_acquire(tile_number, width, height);
     for (int y = ry0; y < ry1; y++) {
       for (int x = rx0; x < rx1; x++) {
-        const int64_t index = int64_t(y) * width + x;
+        const int64_t dst = int64_t(y - ry0) * region_w + (x - rx0);
         const float gray = sampler.sample(tile_number, x, y);
-        color_pixels[index * 4 + 0] = gray;
-        color_pixels[index * 4 + 1] = gray;
-        color_pixels[index * 4 + 2] = gray;
+        r_color[dst * 4 + 0] = gray;
+        r_color[dst * 4 + 1] = gray;
+        r_color[dst * 4 + 2] = gray;
         /* A mask point read as content is opaque grey; read as a mask item it is the scalar. */
-        color_pixels[index * 4 + 3] = 1.0f;
-        coverage_pixels[index] = 1.0f;
+        r_color[dst * 4 + 3] = 1.0f;
+        r_coverage[dst] = 1.0f;
       }
     }
     return true;
@@ -3762,41 +3777,107 @@ static bool anchor_slice_fill(const Material &ma,
   {
     return false;
   }
-  const int region_w = rx1 - rx0;
-  const int region_h = ry1 - ry0;
-  const bool full = rect == nullptr;
-  /* A complete render evaluates straight into the colour buffer; only a partial one needs a
-   * region-sized scratch to copy from. The coverage is a scalar plane either way, widened below. */
-  Vector<float> region_color;
   rcti region;
   BLI_rcti_init(&region, rx0, rx1, ry0, ry1);
-  float *color_out = color_pixels;
-  if (!full) {
-    region_color.resize(int64_t(region_w) * region_h * 4);
-    color_out = region_color.data();
+  /* A complete render evaluates straight into the destination; only a partial one is evaluated
+   * into the rectangle it names. */
+  const bool full = rect == nullptr;
+  return BKE_paint_material_composite_eval_row_content(
+      entry, r_color, r_coverage, full ? nullptr : &region, channel);
+}
+
+/**
+ * Write region-sized planes of the slice of \a reader into the destination slice colour and
+ * coverage. A half colour is packed only in the rendered rectangle, so the neighbouring half
+ * texels stay as they were; a float one is copied row by row.
+ */
+static bool anchor_slice_fill(const Material &ma,
+                              const MaterialPaintLayer &reader,
+                              const int channel,
+                              const PaintLayerAnchorPointRef &ref,
+                              const int *rect,
+                              PaintLayerSliceColor &color,
+                              ImBuf &coverage,
+                              PaintLayerSurfaceRef painted_object,
+                              const int tile_number)
+{
+  int width = 0;
+  int height = 0;
+  paint_layer_slice_color_dimensions(color, width, height);
+  int rx0, ry0, rx1, ry1;
+  if (!anchor_slice_region_get(rect, width, height, rx0, ry0, rx1, ry1)) {
+    return false;
   }
+  float *coverage_pixels = coverage.float_data_for_write();
+  /* A complete float render writes straight into the buffers; every other case renders its
+   * rectangle into scratch first. */
+  if (rect == nullptr && !color.is_half() && color.floats != nullptr) {
+    return anchor_slice_render_region(ma,
+                                      reader,
+                                      channel,
+                                      ref,
+                                      nullptr,
+                                      width,
+                                      height,
+                                      color.floats->float_data_for_write(),
+                                      coverage_pixels,
+                                      width,
+                                      painted_object,
+                                      tile_number);
+  }
+
+  const int region_w = rx1 - rx0;
+  const int region_h = ry1 - ry0;
+  Vector<float> region_color(int64_t(region_w) * region_h * 4);
   Vector<float> region_coverage(int64_t(region_w) * region_h);
-  if (!BKE_paint_material_composite_eval_row_content(
-          entry, color_out, region_coverage.data(), full ? nullptr : &region, channel))
+  if (!anchor_slice_render_region(ma,
+                                  reader,
+                                  channel,
+                                  ref,
+                                  rect,
+                                  width,
+                                  height,
+                                  region_color.data(),
+                                  region_coverage.data(),
+                                  region_w,
+                                  painted_object,
+                                  tile_number))
   {
     return false;
   }
+  /* Coverage is one float per texel: copied straight into the plane the cache keeps. */
   for (int y = ry0; y < ry1; y++) {
     for (int x = rx0; x < rx1; x++) {
       const int64_t src = int64_t(y - ry0) * region_w + (x - rx0);
       const int64_t dst = int64_t(y) * width + x;
-      if (!full) {
-        memcpy(color_pixels + dst * 4, region_color.data() + src * 4, sizeof(float[4]));
-      }
-      /* The coverage is a scalar plane, one float per texel. */
       coverage_pixels[dst] = region_coverage[src];
     }
+  }
+  if (color.is_half()) {
+    PaintLayerSliceHalf &half = *color.halfs;
+    for (int y = ry0; y < ry1; y++) {
+      const float *src = region_color.data() + int64_t(y - ry0) * region_w * 4;
+      uint16_t *dst = half.pixels.data() + (int64_t(y) * width + rx0) * 4;
+      math::float_to_half_make_finite_array(src, dst, size_t(region_w) * 4);
+    }
+    return true;
+  }
+  BLI_assert(color.valid() && color.floats != nullptr);
+  if (color.floats == nullptr) {
+    return false;
+  }
+  float *color_pixels = color.floats->float_data_for_write();
+  for (int y = ry0; y < ry1; y++) {
+    const float *src = region_color.data() + int64_t(y - ry0) * region_w * 4;
+    float *dst = color_pixels + (int64_t(y) * width + rx0) * 4;
+    memcpy(dst, src, size_t(region_w) * sizeof(float[4]));
   }
   return true;
 }
 
 /** Render the slice of \a reader on \a tile_number into buffers of its own: all of it for a null
- * \a dst_rect, else that rectangle with the rest zero. */
+ * \a dst_rect, else that rectangle with the rest zero. The colour is always a fresh float buffer;
+ * the caller decides whether the cache keeps an FP16 copy of it. */
 static bool anchor_slice_render_new(const Material &ma,
                                     const MaterialPaintLayer &reader,
                                     const int channel,
@@ -3823,10 +3904,19 @@ static bool anchor_slice_render_new(const Material &ma,
   if (color == nullptr || coverage == nullptr) {
     return false;
   }
+  PaintLayerSliceColor slice_color;
+  slice_color.floats = color;
   /* The buffers were born zeroed, so a partial render's unwritten part is already defined as
    * zero; only the region this render writes is filled below. */
-  if (!anchor_slice_fill(
-          ma, reader, channel, ref, dst_rect, *color, *coverage, painted_object, tile_number))
+  if (!anchor_slice_fill(ma,
+                         reader,
+                         channel,
+                         ref,
+                         dst_rect,
+                         slice_color,
+                         *coverage,
+                         painted_object,
+                         tile_number))
   {
     return false;
   }
@@ -5526,7 +5616,7 @@ uint64_t paint_layer_row_projection_hash(const Material &ma,
 bool BKE_paint_layers_slice_render(const Material &ma,
                                    const MaterialPaintLayer &reader,
                                    const int channel,
-                                   std::shared_ptr<ImBuf> *r_color,
+                                   PaintLayerSliceColor *r_color,
                                    std::shared_ptr<ImBuf> *r_coverage,
                                    const int *dst_rect,
                                    const bool dimensions_only,
@@ -5561,22 +5651,27 @@ bool BKE_paint_layers_slice_render(const Material &ma,
   }
   if (dst_rect != nullptr) {
     /* A partial render is not a complete slice and is never cached: it is only produced for a bake
-     * job that writes the requested rectangle into its own full-size map. */
+     * job that writes the requested rectangle into its own full-size map. It stays float: the
+     * cache only compresses a resting complete slice. */
+    std::shared_ptr<ImBuf> partial_color;
     if (!anchor_slice_render_new(ma,
                                  reader,
                                  channel,
                                  ref,
                                  dst_rect,
-                                 *r_color,
+                                 partial_color,
                                  *r_coverage,
                                  painted_object,
-                                 tile_number)) {
+                                 tile_number) ||
+        partial_color == nullptr)
+    {
       perf.note("hit=0 partial=1 failed=1 target=%d channel=%d", int(ref.target), channel);
       return false;
     }
+    r_color->floats = std::move(partial_color);
     perf.note("hit=0 partial=1 size=%dx%d target=%d channel=%d",
-              (*r_color)->x,
-              (*r_color)->y,
+              r_color->floats->x,
+              r_color->floats->y,
               int(ref.target),
               channel);
     return true;
@@ -5617,11 +5712,14 @@ bool BKE_paint_layers_slice_render(const Material &ma,
         *r_color = hit.color;
         *r_coverage = hit.coverage;
         anchor_slice_cache().entries.append(std::move(hit));
+        int hit_width = 0;
+        int hit_height = 0;
+        paint_layer_slice_color_dimensions(*r_color, hit_width, hit_height);
         /* The note is filled under the lock but printed when the timer leaves scope, after it: the
          * hit itself is just the shared pointers above. */
         perf.note("hit=1 size=%dx%d target=%d channel=%d tile=%d",
-                  (*r_color)->x,
-                  (*r_color)->y,
+                  hit_width,
+                  hit_height,
                   int(ref.target),
                   channel,
                   tile_number);
@@ -5635,65 +5733,86 @@ bool BKE_paint_layers_slice_render(const Material &ma,
     }
   }
 
-  std::shared_ptr<ImBuf> color;
+  PaintLayerSliceColor color;
   std::shared_ptr<ImBuf> coverage;
   bool updated = false;
-  if (have_entry && change == ePixelChange::Region && held.color != nullptr &&
-      held.coverage != nullptr &&
-      anchor_slice_region_is_exact(
-          ma, reader, channel, images, held.color->x, held.color->y, tile_number))
+  if (have_entry && change == ePixelChange::Region &&
+      (held.color.floats != nullptr || held.color.halfs != nullptr) && held.coverage != nullptr)
   {
-    /* Only the edited rectangle is rendered again. The buffers are written in place when the cache
-     * is their only owner; a description that still reads them gets them unchanged, and the
-     * update works on a copy. */
-    color = std::move(held.color);
-    coverage = std::move(held.coverage);
-    if (color.use_count() > 1) {
-      color = paint_layer_anchor_slice_buffer_clone(*color);
-    }
-    if (coverage.use_count() > 1) {
-      coverage = paint_layer_anchor_slice_buffer_clone(*coverage);
-    }
-    if (color != nullptr && coverage != nullptr) {
-      int rx0, ry0, rx1, ry1;
-      const int rect[4] = {region.xmin, region.ymin, region.xmax, region.ymax};
-      if (!anchor_slice_region_get(rect, color->x, color->y, rx0, ry0, rx1, ry1)) {
-        /* The edit lies outside the slice: nothing of it is in there to change. */
-        updated = true;
+    int held_width = 0;
+    int held_height = 0;
+    paint_layer_slice_color_dimensions(held.color, held_width, held_height);
+    if (anchor_slice_region_is_exact(
+            ma, reader, channel, images, held_width, held_height, tile_number))
+    {
+      /* Only the edited rectangle is rendered again. The storage is written in place when the
+       * cache is its only owner; a description that still reads it gets it unchanged, and the
+       * update works on a copy. A half copy touches only the half texels the rectangle covers. */
+      color = std::move(held.color);
+      coverage = std::move(held.coverage);
+      if (color.is_half() ? color.halfs.use_count() > 1 : color.floats.use_count() > 1) {
+        color = paint_layer_slice_color_clone(color);
       }
-      else {
-        updated = anchor_slice_fill(
-            ma, reader, channel, ref, rect, *color, *coverage, painted_object, tile_number);
+      if (coverage.use_count() > 1) {
+        coverage = paint_layer_anchor_slice_buffer_clone(*coverage);
       }
-    }
-    if (!updated) {
-      /* A half-written buffer is not reused. */
-      color = {};
-      coverage = {};
+      if ((color.floats != nullptr || color.halfs != nullptr) && coverage != nullptr) {
+        int rx0, ry0, rx1, ry1;
+        const int rect[4] = {region.xmin, region.ymin, region.xmax, region.ymax};
+        if (!anchor_slice_region_get(rect, held_width, held_height, rx0, ry0, rx1, ry1)) {
+          /* The edit lies outside the slice: nothing of it is in there to change. */
+          updated = true;
+        }
+        else {
+          updated = anchor_slice_fill(
+              ma, reader, channel, ref, rect, color, *coverage, painted_object, tile_number);
+        }
+      }
+      if (!updated) {
+        /* A half-written storage is not reused. */
+        color = {};
+        coverage = {};
+      }
     }
   }
-  if (!updated && !anchor_slice_render_new(ma,
-                                           reader,
-                                           channel,
-                                           ref,
-                                           nullptr,
-                                           color,
-                                           coverage,
-                                           painted_object,
-                                           tile_number))
-  {
-    perf.note("hit=0 region=0 failed=1 target=%d channel=%d", int(ref.target), channel);
-    return false;
+  std::shared_ptr<ImBuf> rendered_color;
+  if (!updated) {
+    if (!anchor_slice_render_new(ma,
+                                 reader,
+                                 channel,
+                                 ref,
+                                 nullptr,
+                                 rendered_color,
+                                 coverage,
+                                 painted_object,
+                                 tile_number))
+    {
+      perf.note("hit=0 region=0 failed=1 target=%d channel=%d", int(ref.target), channel);
+      return false;
+    }
   }
 
   {
     AnchorSliceCacheEntry new_entry;
     new_entry.key = key;
-    new_entry.color = color;
     new_entry.coverage = coverage;
     new_entry.synced = std::move(sources_now);
-    new_entry.bytes = anchor_slice_color_bytes(color.get()) +
+    if (updated) {
+      /* A regional patch already wrote the resting (possibly FP16) storage. */
+      new_entry.color = std::move(color);
+    }
+    else {
+      new_entry.color = paint_layer_slice_color_pack(rendered_color, /*use_half=*/true);
+    }
+    /* The colour's cost is its resting form: an FP16 slice is half an RGBA float one. */
+    new_entry.bytes = anchor_slice_color_bytes(new_entry.color) +
                       anchor_slice_coverage_bytes(coverage.get());
+    /* The caller of a miss keeps the float buffer the render produced; a hit or a patch hands
+     * over the resting storage itself. Copied before the entry is moved into the cache. */
+    PaintLayerSliceColor result = updated ? new_entry.color : PaintLayerSliceColor{};
+    if (!updated) {
+      result.floats = rendered_color;
+    }
     std::lock_guard<std::mutex> lock(g_anchor_slice_cache_mutex);
     /* Bound the cache by memory, not by a number of entries: one 4K pair is far larger than a
      * handful of small slices. The oldest entry is the LRU one; a hit moves to the newest end
@@ -5718,13 +5837,16 @@ bool BKE_paint_layers_slice_render(const Material &ma,
       anchor_slice_cache().total_bytes += new_entry.bytes;
       anchor_slice_cache().entries.append(std::move(new_entry));
     }
+    *r_color = std::move(result);
+    *r_coverage = std::move(coverage);
   }
-  *r_color = std::move(color);
-  *r_coverage = std::move(coverage);
+  int result_width = 0;
+  int result_height = 0;
+  paint_layer_slice_color_dimensions(*r_color, result_width, result_height);
   perf.note("hit=0 region=%d size=%dx%d target=%d channel=%d",
             updated ? 1 : 0,
-            (*r_color)->x,
-            (*r_color)->y,
+            result_width,
+            result_height,
             int(ref.target),
             channel);
   return true;
@@ -6139,8 +6261,8 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
     return "a row blends Height with a mode of its own";
   }
   if (!layer.is_folder && layer.adjustment_filter == 0 && layer.color_image == nullptr &&
-      layer.anchor_point_color == nullptr && !layer.has_constant_color && !reader &&
-      !mask_only_slice)
+      layer.anchor_point_color.floats == nullptr && layer.anchor_point_color.halfs == nullptr &&
+      !layer.has_constant_color && !reader && !mask_only_slice)
   {
     return "a row has neither a map, a flat colour nor an Anchor Point slice";
   }

@@ -45,6 +45,7 @@
 
 #include "BKE_paint_blend.hh"
 #include "BKE_paint_layers_generator_registry.hh"
+#include "BKE_paint_layers_slice.hh"
 #include "BKE_paint_layers_tile.hh"
 #include "BKE_paint_material_composite_surface.hh"
 
@@ -749,9 +750,10 @@ struct PaintMaterialCompositeRowParams : PaintMaterialCompositeConstant {
    * An Anchor Point slice laid as a row: straight colour and content alpha, plus the coverage it
    * lays (a one-channel grey buffer, the colour RGBA). The description owns a reference (the slice
    * cache may evict and clear its own entry at any time), so the buffers live as long as this
-   * description; null for every other row.
+   * description; empty for every other row. The colour rests as FP16 when the cache hits
+   * (#PaintLayerSliceColor), the coverage stays one float per texel.
    */
-  std::shared_ptr<ImBuf> anchor_point_color;
+  PaintLayerSliceColor anchor_point_color;
   std::shared_ptr<ImBuf> anchor_point_coverage;
   /** A description hash of the slice, folded into the stack hash in place of an Image uid. */
   uint64_t anchor_point_hash = 0;
@@ -868,9 +870,10 @@ struct PaintMaterialCompositeCorrection : PaintMaterialCompositeConstant {
   /**
    * An Anchor Point slice read as a correction: straight colour and content alpha, with the
    * coverage it lays in #anchor_point_coverage. Owned by this description (see
-   * #PaintMaterialCompositeImageLayer::anchor_point_color); null otherwise.
+   * #PaintMaterialCompositeImageLayer::anchor_point_color); empty otherwise. A CPU mask effect's
+   * one-channel float grey rides #floats.
    */
-  std::shared_ptr<ImBuf> grey_buffer;
+  PaintLayerSliceColor grey_buffer;
   std::shared_ptr<ImBuf> anchor_point_coverage;
   /** The reader this correction lays, and whether it reads content or a mask. */
   bUUID anchor_point_reader = {};
@@ -911,8 +914,12 @@ struct PaintMaterialCompositeCorrectionBuffer : PaintMaterialCompositeConstant {
   float opacity = 1.0f;
   /** A MESH_MAP atlas: its alpha is data, so the correction covers by its opacity alone. */
   bool is_mesh_map = false;
-  /** Borrowed from #PaintMaterialCompositeCorrection::grey_buffer, which keeps them alive. */
+  /** Borrowed from #PaintMaterialCompositeCorrection::grey_buffer, which keeps it alive; null when
+   * #grey_slice carries the slice instead (the two are exclusive). */
   ImBuf *grey_buffer = nullptr;
+  /** The resting (FP16) form of the description's grey field when the slice hits; null for a float
+   * slice. When set, #grey_buffer itself is null -- this points at that field's resting form. */
+  const PaintLayerSliceColor *grey_slice = nullptr;
   ImBuf *anchor_point_coverage = nullptr;
   /** See #PaintMaterialCompositeCorrection::anchor_point_coverage_image. */
   ImBuf *anchor_point_coverage_ibuf = nullptr;
@@ -1008,10 +1015,10 @@ struct PaintMaterialCompositeMaskItem {
    * An Anchor Point slice read as a mask item, or a CPU-computed mask effect's grey. A slice is a
    * grey RGBA buffer; the mask effect cache keeps one scalar float per texel (`channels = 1`), and
    * the evaluator reads both as a grey. Owned by this description (see
-   * #PaintMaterialCompositeImageLayer::anchor_point_color). The evaluator lays both the same way, a
-   * canvas grey by the item's blend, invert and opacity. Null for every other item.
+   * #PaintMaterialCompositeImageLayer::anchor_point_color). The slice rests as FP16 when the cache
+   * hits. Empty for every other item.
    */
-  std::shared_ptr<ImBuf> grey_buffer;
+  PaintLayerSliceColor grey_buffer;
   /**
    * The CPU-computed kind whose grey this item lays (#PAINT_LAYER_KIND_NEEDS_BAKE), or 0 for
    * every other item. The grey itself rides #grey_buffer; the field is what the combined
@@ -1156,8 +1163,12 @@ struct PaintMaterialCompositeMaskBuffer {
   /** See #PaintMaterialCompositeMaskItem::coverage_output. */
   float coverage_output = 1.0f;
   Vector<PaintMaterialCompositeIdColor> coverage_colors;
-  /** Borrowed from #PaintMaterialCompositeMaskItem::grey_buffer, which keeps it alive. */
+  /** Borrowed from #PaintMaterialCompositeMaskItem::grey_buffer, which keeps it alive; null when
+   * #grey_slice carries the slice instead (the two are exclusive). */
   ImBuf *grey_buffer = nullptr;
+  /** The resting (FP16) form of the description's grey field when the slice hits; null for a float
+   * slice. When set, #grey_buffer itself is null -- this points at that field's resting form. */
+  const PaintLayerSliceColor *grey_slice = nullptr;
   /** A Gradient mask item's payload; #enabled false for a map or a constant. */
   PaintMaterialCompositeGradient gradient;
   /** See #PaintMaterialCompositeMaskItem::effect_filter. Such an item with no sample is a
@@ -1169,6 +1180,12 @@ struct PaintMaterialCompositeMaskBuffer {
 struct PaintMaterialCompositeLayer : PaintMaterialCompositeRowParams {
   /** Byte or float RGBA, matching the stack dimensions; null for a constant layer. */
   ImBuf *color_ibuf = nullptr;
+  /**
+   * The FP16 resting form of an Anchor Point slice laid as this row, or null when the colour is a
+   * float buffer. Borrowed from #PaintMaterialCompositeImageLayer::anchor_point_color (or the
+   * evaluation's own reduced-grid resample of it); the evaluator decodes it tile by tile.
+   */
+  const PaintLayerSliceColor *color_slice = nullptr;
   ImBuf *mask_ibuf = nullptr;
   /**
    * Colorspace names of #color_ibuf / #mask_ibuf's own buffers, resolved once at acquisition, or
@@ -1233,12 +1250,27 @@ float BKE_paint_material_coverage_match(int16_t map_coverage,
  * \param items: the row's mask items, bottom to top.
  * \param item_samples: item \a i's decoded texel (straight scene-linear RGBA, `pixel_index * 4`
  *                      floats into it), or null when the item has no map.
+ * \param item_half_samples: item \a i's resting FP16 RGBA texel (four `uint16_t` per texel at
+ *                          `pixel_index * 4`), or null. Read only when \a item_samples[i] is null,
+ *                          so a decoded float sample always wins. A half buffer is a slice still at
+ *                          rest: this is the read that keeps it from being materialized.
  * \param coverage_samples: item \a i's decoded coverage-map texel, or null (a map-driven operator
  *                          without a readable map samples as `match = 0`).
  * \param pixel_index: the texel index (row-major) to read both sample arrays at.
  * \param texel: where a Gradient item is evaluated. A Gradient has no map to read a sample from, so
  *               its ramp is computed here instead of being stored for the whole canvas. Unused by
  *               every other item.
+ */
+float BKE_paint_material_mask_factor_eval(Span<PaintMaterialCompositeMaskBuffer> items,
+                                          Span<const float *> item_samples,
+                                          Span<const uint16_t *> item_half_samples,
+                                          Span<const float *> coverage_samples,
+                                          int64_t pixel_index,
+                                          const PaintMaterialCompositeTexel &texel = {});
+
+/**
+ * The same evaluation without an FP16 sample span: every item reads its float sample, exactly as
+ * #BKE_paint_material_mask_factor_eval did before half slices were read per texel.
  */
 float BKE_paint_material_mask_factor_eval(Span<PaintMaterialCompositeMaskBuffer> items,
                                           Span<const float *> item_samples,
@@ -1365,6 +1397,8 @@ struct CompositeImageLock {
   Image *image = nullptr;
   ImBuf *ibuf = nullptr;
   void *lock = nullptr;
+  /** An evaluation-owned resample of a half slice, held for the session's lifetime. */
+  std::shared_ptr<PaintLayerSliceColor> slice;
 };
 
 /**

@@ -7029,7 +7029,7 @@ std::shared_ptr<ImBuf> mask_effect_grey(Material &ma, const int16_t filter)
   for (const PaintMaterialCompositeImageLayer &layer : layers) {
     for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
       if (item.effect_filter == filter) {
-        return item.grey_buffer;
+        return paint_layer_slice_color_read_float(item.grey_buffer);
       }
     }
   }
@@ -7526,7 +7526,7 @@ TEST_F(PaintLayersEffectTest, the_combined_preview_refuses_a_stack_with_a_mask_e
     for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
       if (item.effect_filter == MA_PAINT_LAYER_FILTER_BLUR) {
         found = true;
-        EXPECT_EQ(item.grey_buffer, nullptr) << "describe-only computes no grey";
+        EXPECT_EQ(item.grey_buffer.floats, nullptr) << "describe-only computes no grey";
       }
     }
   }

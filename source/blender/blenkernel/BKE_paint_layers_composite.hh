@@ -30,6 +30,7 @@
 #include "DNA_color_types.h"
 #include "DNA_colorband_types.h"
 
+#include "BKE_paint_layers_slice.hh"
 #include "BKE_paint_layers_tile.hh"
 #include "BKE_paint_material_composite.hh"
 
@@ -539,14 +540,15 @@ void BKE_paint_layers_input_transforms_get(const Material &ma,
 /**
  * Render the slice \a reader lays in \a channel on the context's tile, at the source row's
  * resolution for that tile. The buffers are reference counted and outlive the slice cache; \a
- * r_color is RGBA and \a r_coverage is a one-float-per-texel grey. \a dst_rect limits a partial
- * render to that rectangle, leaving the rest zero, and is never cached. Each tile is its own cache
- * entry. Used by the developer GPU verification.
+ * r_color is the slice's resting colour (a float buffer on a miss, FP16 when the cache hits) and
+ * \a r_coverage is a one-float-per-texel grey. \a dst_rect limits a partial render to that
+ * rectangle, leaving the rest zero, and is never cached. Each tile is its own cache entry. Used by
+ * the developer GPU verification.
  */
 bool BKE_paint_layers_slice_render(const Material &ma,
                                    const MaterialPaintLayer &reader,
                                    int channel,
-                                   std::shared_ptr<ImBuf> *r_color,
+                                   PaintLayerSliceColor *r_color,
                                    std::shared_ptr<ImBuf> *r_coverage,
                                    const int *dst_rect = nullptr,
                                    bool dimensions_only = false,
@@ -1537,6 +1539,14 @@ class PaintLayersMaskSampler {
     Vector<ImBuf *> coverage;
     /** Pointers into the buffers above, for the evaluator; null where a buffer is absent. */
     Vector<const float *> item_samples;
+    /**
+     * Resting FP16 texels into the half slices below (four `uint16_t` per texel), for the
+     * evaluator; null where the item has no half slice. Read per texel, so a half slice is never
+     * materialized as a float canvas for the tile.
+     */
+    Vector<const uint16_t *> item_half_samples;
+    /** The half slices #item_half_samples point into, shared so they outlive the tile. */
+    Vector<std::shared_ptr<const PaintLayerSliceHalf>> half_slices;
     Vector<const float *> coverage_samples;
   };
 

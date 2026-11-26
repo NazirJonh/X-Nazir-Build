@@ -1878,7 +1878,7 @@ bool combined_preview_gpu_update(const Material &ma,
                {});
         return;
       }
-      std::shared_ptr<ImBuf> color;
+      PaintLayerSliceColor color;
       std::shared_ptr<ImBuf> coverage;
       if (!BKE_paint_layers_slice_render(
               ma,
@@ -1899,7 +1899,9 @@ bool combined_preview_gpu_update(const Material &ma,
                {});
         return;
       }
-      if (color == nullptr || color->float_data() == nullptr) {
+      /* Temporarily materialized: the comparison reads a float plane; Task 3 decodes per texel. */
+      std::shared_ptr<ImBuf> color_floats = paint_layer_slice_color_read_float(color);
+      if (color_floats == nullptr || color_floats->float_data() == nullptr) {
         report(point_marker,
                reader_marker,
                channel,
@@ -1916,7 +1918,7 @@ bool combined_preview_gpu_update(const Material &ma,
       GPU_texture_read(
           const_cast<gpu::Texture *>(color_texture), GPU_DATA_FLOAT, 0, gpu_color.data());
       compare_texture(gpu_color,
-                      *color,
+                      *color_floats,
                       mask_slot,
                       point_marker,
                       reader_marker,
@@ -1936,7 +1938,7 @@ bool combined_preview_gpu_update(const Material &ma,
                  {});
           return;
         }
-        if (coverage->x != color->x || coverage->y != color->y) {
+        if (coverage->x != color_floats->x || coverage->y != color_floats->y) {
           report(point_marker,
                  reader_marker,
                  channel,

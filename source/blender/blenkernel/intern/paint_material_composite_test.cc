@@ -1107,7 +1107,7 @@ TEST_F(PaintMaterialCompositeEvalTest, an_anchor_point_slice_is_resampled_withou
 
   Vector<PaintMaterialCompositeImageLayer> layers;
   PaintMaterialCompositeImageLayer layer;
-  layer.anchor_point_color = owned;
+  layer.anchor_point_color.floats = owned;
   /* A slice carries no map of its own to size the stack by; the base row under the reader names
    * its side, as the description does while it sizes a point's slice. */
   PaintMaterialCompositeImageLayer sizer;
@@ -1139,6 +1139,67 @@ TEST_F(PaintMaterialCompositeEvalTest, an_anchor_point_slice_is_resampled_withou
   /* The borrowed buffer is exactly as it was: the evaluation resampled a copy. */
   for (const int64_t i : IndexRange(int64_t(slice_size) * slice_size * 4)) {
     EXPECT_FLOAT_EQ(slice_pixels[i], before[i]) << i;
+  }
+}
+
+TEST_F(PaintMaterialCompositeEvalTest, half_anchor_point_slice_resamples_half_to_half)
+{
+  constexpr int slice_size = 8;
+  ImBuf *slice = IMB_allocImBuf(uint(slice_size), uint(slice_size), ImBufFlags::FloatData);
+  ASSERT_NE(slice, nullptr);
+  ASSERT_TRUE(IMB_alloc_float_pixels(slice, 4, false));
+  float *slice_pixels = slice->float_data_for_write();
+  for (const int y : IndexRange(slice_size)) {
+    for (const int x : IndexRange(slice_size)) {
+      float *p = slice_pixels + (int64_t(y) * slice_size + x) * 4;
+      p[0] = p[1] = p[2] = (float(x) + 0.5f) / float(slice_size);
+      p[3] = 1.0f;
+    }
+  }
+  IMB_colormanagement_assign_float_colorspace(
+      slice, IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_SCENE_LINEAR));
+  const std::shared_ptr<ImBuf> owned(slice, [](ImBuf *ibuf) { IMB_freeImBuf(ibuf); });
+
+  /* The same slice twice: a float row and its FP16 resting form, at half the grid. */
+  PaintMaterialCompositeImageLayer float_layer;
+  float_layer.anchor_point_color.floats = owned;
+  PaintMaterialCompositeImageLayer half_layer;
+  half_layer.anchor_point_color = paint_layer_slice_color_pack(owned, /*use_half=*/true);
+  ASSERT_TRUE(half_layer.anchor_point_color.is_half());
+  const Array<uint16_t> half_before = half_layer.anchor_point_color.halfs->pixels;
+
+  PaintMaterialCompositeImageLayer sizer;
+  sizer.empty_base = true;
+  sizer.empty_base_size = slice_size;
+  constexpr int grid = slice_size / 2;
+  Vector<float> float_linear(int64_t(grid) * grid * 4);
+  Vector<float> half_linear(int64_t(grid) * grid * 4);
+  for (const bool use_half : {false, true}) {
+    Vector<PaintMaterialCompositeImageLayer> layers;
+    layers.append(sizer);
+    layers.append(use_half ? half_layer : float_layer);
+    Vector<float> &linear = use_half ? half_linear : float_linear;
+    ASSERT_TRUE(BKE_paint_material_composite_eval_images_linear(
+        layers,
+        PaintMaterialCompositeLinearTarget::frame(linear, grid),
+        nullptr,
+        nullptr,
+        nullptr,
+        grid,
+        grid));
+  }
+  /* Half tolerance: 2e-3 relative plus 2e-3 absolute, the quantization the FP16 boundary costs. */
+  for (const int64_t i : IndexRange(int64_t(grid) * grid * 4)) {
+    const float value = float_linear[i];
+    EXPECT_NEAR(half_linear[i], value, 2e-3f + 2e-3f * fabsf(value)) << i;
+  }
+  /* The source still rests as the very same FP16 texels: the resample was a copy of it. */
+  ASSERT_TRUE(half_layer.anchor_point_color.is_half());
+  EXPECT_EQ(half_layer.anchor_point_color.halfs->width, slice_size);
+  EXPECT_EQ(half_layer.anchor_point_color.halfs->height, slice_size);
+  EXPECT_EQ(half_layer.anchor_point_color.halfs->pixels.size(), half_before.size());
+  for (const int64_t i : half_before.index_range()) {
+    EXPECT_EQ(half_layer.anchor_point_color.halfs->pixels[i], half_before[i]) << i;
   }
 }
 

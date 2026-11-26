@@ -2765,9 +2765,9 @@ TEST_F(PaintLayersBakeTest, a_mask_effect_item_bakes_the_grey_the_composite_lays
       }
     }
     ASSERT_NE(laid, nullptr);
-    ASSERT_NE(laid->grey_buffer, nullptr);
+    ASSERT_NE(laid->grey_buffer.floats, nullptr);
     for (const int i : IndexRange(64)) {
-      live[i] = laid->grey_buffer->float_data()[i];
+      live[i] = laid->grey_buffer.floats->float_data()[i];
     }
   }
 
@@ -2929,7 +2929,7 @@ TEST_F(PaintLayersBakeTest, a_mask_effects_bake_keeps_its_cache_entry)
     }
   }
   ASSERT_NE(laid, nullptr);
-  EXPECT_NE(laid->grey_buffer, nullptr) << "the grey is computed while the bake is stale";
+  EXPECT_NE(laid->grey_buffer.floats, nullptr) << "the grey is computed while the bake is stale";
   EXPECT_EQ(paint_layer_mask_effect_cache_entry_count(), 1);
 }
 
@@ -2962,9 +2962,9 @@ TEST_F(PaintLayersBakeTest, a_mask_effect_over_a_rectangular_mask_stretches_into
       }
     }
     ASSERT_NE(laid, nullptr);
-    ASSERT_NE(laid->grey_buffer, nullptr);
+    ASSERT_NE(laid->grey_buffer.floats, nullptr);
     for (const int64_t i : IndexRange(64 * 32)) {
-      live[i] = laid->grey_buffer->float_data()[i];
+      live[i] = laid->grey_buffer.floats->float_data()[i];
     }
   }
 

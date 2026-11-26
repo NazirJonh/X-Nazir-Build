@@ -560,8 +560,8 @@ static wmOperatorStatus normal_to_mask_preview_invoke(bContext *C,
   }
   /* The slice the item reads, at the row's canvas, brought down to the preview side: the buffer
    * every repaint runs the kernel over. A reference that does not resolve renders nothing. */
-  std::shared_ptr<ImBuf> slice_color;
   std::shared_ptr<ImBuf> slice_coverage;
+  PaintLayerSliceColor slice_color;
   if (!BKE_paint_layers_slice_render(*ma,
                                      *item,
                                      PAINT_MATERIAL_CHANNEL_NORMAL,
@@ -576,7 +576,13 @@ static wmOperatorStatus normal_to_mask_preview_invoke(bContext *C,
                "Set the item's Anchor Point source to a layer with a Normal first");
     return OPERATOR_CANCELLED;
   }
-  if (slice_color == nullptr || slice_color->float_data() == nullptr) {
+  /* The preview reads the slice per texel: a half slice never materializes whole. A byte-only
+   * buffer (a shape the type allows, though today's render produces float or half) is read through
+   * the same per-texel sampler instead of refused: its branch is straight, needs no decode. */
+  int sw = 0;
+  int sh = 0;
+  paint_layer_slice_color_dimensions(slice_color, sw, sh);
+  if (sw <= 0 || sh <= 0) {
     BKE_report(op->reports, RPT_WARNING, "The referenced layer lays no Normal content");
     return OPERATOR_CANCELLED;
   }
@@ -586,27 +592,25 @@ static wmOperatorStatus normal_to_mask_preview_invoke(bContext *C,
   session->ma = ma;
   session->row = row;
   session->item = item;
-  const int side = std::max(slice_color->x, slice_color->y);
+  const int side = std::max(sw, sh);
   const float scale = (side > NORMAL_TO_MASK_PREVIEW_MAX_SIDE) ?
                           float(NORMAL_TO_MASK_PREVIEW_MAX_SIDE) / float(side) :
                           1.0f;
-  session->preview_width = std::max(int(float(slice_color->x) * scale), 1);
-  session->preview_height = std::max(int(float(slice_color->y) * scale), 1);
+  session->preview_width = std::max(int(float(sw) * scale), 1);
+  session->preview_height = std::max(int(float(sh) * scale), 1);
   session->slice = IMB_allocImBuf(
       session->preview_width, session->preview_height, ImBufFlags::FloatData);
   if (session->slice == nullptr || session->slice->float_data_for_write() == nullptr) {
     normal_to_mask_session_free(session);
     return OPERATOR_CANCELLED;
   }
-  const float *src = slice_color->float_data();
-  const int sw = slice_color->x;
-  const int sh = slice_color->y;
   float *pixels = session->slice->float_data_for_write();
   for (const int y : IndexRange(session->preview_height)) {
     const int sy = std::min(int(int64_t(y) * sh / session->preview_height), sh - 1);
     for (const int x : IndexRange(session->preview_width)) {
       const int sx = std::min(int(int64_t(x) * sw / session->preview_width), sw - 1);
-      const float *texel = src + (int64_t(sy) * sw + sx) * 4;
+      float texel[4];
+      paint_layer_slice_color_sample(slice_color, int64_t(sy) * sw + sx, texel);
       float *dst = pixels + (int64_t(y) * session->preview_width + x) * 4;
       dst[0] = texel[0];
       dst[1] = texel[1];

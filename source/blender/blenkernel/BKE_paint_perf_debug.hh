@@ -12,6 +12,12 @@
  * Off unless the environment variable `BLENDER_PBR_PERF` is set. Its value is the minimum duration in
  * milliseconds a scope must take to be printed: `0` prints everything, `2` only scopes of 2 ms or
  * more. Read once, so changing it needs a restart, not a rebuild.
+ *
+ * While disabled the cost is practically zero, not strictly zero: the environment is read once
+ * through a function-local static, and each scope still carries its 320-byte note buffer on the
+ * stack and branches on #enabled() when constructed, noted and destroyed. No allocation, formatting
+ * or IO happens then; a hot path may still want to guard a burst of notes behind its own
+ * #enabled() check.
  */
 
 #include <cstdarg>

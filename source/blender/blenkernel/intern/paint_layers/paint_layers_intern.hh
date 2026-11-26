@@ -243,12 +243,14 @@ uint64_t paint_layer_anchor_point_slice_hash(const Material &ma,
  * content alpha, and the coverage it lays. A mask point read as content gives a grey with alpha one
  * and full coverage. The buffers are in the source row's pixel space, scene linear.
  *
- * The returned shared pointers own the buffers. A complete render (\a dst_rect is null) is also
- * kept by the slice cache, which hands the same buffers out again for an unchanged description;
- * the cache holds a reference only, so a caller that keeps the result alive across a cache clear
- * (or an eviction) still has valid pixels. A partial render writes the requested rectangle and
- * leaves the rest of the buffer zero; it is never cached, so it lives exactly as long as the
- * caller's references.
+ * \a r_color is the slice's resting colour (#PaintLayerSliceColor): a complete render is kept by
+ * the slice cache as FP16, and its first caller still receives the float buffer it was rendered
+ * into; a later hit hands the FP16 storage over as it is. \a r_coverage is one float per texel and
+ * always a float #ImBuf. A complete render (\a dst_rect is null) is kept by the cache, which hands
+ * the same storage out again for an unchanged description; the cache holds a reference only, so a
+ * caller that keeps the result alive across a cache clear (or an eviction) still has valid pixels.
+ * A partial render (\a dst_rect) writes the requested rectangle into a float colour buffer, leaves
+ * the rest zero, and is never cached.
  *
  * \param dimensions_only: resolve and size the slice, allocating and rendering nothing; returns
  * true with both buffers null when the slice exists. A caller finding the stack dimensions uses
@@ -261,7 +263,7 @@ uint64_t paint_layer_anchor_point_slice_hash(const Material &ma,
 bool BKE_paint_layers_slice_render(const Material &ma,
                                    const MaterialPaintLayer &reader,
                                    int channel,
-                                   std::shared_ptr<ImBuf> *r_color,
+                                   PaintLayerSliceColor *r_color,
                                    std::shared_ptr<ImBuf> *r_coverage,
                                    const int *dst_rect,
                                    bool dimensions_only,

@@ -23,6 +23,8 @@
 
 #include "BLI_math_vector_types.hh"
 
+#include "DNA_object_enums.h"
+
 namespace blender {
 struct Brush;
 struct Paint;
@@ -82,6 +84,31 @@ struct CurvePatchLiveInputs {
   const void *tex = nullptr;
   uint64_t tex_edit_count = 0;
 
+  /** The Mask slot resolved by object mode (#Brush.mtex in Sculpt, #Brush.mask_mtex elsewhere), as
+   * the patch samples it. A Curve Patch has no brush mapping of its own for the Mask --
+   * coordinates come from the ribbon / stamp frame -- so the image identity and the placement
+   * fields are what a re-stamp has to watch, plus the slot's invert and the brush's sample
+   * bias. */
+  const void *mask_tex = nullptr;
+  /** Identity of the image behind #mask_tex, so swapping #Tex.ima or editing the pixels re-stamps
+   * even though the #Tex pointer did not change. */
+  const void *mask_tex_image = nullptr;
+  uint64_t mask_tex_pixel_version = 0;
+  float2 mask_tex_size = float2(0.0f);
+  float2 mask_tex_ofs = float2(0.0f);
+  float mask_tex_rot = 0.0f;
+  int mask_mapping_flags = 0;
+  /** #MTex.brush_map_mode and #MTex.mapping: both decide how the engine fallback samples the slot,
+   * and the map mode also feeds #BKE_brush_get_aspect_correction. */
+  int mask_map_mode = 0;
+  int mask_mapping = 0;
+  bool mask_invert = false;
+  float texture_sample_bias = 0.0f;
+  /** Identity of the Mask slot's extended correction (#Brush.mask_correction), 0 when it is off.
+   * Folded as a hash rather than as spelled-out fields: the pointwise and spatial stacks carry a
+   * dozen parameters plus a curve, and a re-stamp only needs "did any of them change". */
+  uint64_t mask_correction_hash = 0;
+
   int falloff_preset = -1;
   int falloff_curve_ts = -1;
   int texture_clip_shape = -1;
@@ -110,7 +137,9 @@ struct CurvePatchLiveInputs {
    * freeing and reallocating the texture pool on every tick. */
   bool needs_texture_pool_rebuild(const CurvePatchLiveInputs &prev) const
   {
-    return tex != prev.tex || tex_edit_count != prev.tex_edit_count || tex_size != prev.tex_size ||
+    return tex != prev.tex || mask_tex != prev.mask_tex ||
+           mask_tex_image != prev.mask_tex_image ||
+           tex_edit_count != prev.tex_edit_count || tex_size != prev.tex_size ||
            tex_ofs != prev.tex_ofs || texture_pointer_digest != prev.texture_pointer_digest ||
            cap_tex_start != prev.cap_tex_start || cap_tex_middle != prev.cap_tex_middle ||
            cap_tex_end != prev.cap_tex_end ||
@@ -125,6 +154,8 @@ struct CurvePatchLiveInputs {
  * is read by exactly one mode, and filling both here would make the other mode re-stamp for a
  * value its target never reads. The caller sets the one its target uses.
  */
-CurvePatchLiveInputs curve_patch_live_inputs_capture(const Paint &paint, const Brush &brush);
+CurvePatchLiveInputs curve_patch_live_inputs_capture(const Paint &paint,
+                                                    const Brush &brush,
+                                                    eObjectMode object_mode);
 
 }  // namespace blender::ed::sculpt_paint

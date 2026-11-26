@@ -573,7 +573,8 @@ static WrittenBounds blend_tile_region(const TileRegion &region,
       source.orig_positions = nullptr;
       source.indices_are_mesh_verts = false;
 
-      CurvePatchSampler sampler(patch, texture, ctx, brush, source, /*mask=*/{}, tex_pool);
+      CurvePatchSampler sampler(
+          patch, texture, ctx, brush, source, /*mask=*/{}, tex_pool, OB_MODE_TEXTURE_PAINT);
 
       for (const int i : IndexRange(width)) {
         const float selection_weight = row_selection.is_empty() ? 1.0f : row_selection[i];

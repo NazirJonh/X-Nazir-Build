@@ -8,6 +8,7 @@
 
 #include "BKE_brush.hh"
 #include "BKE_brush_material_correction.hh"
+#include "BKE_brush_mask_correction.hh"
 #include "BKE_image.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
@@ -161,7 +162,8 @@ float paint_mask_texture_coverage(const Brush &brush,
                                   const float2 &view_point_2d,
                                   const int thread,
                                   ImagePool *pool,
-                                  const bke::BrushMaskLut *lut)
+                                  const bke::BrushMaskLut *lut,
+                                  const BrushMaskCorrectionSampler *correction_sampler)
 {
   const MTex &mask_mtex = brush.mask_mtex;
   if (mask_mtex.tex == nullptr) {
@@ -173,15 +175,31 @@ float paint_mask_texture_coverage(const Brush &brush,
     /* Object space, like the main texture in this mode: size and offset do not apply. The Mask
      * slot takes the flip but never the brush texture's invert; the slot's own invert runs in
      * #BKE_brush_mask_tex_coverage_finish below. */
-    float4 rgba;
+    float4 rgba = float4(1.0f);
     float value = BKE_brush_sample_tex_3d(
         paint, &brush, &mask_mtex, eBrushTextureSlot::Mask, point, rgba, thread, pool);
     value = math::clamp(value, 0.0f, 1.0f);
+    if (BKE_brush_mask_correction_active(brush)) {
+      /* Object-space sampling has no image buffer to filter, but the pointwise stack still
+       * applies: channel selection first, pointwise after the slot's own invert. */
+      const float rgba_array[4] = {rgba.x, rgba.y, rgba.z, rgba.w};
+      value = BKE_brush_mask_correction_channel_value_for_brush(
+          brush, value, rgba_array);
+    }
+    /* The 3D sampler skips the Mask bias so it can run here, after the channel and before
+     * pressure, exactly as in the region and Area paths. */
+    value = BKE_brush_mask_tex_bias_apply(brush, value);
     if (paint != nullptr) {
       value = BKE_brush_mask_tex_pressure_apply(brush, *paint, value);
     }
-    return BKE_brush_mask_tex_influence_apply(paint,
-                                              BKE_brush_mask_tex_coverage_finish(brush, value));
+    value = BKE_brush_mask_tex_coverage_finish(brush, value);
+    /* The one-shot fallback borrows the live curve; a worker must supply a resolved sampler. */
+    BLI_assert_msg(correction_sampler != nullptr || !BKE_brush_mask_correction_active(brush),
+                   "A Mask correction on a sampling path must use a resolved "
+                   "BrushMaskCorrectionSampler.");
+    value = correction_sampler != nullptr ? correction_sampler->apply_pointwise(value) :
+                                            BKE_brush_mask_correction_apply(brush, value);
+    return BKE_brush_mask_tex_influence_apply(paint, value);
   }
 
   const bool region_available = view_point_2d.x >= 0.0f && view_point_2d.y >= 0.0f;
@@ -191,7 +209,7 @@ float paint_mask_texture_coverage(const Brush &brush,
     /* Region-space modes keep the stock mask sampler: it already applies this slot's own mouse
      * offset, angle, aspect correction, clip shape and pressure curve. */
     return BKE_brush_sample_masktex(
-        paint, const_cast<Brush *>(&brush), view_point_2d, thread, pool);
+        paint, const_cast<Brush *>(&brush), view_point_2d, thread, pool, correction_sampler);
   }
 
   /* Area Plane: the projection the PBR strokes use for the main texture too, with the Mask
@@ -209,7 +227,9 @@ float paint_mask_texture_coverage(const Brush &brush,
                                           aspect_correction,
                                           thread,
                                           pool,
-                                          lut);
+                                          lut,
+                                          true,
+                                          correction_sampler);
 }
 
 /* The scalar samplers hand the stroke writers values in storage, the domain the maps are painted

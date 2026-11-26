@@ -61,6 +61,7 @@
 
 #include "BKE_attribute.hh"
 #include "BKE_brush.hh"
+#include "BKE_brush_mask_correction.hh"
 #include "BKE_brush_material_correction.hh"
 #include "BKE_bvhutils.hh"
 #include "BKE_colorband.hh"
@@ -270,6 +271,11 @@ struct BrushPainter {
   std::shared_ptr<ed::sculpt_paint::material::ChannelSourceSet> channel_sources;
   /** Lookup table of the brush's Mask texture for this stroke. Null without a Mask texture. */
   std::shared_ptr<bke::BrushMaskLut> mask_lut;
+  /** Resolved spatial Mask correction for this stroke. Like #mask_lut it assumes the Mask settings
+   * stay fixed for the stroke; it keeps `prepare()`, the image acquire and the map lookup out of
+   * the per-texel loop. Resolved by the Area Plane coverage builder before its parallel loop, never
+   * lazily from a worker thread. */
+  mutable std::optional<BrushMaskCorrectionSampler> mask_correction_sampler;
   /**
    * Evaluated-mesh triangles for #MTEX_MAP_MODE_AREA in the Image Editor. Shared by extra
    * material-map painters. Null when this stroke does not use Area Plane, or when the mesh/UV
@@ -1218,6 +1224,14 @@ static ushort *brush_painter_mask_ibuf_new(BrushPainter *painter, const int size
   BrushImbufMapping mask_mapping = painter->mask_mapping;
   ImagePool *pool = painter->pool;
 
+  /* One resolve per mask buffer: the texel loop must not rebuild the sampler per element. */
+  BrushMaskCorrectionSampler correction_sampler;
+  if (BKE_brush_mask_correction_active(*brush)) {
+    correction_sampler = BrushMaskCorrectionSampler::resolve(*brush, brush->mask_mtex, pool);
+  }
+  const BrushMaskCorrectionSampler *correction_sampler_ptr =
+      correction_sampler.enabled() ? &correction_sampler : nullptr;
+
   float texco[3];
   ushort *mask, *m;
   int x, y, thread = 0;
@@ -1229,7 +1243,8 @@ static ushort *brush_painter_mask_ibuf_new(BrushPainter *painter, const int size
     for (x = 0; x < size; x++, m++) {
       float res;
       brush_imbuf_tex_co(mask_mapping, x, y, texco);
-      res =BKE_brush_sample_masktex(painter->paint, brush, texco, thread, pool);
+      res = BKE_brush_sample_masktex(
+          painter->paint, brush, texco, thread, pool, correction_sampler_ptr);
       *m = ushort(65535.0f * res);
     }
   }
@@ -1255,6 +1270,14 @@ static void brush_painter_mask_imbuf_update(BrushPainter *painter,
   ImagePool *pool = painter->pool;
   ushort res;
 
+  /* One resolve per mask update: see #brush_painter_mask_ibuf_new. */
+  BrushMaskCorrectionSampler correction_sampler;
+  if (BKE_brush_mask_correction_active(*brush)) {
+    correction_sampler = BrushMaskCorrectionSampler::resolve(*brush, brush->mask_mtex, pool);
+  }
+  const BrushMaskCorrectionSampler *correction_sampler_ptr =
+      correction_sampler.enabled() ? &correction_sampler : nullptr;
+
   bool use_texture_old = (tex_mask_old != nullptr);
 
   int x, y, thread = 0;
@@ -1275,7 +1298,8 @@ static void brush_painter_mask_imbuf_update(BrushPainter *painter,
       if (!use_texture_old) {
         brush_imbuf_tex_co(tex_mapping, x, y, texco);
         res = ushort(65535.0f *
-                     BKE_brush_sample_masktex(painter->paint, brush, texco, thread, pool));
+                     BKE_brush_sample_masktex(
+                         painter->paint, brush, texco, thread, pool, correction_sampler_ptr));
       }
 
       /* read from old texture buffer */
@@ -3161,7 +3185,8 @@ static float paint_2d_area_sample_mask_factor(const BrushPainter *painter,
                                               const int thread,
                                               ImagePool *pool)
 {
-  /* The Sculpt engine's sampler: one Mask placement has to read the same in both editors. */
+  /* The sampler is resolved by the caller before its parallel loop: the per-texel path must not
+   * write the shared optional from several worker threads. */
   return ed::sculpt_paint::material::paint_mask_texture_coverage(
       *painter->brush,
       painter->paint,
@@ -3170,7 +3195,9 @@ static float paint_2d_area_sample_mask_factor(const BrushPainter *painter,
       float2(-1.0f),
       thread,
       pool,
-      painter->mask_lut.get());
+      painter->mask_lut.get(),
+      painter->mask_correction_sampler.has_value() ? &*painter->mask_correction_sampler :
+                                                     nullptr);
 }
 
 /**
@@ -3649,6 +3676,15 @@ static bool paint_2d_area_plane_build_tri_coverage(
   const float uv_origin_y = tile->uv_origin[1];
   const Brush *brush = painter->brush;
   const bool mask_texture_active = brush->mask_mtex.tex != nullptr;
+
+  /* Resolve once before the parallel pixel loop: the sampler is shared by every worker, and a
+   * lazy write from inside the loop would race on the optional. */
+  if (mask_texture_active && !painter->mask_correction_sampler.has_value() &&
+      BKE_brush_mask_correction_active(*brush))
+  {
+    painter->mask_correction_sampler = BrushMaskCorrectionSampler::resolve(
+        *brush, brush->mask_mtex, pool);
+  }
 
   /* One buffer per row, joined in order afterwards: no lock, and the result is the same on every
    * run. The bounding box usually covers far more than the triangle, so nothing is reserved up

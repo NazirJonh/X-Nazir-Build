@@ -289,6 +289,125 @@ struct BrushMaterialPaintCorrection {
   float hsv_value = 1.0f;
 };
 
+/**
+ * Which part of the sampled Mask slot texture the correction reads. The Mask slot always reduces
+ * its texture to one scalar; the channel decides how that scalar is taken from the RGBA the
+ * texture engine returns.
+ */
+enum eBrushMaskCorrectionChannel : int8_t {
+  /** Rec.709 luminance of the RGB, the texture engine's own `intensity`. */
+  BRUSH_MASK_CORRECTION_CHANNEL_LUMINANCE = 0,
+  BRUSH_MASK_CORRECTION_CHANNEL_RED = 1,
+  BRUSH_MASK_CORRECTION_CHANNEL_GREEN = 2,
+  BRUSH_MASK_CORRECTION_CHANNEL_BLUE = 3,
+  BRUSH_MASK_CORRECTION_CHANNEL_ALPHA = 4,
+};
+
+/** Kernel of the Mask correction's spatial Blur stage. */
+enum eBrushMaskCorrectionBlurShape : int8_t {
+  BRUSH_MASK_CORRECTION_BLUR_GAUSSIAN = 0,
+  BRUSH_MASK_CORRECTION_BLUR_BOX = 1,
+};
+
+/**
+ * Direction of the spatial morph stage. Erode takes the darkest value of the neighborhood (the
+ * mask opens up), Dilate the brightest (the mask spreads out).
+ */
+enum eBrushMaskCorrectionMorphMode : int8_t {
+  BRUSH_MASK_CORRECTION_MORPH_ERODE = 0,
+  BRUSH_MASK_CORRECTION_MORPH_DILATE = 1,
+};
+
+/**
+ * Bits of #BrushMaskCorrection.flag. Additive on purpose: a new stage takes a free bit instead of
+ * a field, so the struct keeps its size and an older build keeps the meaning of what it does know.
+ */
+enum eBrushMaskCorrectionFlag {
+  /** Master switch; clear leaves the sample untouched whatever the parameters say. */
+  BRUSH_MASK_CORRECTION_ENABLED = (1 << 0),
+  /** Remap Input Black..Input White through Gamma onto Output Black..Output White. */
+  BRUSH_MASK_CORRECTION_LEVELS = (1 << 1),
+  /** Soft compression of the range around Min..Max by Softness. */
+  BRUSH_MASK_CORRECTION_SMOOTHSTEP = (1 << 2),
+  /** Apply the attached #CurveMapping to the value. */
+  BRUSH_MASK_CORRECTION_CURVE = (1 << 3),
+  /** Binary threshold at #BrushMaskCorrection.threshold. */
+  BRUSH_MASK_CORRECTION_THRESHOLD = (1 << 4),
+  /** Quantize to #BrushMaskCorrection.posterize_steps levels. */
+  BRUSH_MASK_CORRECTION_POSTERIZE = (1 << 5),
+  /** Clamp into #BrushMaskCorrection.clamp_min..clamp_max. */
+  BRUSH_MASK_CORRECTION_CLAMP = (1 << 6),
+  /** Spatial Gaussian/Box blur, image textures only. */
+  BRUSH_MASK_CORRECTION_BLUR = (1 << 7),
+  /** Spatial unsharp mask, image textures only. */
+  BRUSH_MASK_CORRECTION_SHARPEN = (1 << 8),
+  /** Spatial erode/dilate, image textures only. */
+  BRUSH_MASK_CORRECTION_MORPH = (1 << 9),
+  /** Spatial median filter, image textures only. */
+  BRUSH_MASK_CORRECTION_MEDIAN = (1 << 10),
+};
+
+/**
+ * Extended correction of the Mask slot's scalar coverage ("Correction Image"), the counterpart of
+ * #BrushMaterialPaintCorrection for #Brush.mask_mtex.
+ *
+ * Two groups share one struct because they describe one map:
+ * - pointwise stages (Levels, Smoothstep, Curve, Threshold, Posterize, Clamp), applied to every
+ *   sample of any texture, at any mapping;
+ * - spatial stages (Blur, Sharpen, Erode/Dilate, Median), applied only to image textures with a
+ *   pixel buffer, in that order, before the pointwise stack.
+ *
+ * Parameters are kept when #BRUSH_MASK_CORRECTION_ENABLED is cleared, so switching the feature off
+ * and back on restores them. The #curve pointer is owned by the brush and serialized with it.
+ */
+struct BrushMaskCorrection {
+  DNA_DEFINE_CXX_METHODS(BrushMaskCorrection)
+
+  /** #eBrushMaskCorrectionFlag bits. */
+  short flag = 0;
+  /** #eBrushMaskCorrectionChannel. */
+  int8_t channel = BRUSH_MASK_CORRECTION_CHANNEL_LUMINANCE;
+  /** #eBrushMaskCorrectionBlurShape. */
+  int8_t blur_shape = BRUSH_MASK_CORRECTION_BLUR_GAUSSIAN;
+  /** #eBrushMaskCorrectionMorphMode. */
+  int8_t morph_mode = BRUSH_MASK_CORRECTION_MORPH_ERODE;
+  char _pad[3] = {};
+
+  float levels_in_black = 0.0f;
+  float levels_in_white = 1.0f;
+  float levels_gamma = 1.0f;
+  float levels_out_black = 0.0f;
+  float levels_out_white = 1.0f;
+
+  /** Smoothstep: input range and how much of the smooth curve to mix in (0 = linear). */
+  float smoothstep_min = 0.0f;
+  float smoothstep_max = 1.0f;
+  float smoothstep_softness = 1.0f;
+
+  /** Threshold stage: values >= this become 1, the rest 0. */
+  float threshold = 0.5f;
+  /** Posterize stage: number of output levels, RNA-clamped 1..64. */
+  int posterize_steps = 4;
+  float clamp_min = 0.0f;
+  float clamp_max = 1.0f;
+
+  /** Pointwise curve, evaluated on the combined channel. Null until the block is allocated. */
+  struct CurveMapping *curve = nullptr;
+
+  /**
+   * Spatial radii, in image texels. The RNA setters raise a zero radius to one when a stage is
+   * switched on; only a zero left in a damaged or pre-versioned file disables the stage.
+   */
+  float blur_radius = 1.0f;
+  float sharpen_radius = 1.0f;
+  float sharpen_amount = 0.5f;
+  float morph_radius = 1.0f;
+  float median_radius = 1.0f;
+
+  /** Keeps the struct 8-byte aligned (makesdna inserts no tail padding of its own). */
+  char _pad_tail[4] = {};
+};
+
 struct BrushMaterialPaintChannel {
   DNA_DEFINE_CXX_METHODS(BrushMaterialPaintChannel)
 
@@ -1036,6 +1155,13 @@ struct Brush {
    * so the layers below are not flattened into the recorded delta. */
   char use_smooth_preserve_layers = 0;
   char _pad5[5] = {};
+  /**
+   * Extended correction of the Mask slot's scalar coverage ("Correction Image"), see
+   * #BrushMaskCorrection. Lazily allocated by #BKE_brush_mask_correction_ensure; null means the
+   * feature is off, and files that predate it read it as null. Appended after `_pad5`, which keeps
+   * the new pointer on its 8-byte boundary without shifting any earlier member.
+   */
+  struct BrushMaskCorrection *mask_correction = nullptr;
 };
 
 struct PaletteColor {

@@ -15,6 +15,7 @@
 #include <string>
 
 #include "BKE_brush.hh"
+#include "BKE_brush_mask_correction.hh"
 #include "BKE_bvhutils.hh"
 #include "BKE_image_wrappers.hh"
 #include "BKE_paint.hh"
@@ -461,6 +462,11 @@ struct StrokeCache {
   /** Lookup table of the brush's Mask texture, filled lazily during the stroke. Created by the
    * first PBR paint dab whose brush has a Mask texture. */
   std::shared_ptr<bke::BrushMaskLut> mask_lut;
+
+  /** The Sculpt Mask slot's correction, resolved once per stroke when the slot has a texture and
+   * the brush carries an enabled correction. Immutable afterwards, so every per-vertex worker
+   * reads the same prepared stack and curve snapshot instead of rebuilding them per sample. */
+  std::optional<BrushMaskCorrectionSampler> mask_correction_sampler;
 
   /* Invariants */
   float initial_radius = 0.0f;

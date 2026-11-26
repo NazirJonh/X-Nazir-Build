@@ -37,6 +37,7 @@
 #include "BKE_bpath.hh"
 #include "BKE_brush.hh"
 #include "BKE_brush_material_correction.hh"
+#include "BKE_brush_mask_correction.hh"
 #include "BKE_colorband.hh"
 #include "BKE_colortools.hh"
 #include "BKE_grease_pencil.hh"
@@ -195,6 +196,10 @@ static void brush_copy_data(Main * /*bmain*/,
   /* enable fake user by default */
   id_fake_user_set(&brush_dst->id);
 
+  /* The Mask correction and its curve are heap payloads owned by the brush; the ID copy above
+   * shares the pointer, so give the duplicate its own. */
+  brush_dst->mask_correction = BKE_brush_mask_correction_copy(brush_src->mask_correction);
+
   /* Deep-copy the Curve Patch texture list. The `Tex` user counts inside it are handled
    * generically by `brush_foreach_id()` during the copy, so nothing here calls `id_us_plus()`. */
   BLI_duplicatelist(&brush_dst->curve_patch.texture_slots, &brush_src->curve_patch.texture_slots);
@@ -236,6 +241,7 @@ static void brush_free_data(ID *id)
     material_paint_corrections_free(*brush->material_paint);
   }
   MEM_SAFE_DELETE(brush->material_paint);
+  BKE_brush_mask_correction_delete(*brush);
   if (brush->mesh_automasking_settings != nullptr) {
     BKE_curvemapping_free(brush->mesh_automasking_settings->cavity_curve);
     MEM_delete(brush->mesh_automasking_settings);
@@ -501,6 +507,8 @@ static void brush_blend_write(BlendWriter *writer, ID *id, const void *id_addres
 
   BKE_previewimg_blend_write(writer, brush->preview);
 
+  BKE_brush_mask_correction_blend_write(writer, *brush);
+
   writer->write_struct_list(&brush->curve_patch.texture_slots);
 }
 
@@ -654,6 +662,8 @@ static void brush_blend_read_data(BlendDataReader *reader, ID *id)
   BLO_read_struct(reader, PreviewImage, &brush->preview);
   BKE_previewimg_blend_read(reader, brush->preview);
 
+  BKE_brush_mask_correction_blend_read(reader, *brush);
+
   brush->has_unsaved_changes = false;
 
   /* The `Tex` pointers inside are resolved automatically through `brush_foreach_id()`, so there is
@@ -770,10 +780,16 @@ void BKE_brush_system_init()
 {
   brush_rng = BLI_rng_new(0);
   BLI_rng_srandom(brush_rng, 31415682);
+  /* The spatial Mask cache is BKE-owned; make sure a restart does not inherit entries from a
+   * previous context. */
+  BKE_brush_mask_correction_cache_clear();
 }
 
 void BKE_brush_system_exit()
 {
+  /* Clear before the RNG early-out: the cache's static buffers must not outlive the guarded
+   * allocator even in a headless context that never created the RNG. */
+  BKE_brush_mask_correction_cache_clear();
   if (brush_rng == nullptr) {
     return;
   }
@@ -1968,6 +1984,14 @@ const MTex *BKE_brush_color_texture_get(const Brush *brush, const eObjectMode ob
   return &brush->mtex;
 }
 
+BrushMaskSlotView BKE_brush_mask_slot_view_get(const Brush &brush, const eObjectMode object_mode)
+{
+  if (object_mode == OB_MODE_SCULPT) {
+    return {&brush.mtex, eBrushTextureSlot::Brush, (brush.flag2 & BRUSH_TEXTURE_INVERT) != 0};
+  }
+  return {&brush.mask_mtex, eBrushTextureSlot::Mask, BKE_brush_mask_texture_invert_get(brush)};
+}
+
 const MTex *BKE_brush_face_set_color_texture_get(const Brush *brush,
                                                  const eObjectMode /*object_mode*/)
 {
@@ -2286,7 +2310,12 @@ float BKE_brush_sample_tex_3d(const Paint *paint,
     BKE_brush_texture_invert_apply(slot, *br, hasrgb, &intensity, rgba);
   }
 
-  intensity += br->texture_sample_bias;
+  /* The Mask slot applies its bias after channel selection, through
+   * #BKE_brush_mask_tex_bias_apply; adding it here as well would double-apply it and put it on the
+   * wrong side of the channel. The brush texture keeps the historical pre-channel `+=` order. */
+  if (slot != eBrushTextureSlot::Mask) {
+    intensity += br->texture_sample_bias;
+  }
 
   if (!hasrgb) {
     rgba[0] = intensity;
@@ -2312,25 +2341,68 @@ float BKE_brush_mask_tex_coverage_finish(const Brush &brush, const float raw)
   return BKE_brush_mask_coverage_finish(BKE_brush_mask_texture_invert_get(brush), raw);
 }
 
-float BKE_brush_sample_masktex(
-    const Paint *paint, Brush *br, const float2 &point, const int thread, ImagePool *pool)
+float BKE_brush_mask_tex_bias_apply(const Brush &brush, const float value)
+{
+  return math::clamp(value - brush.texture_sample_bias, 0.0f, 1.0f);
+}
+
+float BKE_brush_sample_masktex(const Paint *paint,
+                               Brush *br,
+                               const float2 &point,
+                               const int thread,
+                               ImagePool *pool,
+                               const BrushMaskCorrectionSampler *correction_sampler)
 {
   const bke::PaintRuntime *paint_runtime = paint->runtime;
   MTex *mtex = &br->mask_mtex;
   /* The Mask slot's flip contract resolves once per sample (see #BKE_brush_mtex_flip_x). */
   const bool flip_x = BKE_brush_mtex_flip_x(paint, *mtex, eBrushTextureSlot::Mask);
   const bool flip_y = BKE_brush_mtex_flip_y(paint, *mtex, eBrushTextureSlot::Mask);
-  float intensity;
-  float4 dummy_rgba;
+  float intensity = 1.0f;
+  float4 dummy_rgba = float4(1.0f);
+  bool spatial_used = false;
+  const BrushMaskCorrection *correction = BKE_brush_mask_correction_get(*br);
 
   if (!mtex->tex) {
     return 1.0f;
   }
+
+  /* Use the stroke's resolved sampler when it has one; the local fallback keeps the one-shot
+   * contract for callers that have nowhere to store it. */
+  BrushMaskCorrectionSampler local_sampler;
+  const BrushMaskCorrectionSampler *sampler = correction_sampler;
+  if (sampler == nullptr && correction != nullptr) {
+    local_sampler = BrushMaskCorrectionSampler::resolve(*br, *mtex, pool);
+    sampler = &local_sampler;
+  }
+
+  /* One place for both paths: a spatial image filter, when available, replaces the engine sample
+   * entirely; otherwise the engine evaluates the texture at \a x / \a y. Keeping them exclusive
+   * avoids paying for a texture evaluation whose result a cached map would overwrite. */
+  auto sample_mask_texture = [&](const float x, const float y) {
+    if (sampler != nullptr) {
+      if (const std::optional<float> sampled = sampler->sample_image(x, y)) {
+        intensity = *sampled;
+        spatial_used = true;
+        return;
+      }
+    }
+    const float co[3] = {x, y, 0.0f};
+    /* The engine may decline to write the return arguments (an image texture without a pixel
+     * buffer, for one), so keep the neutral values a mask should fall back to instead of reading
+     * them uninitialized. */
+    if (!RE_texture_evaluate(
+            mtex, co, thread, pool, false, false, &intensity, dummy_rgba))
+    {
+      intensity = 1.0f;
+      dummy_rgba = float4(1.0f);
+    }
+  };
+
   if (mtex->brush_map_mode == MTEX_MAP_MODE_STENCIL) {
     float rotation = -mtex->rot;
     const float2 point_2d = point;
     float x, y;
-    float co[3];
 
     x = point_2d[0] - br->mask_stencil_pos[0];
     y = point_2d[1] - br->mask_stencil_pos[1];
@@ -2352,18 +2424,13 @@ float BKE_brush_sample_masktex(
 
     mtex_flip_coords(flip_x, flip_y, x, y);
 
-    co[0] = x;
-    co[1] = y;
-    co[2] = 0.0f;
-
-    RE_texture_evaluate(mtex, co, thread, pool, false, false, &intensity, dummy_rgba);
+    sample_mask_texture(x, y);
   }
   else {
     float rotation = -mtex->rot;
     const float2 point_2d = point;
     float x = 0.0f, y = 0.0f; /* Quite warnings */
     float invradius = 1.0f;   /* Quite warnings */
-    float co[3];
 
     if (mtex->brush_map_mode == MTEX_MAP_MODE_VIEW) {
       /* keep coordinates relative to mouse */
@@ -2424,19 +2491,25 @@ float BKE_brush_sample_masktex(
 
     mtex_flip_coords(flip_x, flip_y, x, y);
 
-    co[0] = x;
-    co[1] = y;
-    co[2] = 0.0f;
-
-    RE_texture_evaluate(mtex, co, thread, pool, false, false, &intensity, dummy_rgba);
+    sample_mask_texture(x, y);
   }
 
-  CLAMP(intensity, 0.0f, 1.0f);
+  /* Channel selection only when the spatial map did not already do it; the engine sample is the
+   * luminance, which is what Luminance means. */
+  if (correction != nullptr && !spatial_used) {
+    intensity = BKE_brush_mask_correction_channel_value(*correction, intensity, dummy_rgba);
+  }
 
-  return BKE_brush_mask_tex_influence_apply(
-      paint,
-      BKE_brush_mask_tex_coverage_finish(
-          *br, BKE_brush_mask_tex_pressure_apply(*br, *paint, intensity)));
+  /* Mask bias is subtracted after channel selection and before pressure (the contract in
+   * #BKE_brush_mask_tex_bias_apply), matching the Area path. */
+  intensity = BKE_brush_mask_tex_bias_apply(*br, intensity);
+
+  float value = BKE_brush_mask_tex_pressure_apply(*br, *paint, intensity);
+  value = BKE_brush_mask_tex_coverage_finish(*br, value);
+  /* Pointwise stack after the slot's own invert and before the random influence, matching the
+   * fixed order documented in the spec. */
+  value = sampler != nullptr ? sampler->apply_pointwise(value) : value;
+  return BKE_brush_mask_tex_influence_apply(paint, value);
 }
 
 float BKE_brush_mask_tex_influence_apply(const Paint *paint, const float coverage)
@@ -2628,24 +2701,27 @@ bool BrushMaskLut::sample(const Brush &brush,
 
 }  // namespace bke
 
-float BKE_brush_mask_tex_area_coverage(const Brush &brush,
-                                       const Paint *paint,
-                                       const float2 &local,
-                                       const float rake_rotation,
-                                       const float2 &aspect_correction,
-                                       const int thread,
-                                       ImagePool *pool,
-                                       const bke::BrushMaskLut *lut,
-                                       const bool apply_influence_random)
+float BKE_brush_mask_tex_area_coverage_slot(const Brush &brush,
+                                            const MTex &mtex,
+                                            const eBrushTextureSlot slot,
+                                            const bool invert,
+                                            const Paint *paint,
+                                            const float2 &local,
+                                            const float rake_rotation,
+                                            const float2 &aspect_correction,
+                                            const int thread,
+                                            ImagePool *pool,
+                                            const bke::BrushMaskLut *lut,
+                                            const bool apply_influence_random,
+                                            const BrushMaskCorrectionSampler *correction_sampler)
 {
-  const MTex &mask_mtex = brush.mask_mtex;
-  if (mask_mtex.tex == nullptr) {
+  if (mtex.tex == nullptr) {
     return 1.0f;
   }
 
   float local_x = local.x;
   float local_y = local.y;
-  const float rotation = -mask_mtex.rot - rake_rotation;
+  const float rotation = -mtex.rot - rake_rotation;
   if (rotation > 0.001f || rotation < -0.001f) {
     const float angle = atan2f(local_y, local_x) + rotation;
     const float len = sqrtf(local_x * local_x + local_y * local_y);
@@ -2653,8 +2729,8 @@ float BKE_brush_mask_tex_area_coverage(const Brush &brush,
     local_y = len * sinf(angle);
   }
 
-  float x = local_x * mask_mtex.size[0] + mask_mtex.ofs[0];
-  float y = local_y * mask_mtex.size[1] + mask_mtex.ofs[1];
+  float x = local_x * mtex.size[0] + mtex.ofs[0];
+  float y = local_y * mtex.size[1] + mtex.ofs[1];
 
   if (brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE &&
       std::max(std::fabs(x), std::fabs(y)) > 1.0f)
@@ -2665,27 +2741,100 @@ float BKE_brush_mask_tex_area_coverage(const Brush &brush,
   x *= aspect_correction.x;
   y *= aspect_correction.y;
 
-  /* The Mask slot's flip contract: mirrors the query point the same way #BKE_brush_sample_masktex
-   * does (after the aspect correction, before the evaluation). The LUT caches values in
-   * mask-texture space, so the flip is a transform of the request, not of the cache, and the same
-   * table serves flipped and unflipped queries. */
-  mtex_flip_coords(BKE_brush_mtex_flip_x(paint, mask_mtex, eBrushTextureSlot::Mask),
-                   BKE_brush_mtex_flip_y(paint, mask_mtex, eBrushTextureSlot::Mask),
-                   x,
-                   y);
+  /* The slot's flip contract: mirrors the query point the same way #BKE_brush_sample_masktex does
+   * (after the aspect correction, before the evaluation). The LUT caches values in mask-texture
+   * space, so the flip is a transform of the request, not of the cache, and the same table serves
+   * flipped and unflipped queries. The slot passed in decides which random bits apply. */
+  mtex_flip_coords(
+      BKE_brush_mtex_flip_x(paint, mtex, slot), BKE_brush_mtex_flip_y(paint, mtex, slot), x, y);
+
+  /* Resolve once: the supplied sampler comes from a stroke/chunk, the local one keeps the old
+   * per-call contract for callers that have nowhere to store it. Without this, area coverage did
+   * `prepare()` twice per sample (once for the map, once for the LUT gate). */
+  BrushMaskCorrectionSampler local_sampler;
+  const BrushMaskCorrectionSampler *sampler = correction_sampler;
+  if (sampler == nullptr && BKE_brush_mask_correction_active(brush)) {
+    local_sampler = BrushMaskCorrectionSampler::resolve(brush, mtex, pool);
+    sampler = &local_sampler;
+  }
+  const BrushMaskCorrection *correction = BKE_brush_mask_correction_get(brush);
 
   float value = 1.0f;
-  if (lut == nullptr || !lut->sample(brush, aspect_correction, x, y, thread, pool, value)) {
-    const float co[3] = {x, y, 0.0f};
-    float rgba[4];
-    RE_texture_evaluate(&mask_mtex, co, thread, pool, false, false, &value, rgba);
+  bool spatial_sample = false;
+  if (sampler != nullptr) {
+    /* Image-only: the corrected map is built once and sampled bilinearly; anything the filter
+     * cannot represent (procedural texture, 3D mapping, missing buffer) falls through to the
+     * engine + pointwise path below. */
+    if (const std::optional<float> sampled = sampler->sample_image(x, y)) {
+      value = *sampled;
+      spatial_sample = true;
+    }
   }
-  value = math::clamp(value - brush.texture_sample_bias, 0.0f, 1.0f);
+  /* The LUT bakes the raw engine value of #Brush.mask_mtex: it cannot serve another slot, it is
+   * stale once a spatial stage is on, and it only carries the luminance, so a correction reading
+   * another channel needs the RGBA. */
+  const bool lut_allowed = lut != nullptr && &mtex == &brush.mask_mtex;
+  const bool spatial_enabled = sampler != nullptr && sampler->prepared().use_spatial();
+  const bool channel_needs_rgba = correction != nullptr &&
+                                  correction->channel != BRUSH_MASK_CORRECTION_CHANNEL_LUMINANCE;
+  if (!spatial_sample &&
+      (!lut_allowed || spatial_enabled || channel_needs_rgba ||
+       !lut->sample(brush, aspect_correction, x, y, thread, pool, value)))
+  {
+    const float co[3] = {x, y, 0.0f};
+    float rgba[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    /* Same fallback as #BKE_brush_sample_masktex: never trust the engine to have written its
+     * return arguments. */
+    if (!RE_texture_evaluate(&mtex, co, thread, pool, false, false, &value, rgba)) {
+      value = 1.0f;
+      copy_v4_fl(rgba, 1.0f);
+    }
+    if (correction != nullptr) {
+      value = BKE_brush_mask_correction_channel_value(*correction, value, rgba);
+    }
+  }
+  value = BKE_brush_mask_tex_bias_apply(brush, value);
   if (paint != nullptr) {
     value = BKE_brush_mask_tex_pressure_apply(brush, *paint, value);
   }
-  value = BKE_brush_mask_tex_coverage_finish(brush, value);
+  /* The slot's own mirror, resolved by the caller: Sculpt uses the brush texture's invert, every
+   * other mode the Mask slot's. */
+  value = BKE_brush_mask_coverage_finish(invert, value);
+  /* Pointwise stack last, before the random influence, see #BKE_brush_sample_masktex. A supplied
+   * sampler already holds the prepared stack, so this does not rebuild it. */
+  BLI_assert_msg(sampler != nullptr || correction == nullptr,
+                 "A Mask correction on a sampling path must use a resolved "
+                 "BrushMaskCorrectionSampler; the one-shot apply() borrows the live curve and is "
+                 "not safe from worker threads.");
+  value = sampler != nullptr ? sampler->apply_pointwise(value) :
+                               BKE_brush_mask_correction_apply(brush, value);
   return apply_influence_random ? BKE_brush_mask_tex_influence_apply(paint, value) : value;
+}
+
+float BKE_brush_mask_tex_area_coverage(const Brush &brush,
+                                       const Paint *paint,
+                                       const float2 &local,
+                                       const float rake_rotation,
+                                       const float2 &aspect_correction,
+                                       const int thread,
+                                       ImagePool *pool,
+                                       const bke::BrushMaskLut *lut,
+                                       const bool apply_influence_random,
+                                       const BrushMaskCorrectionSampler *correction_sampler)
+{
+  return BKE_brush_mask_tex_area_coverage_slot(brush,
+                                               brush.mask_mtex,
+                                               eBrushTextureSlot::Mask,
+                                               BKE_brush_mask_texture_invert_get(brush),
+                                               paint,
+                                               local,
+                                               rake_rotation,
+                                               aspect_correction,
+                                               thread,
+                                               pool,
+                                               lut,
+                                               apply_influence_random,
+                                               correction_sampler);
 }
 
 /* -------------------------------------------------------------------- */

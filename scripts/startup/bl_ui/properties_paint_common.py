@@ -664,6 +664,127 @@ def _slot_row_button(row):
     return button
 
 
+def _draw_mask_correction(panel, brush):
+    """The Mask slot's extended correction, in a collapsible sub-panel.
+
+    Mirrors a channel's Correction Image: the socket menu's switch owns whether the block exists,
+    and the header's eye is the block's own Apply Correction switch, so the parameters stay put
+    while the effect is toggled. There is no Invert here on purpose: the Mask slot already has
+    #Brush.use_mask_texture_invert next to it, and that is the right place for the slot's
+    direction.
+    """
+    correction = brush.mask_correction
+    if correction is None:
+        return
+
+    header, body = panel.panel("mask_correction", default_closed=True)
+    header.use_property_split = False
+    header.use_property_decorate = False
+    split = header.split(factor=0.7)
+    split.label(text="Correction")
+    right = split.row(align=True)
+    right.alignment = 'RIGHT'
+    right.prop(
+        correction,
+        "enabled",
+        text="",
+        emboss=False,
+        icon='RESTRICT_VIEW_OFF' if correction.enabled else 'RESTRICT_VIEW_ON',
+    )
+    if not body:
+        return
+
+    mask_tex_slot = brush.mask_texture_slot
+    texture = mask_tex_slot.texture
+    # Keep this in step with the fallbacks in BrushMaskCorrectionSampler::resolve(): when the
+    # sampler declines a map, the spatial controls must not look functional.
+    spatial_available = (
+        texture is not None and texture.type == 'IMAGE' and
+        texture.image is not None and
+        mask_tex_slot.map_mode != '3D' and
+        texture.image.source != 'TILED' and
+        texture.node_tree is None and
+        texture.extension != 'CHECKER' and
+        not texture.use_calculate_alpha and
+        (
+            not texture.use_interpolation or
+            (
+                abs(texture.filter_size - 1.0) < 1e-6 and
+                texture.extension not in {'CLIP', 'CLIP_CUBE'}
+            )
+        )
+    )
+
+    col = body.column(align=True)
+    col.prop(correction, "channel", text="Channel")
+
+    col.separator()
+    col.prop(correction, "use_levels", text="Levels", toggle=True)
+    if correction.use_levels:
+        levels = col.box().column(align=True)
+        levels.prop(correction, "levels_in_black", text="Input Black")
+        levels.prop(correction, "levels_in_white", text="Input White")
+        levels.prop(correction, "levels_gamma", text="Gamma")
+        levels.prop(correction, "levels_out_black", text="Output Black")
+        levels.prop(correction, "levels_out_white", text="Output White")
+
+    col.separator()
+    col.prop(correction, "use_smoothstep", text="Smoothstep", toggle=True)
+    if correction.use_smoothstep:
+        smoothstep = col.box().column(align=True)
+        smoothstep.prop(correction, "smoothstep_min", text="Min")
+        smoothstep.prop(correction, "smoothstep_max", text="Max")
+        smoothstep.prop(correction, "smoothstep_softness", text="Softness")
+
+    col.separator()
+    col.prop(correction, "use_curve", text="Curve", toggle=True)
+    if correction.use_curve:
+        col.template_curve_mapping(correction, "curve", type='NONE')
+
+    col.separator()
+    col.prop(correction, "use_threshold", text="Threshold", toggle=True)
+    if correction.use_threshold:
+        col.prop(correction, "threshold", text="Threshold")
+
+    col.separator()
+    col.prop(correction, "use_posterize", text="Posterize", toggle=True)
+    if correction.use_posterize:
+        col.prop(correction, "posterize_steps", text="Steps")
+
+    col.separator()
+    col.prop(correction, "use_clamp", text="Clamp", toggle=True)
+    if correction.use_clamp:
+        clamp = col.box().column(align=True)
+        clamp.prop(correction, "clamp_min", text="Minimum")
+        clamp.prop(correction, "clamp_max", text="Maximum")
+
+    col.separator()
+    spatial = col.column(align=True)
+    spatial.enabled = spatial_available
+    spatial.label(text="Spatial (image masks only)")
+    spatial.prop(correction, "use_blur", text="Blur", toggle=True)
+    if correction.use_blur:
+        blur = spatial.box().column(align=True)
+        blur.prop(correction, "blur_shape", text="Shape")
+        blur.prop(correction, "blur_radius", text="Radius")
+
+    spatial.prop(correction, "use_sharpen", text="Sharpen", toggle=True)
+    if correction.use_sharpen:
+        sharpen = spatial.box().column(align=True)
+        sharpen.prop(correction, "sharpen_radius", text="Radius")
+        sharpen.prop(correction, "sharpen_amount", text="Amount")
+
+    spatial.prop(correction, "use_morph", text="Erode / Dilate", toggle=True)
+    if correction.use_morph:
+        morph = spatial.box().column(align=True)
+        morph.prop(correction, "morph_mode", text="Mode")
+        morph.prop(correction, "morph_radius", text="Radius")
+
+    spatial.prop(correction, "use_median", text="Median", toggle=True)
+    if correction.use_median:
+        spatial.prop(correction, "median_radius", text="Radius")
+
+
 def draw_mask_texture_panel(layout, context, brush, *, is_popover=False, show_grid=True,
                             show_invert=True):
     """The Mask slot's texture grid and placement settings.
@@ -738,6 +859,12 @@ def draw_mask_texture_panel(layout, context, brush, *, is_popover=False, show_gr
             sub.prop(mask_tex_slot, "use_flip_y", text="Y")
             sub.prop(mask_tex_slot, "use_random_flip_x", text="Random X")
             sub.prop(mask_tex_slot, "use_random_flip_y", text="Random Y")
+
+    # "Correction Image" for the Mask slot: the switch in the socket menu owns the block, the
+    # sub-panel below only draws its parameters and the block's own Apply Correction toggle.
+    if mask_tex_slot.texture is not None and brush.mask_correction is not None:
+        col.separator()
+        _draw_mask_correction(col, brush)
     return col
 
 
@@ -1544,6 +1671,8 @@ class PAINT_MT_material_paint_mask_socket(Menu):
 
     def draw(self, context):
         layout = self.layout
+        layout.use_property_split = False
+        layout.use_property_decorate = False
 
         # The brush is handed over through the layout context by the Mask panel header.
         brush = getattr(context, "paint_mask_brush", None)
@@ -1551,12 +1680,22 @@ class PAINT_MT_material_paint_mask_socket(Menu):
             layout.label(text="Mask Texture Slot", icon='INFO')
             return
         mask_tex_slot = brush.mask_texture_slot
-        layout.prop(mask_tex_slot, "mask_map_mode", text="Mapping")
-        layout.prop(brush, "use_pressure_masking", text="Pressure Masking")
+        # One column keeps every item on its own row: a popup menu has no label column, so the
+        # enum is a sub-menu rather than a split label/value pair that would sit off to the side.
+        col = layout.column()
+        col.prop_menu_enum(mask_tex_slot, "mask_map_mode", text="Mapping")
+        col.prop(brush, "use_pressure_masking", text="Pressure Masking")
+        if mask_tex_slot.texture is not None or brush.mask_correction is not None:
+            # The switch owns the block, like a channel's "Correction Image": the adjustments
+            # themselves are drawn in the Mask panel body (#draw_mask_texture_panel), so the popup
+            # stays the same compact per-slot menu a PBR channel has. It stays reachable after the
+            # texture is unlinked, otherwise an existing block could never be deleted.
+            col.separator()
+            col.prop(brush, "use_mask_correction_image", text="Correction Image")
         if brush.material_paint is not None:
-            layout.separator()
-            layout.prop(brush.material_paint, "use_mask_grid_source_picker",
-                        text="Source Picker: Grid")
+            col.separator()
+            col.prop(brush.material_paint, "use_mask_grid_source_picker",
+                     text="Source Picker: Grid")
 
 
 class PAINT_MT_material_layer_channel_socket(Menu):

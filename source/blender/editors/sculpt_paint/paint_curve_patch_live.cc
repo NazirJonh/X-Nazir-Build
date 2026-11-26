@@ -8,6 +8,7 @@
 
 #include "paint_curve_patch_live.hh"
 
+#include <atomic>
 #include <cstring>
 #include <memory>
 
@@ -18,6 +19,8 @@
 #include "BLI_time.h"
 
 #include "BKE_brush.hh"
+#include "BKE_brush_mask_correction.hh"
+#include "BKE_image.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_material_resolve.hh"
 
@@ -26,6 +29,7 @@
 
 #include "DNA_brush_types.h"
 #include "DNA_color_types.h"
+#include "DNA_image_types.h"
 #include "DNA_texture_types.h"
 
 namespace blender::ed::sculpt_paint {
@@ -236,7 +240,9 @@ static uint64_t curve_patch_material_source_digest(const Brush &brush)
   return digest;
 }
 
-CurvePatchLiveInputs curve_patch_live_inputs_capture(const Paint &paint, const Brush &brush)
+CurvePatchLiveInputs curve_patch_live_inputs_capture(const Paint &paint,
+                                                    const Brush &brush,
+                                                    const eObjectMode object_mode)
 {
   CurvePatchLiveInputs in;
   in.alpha = BKE_brush_alpha_get(&paint, &brush);
@@ -257,6 +263,28 @@ CurvePatchLiveInputs curve_patch_live_inputs_capture(const Paint &paint, const B
   in.tex_ofs = float2(brush.mtex.ofs[0], brush.mtex.ofs[1]);
   in.tex = brush.mtex.tex;
   in.tex_edit_count = BKE_paint_get_overlay_texture_edit_count();
+
+  const BrushMaskSlotView mask_slot = BKE_brush_mask_slot_view_get(brush, object_mode);
+  const MTex &mask_mtex = *mask_slot.mtex;
+  const Tex *mask_tex = mask_mtex.tex;
+  const Image *mask_image = (mask_tex != nullptr && mask_tex->type == TEX_IMAGE) ?
+                                mask_tex->ima :
+                                nullptr;
+  in.mask_tex = mask_tex;
+  in.mask_tex_image = mask_image;
+  in.mask_tex_pixel_version = (mask_image != nullptr && mask_image->runtime != nullptr) ?
+                                  mask_image->runtime->pixel_version.load(
+                                      std::memory_order_relaxed) :
+                                  0;
+  in.mask_tex_size = float2(mask_mtex.size[0], mask_mtex.size[1]);
+  in.mask_tex_ofs = float2(mask_mtex.ofs[0], mask_mtex.ofs[1]);
+  in.mask_tex_rot = mask_mtex.rot;
+  in.mask_mapping_flags = int(mask_mtex.mapping_flags);
+  in.mask_map_mode = int(mask_mtex.brush_map_mode);
+  in.mask_mapping = int(mask_mtex.mapping);
+  in.mask_invert = mask_slot.invert;
+  in.texture_sample_bias = brush.texture_sample_bias;
+  in.mask_correction_hash = BKE_brush_mask_correction_hash_for_brush(brush);
 
   in.material_paint_digest = curve_patch_material_paint_digest(brush);
   in.material_source_digest = curve_patch_material_source_digest(brush);

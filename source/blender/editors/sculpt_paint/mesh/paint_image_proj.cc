@@ -60,6 +60,7 @@
 #include "BKE_attribute.hh"
 #include "BKE_attribute_legacy_convert.hh"
 #include "BKE_brush.hh"
+#include "BKE_brush_mask_correction.hh"
 #include "BKE_camera.h"
 #include "BKE_colorband.hh"
 #include "BKE_colortools.hh"
@@ -5376,6 +5377,16 @@ static void do_projectpaint_thread(TaskPool *__restrict /*pool*/, void *ph_v)
   ProjPixel *projPixel;
   Brush *brush = ps->brush;
 
+  /* The Mask correction is fixed for the dab: resolve it once per worker before the pixel loop,
+   * so the hot path does not rebuild or lock per texel. */
+  BrushMaskCorrectionSampler mask_correction_sampler;
+  if (ps->is_maskbrush && BKE_brush_mask_correction_active(*brush)) {
+    mask_correction_sampler = BrushMaskCorrectionSampler::resolve(
+        *brush, brush->mask_mtex, pool);
+  }
+  const BrushMaskCorrectionSampler *mask_correction_sampler_ptr =
+      mask_correction_sampler.enabled() ? &mask_correction_sampler : nullptr;
+
   int last_index = -1;
   ProjPaintImage *last_projIma = nullptr;
   ImagePaintPartialRedraw *last_partial_redraw_cell;
@@ -5623,8 +5634,12 @@ static void do_projectpaint_thread(TaskPool *__restrict /*pool*/, void *ph_v)
 
             /* Mask texture. */
             if (ps->is_maskbrush) {
-              float texmask = BKE_brush_sample_masktex(
-                  ps->paint, ps->brush, projPixel->projCoSS, thread_index, pool);
+              float texmask = BKE_brush_sample_masktex(ps->paint,
+                                                       ps->brush,
+                                                       projPixel->projCoSS,
+                                                       thread_index,
+                                                       pool,
+                                                       mask_correction_sampler_ptr);
               CLAMP(texmask, 0.0f, 1.0f);
               custom_mask *= texmask;
             }

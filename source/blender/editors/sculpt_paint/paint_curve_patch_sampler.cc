@@ -111,7 +111,8 @@ CurvePatchSampler::CurvePatchSampler(const CurvePatchItem &item,
                                      const Brush &brush,
                                      const CurvePatchSourceGeometry &source,
                                      const Span<float> mask,
-                                     ImagePool &tex_pool)
+                                     ImagePool &tex_pool,
+                                     const eObjectMode object_mode)
     : item_(item),
       texture_(texture),
       ctx_(ctx),
@@ -123,8 +124,19 @@ CurvePatchSampler::CurvePatchSampler(const CurvePatchItem &item,
       start_endpoint_radius_(item.geometry.spline.radius_at(0.0f) * item.params.radius),
       end_endpoint_radius_(item.geometry.spline.radius_at(total_length_) * item.params.radius),
       mtex_size_(brush.mtex.size[0], brush.mtex.size[1]),
-      mtex_ofs_(brush.mtex.ofs[0], brush.mtex.ofs[1])
+      mtex_ofs_(brush.mtex.ofs[0], brush.mtex.ofs[1]),
+      mask_slot_(BKE_brush_mask_slot_view_get(brush, object_mode))
 {
+  /* The Mask is sampled in the patch frame, so its aspect correction is a property of the slot
+   * alone and can be resolved once per sampler rather than per covered element. */
+  mask_aspect_ = BKE_brush_get_aspect_correction(mask_slot_.mtex, &tex_pool_);
+  /* Resolve the correction's spatial map and pointwise stack once for the whole chunk: stamps
+   * would otherwise rebuild/look it up for every covered element. */
+  if (mask_slot_.mtex != nullptr && mask_slot_.mtex->tex != nullptr) {
+    mask_correction_sampler_ = BrushMaskCorrectionSampler::resolve(
+        brush, *mask_slot_.mtex, &tex_pool_);
+  }
+
   /* A PBR slot dropped WITHOUT a mask texture stamps its Base Color image's alpha as the
    * coverage mask (see the null-texture branch in #sample). Pin those images' buffers once per
    * sampler instead of per covered element: the pool dedups, and the acquire is thread-safe, so
@@ -166,6 +178,65 @@ CurvePatchSampler::CurvePatchSampler(const CurvePatchItem &item,
         break;
     }
   }
+}
+
+float curve_patch_stamp_mask_weight_factor(const float masked_alpha, const float unmasked_alpha)
+{
+  /* A stamp is skipped before this point when either alpha is zero, but keep the guard so the
+   * helper cannot produce NaN from a future caller and so the open-mask case returns exactly 1. */
+  if (unmasked_alpha <= 0.0f) {
+    return 1.0f;
+  }
+  return math::clamp(masked_alpha / unmasked_alpha, 0.0f, 1.0f);
+}
+
+float curve_patch_mask_coverage(const Brush &brush,
+                                const eObjectMode object_mode,
+                                const float2 &uv,
+                                const float2 &aspect_correction,
+                                const int thread_id,
+                                ImagePool &tex_pool)
+{
+  const BrushMaskSlotView slot = BKE_brush_mask_slot_view_get(brush, object_mode);
+  if (slot.mtex == nullptr || slot.mtex->tex == nullptr) {
+    return 1.0f;
+  }
+  /* Area-plane coverage is the sampler that takes explicit `[-1, 1]` coordinates, which is
+   * exactly the patch's own frame. No Paint is handed over: pressure masking and the per-dab
+   * random influence are stroke state a patch does not have, and passing a null Paint makes the
+   * sampler skip both. `apply_influence_random` is false for the same reason. */
+  return BKE_brush_mask_tex_area_coverage_slot(brush,
+                                               *slot.mtex,
+                                               slot.slot,
+                                               slot.invert,
+                                               nullptr,
+                                               uv,
+                                               0.0f,
+                                               aspect_correction,
+                                               thread_id,
+                                               &tex_pool,
+                                               nullptr,
+                                               false);
+}
+
+float CurvePatchSampler::mask_coverage_at(const float2 &uv, const int thread_id) const
+{
+  if (mask_slot_.mtex == nullptr || mask_slot_.mtex->tex == nullptr) {
+    return 1.0f;
+  }
+  return BKE_brush_mask_tex_area_coverage_slot(brush_,
+                                               *mask_slot_.mtex,
+                                               mask_slot_.slot,
+                                               mask_slot_.invert,
+                                               nullptr,
+                                               uv,
+                                               0.0f,
+                                               mask_aspect_,
+                                               thread_id,
+                                               &tex_pool_,
+                                               nullptr,
+                                               false,
+                                               &mask_correction_sampler_);
 }
 
 std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const int thread_id) const
@@ -504,6 +575,16 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
      * leaves `stamp_strength` at 1.0, which keeps its result bit-for-bit what it was. */
     float tex_value = 1.0f;
     float stamp_strength = 1.0f;
+    /* Ribbon-only Mask slot coverage, sampled in the ribbon's own UV frame. Stamps fold the Mask
+     * into each stamp's alpha instead, before compositing, so this stays 1.0 there. */
+    float mask_coverage = 1.0f;
+    /* Stamps-only: the mask factor of the dominant stamp. The composited `height` already carries
+     * each stamp's mask through its alpha, but the cross-pass blend in PHASE 2 also needs the mask
+     * in `weight`. Scaling `weight` by the composite coverage would be wrong: it would also fold
+     * in the texture alpha and the falloff, changing unmasked behavior. Keeping only the dominant
+     * stamp's mask ratio adds the mask alone; it is 1.0 when the mask is open and 0 when it
+     * closes, and the stamp is skipped entirely at 0 before reaching here. */
+    float stamps_weight_mask_factor = 1.0f;
     /* RGBA of whichever stamp/zone texture actually won the intensity selection below. Declared in
      * the `branch_relief` scope (not inside either branch) because the final `CurvePatchSample`
      * construction at the bottom reads it regardless of which branch produced it. Stays
@@ -620,6 +701,10 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
         if (item.params.swap_axis) {
           std::swap(stamp_u, stamp_v);
         }
+        /* The Mask slot has its own static/random flip bits, applied inside the area sampler. The
+         * brush texture's per-stamp random flip below must not be folded into the Mask's
+         * coordinates, so keep the stamp's UV frame as it is before that flip. */
+        const float2 mask_patch_uv(stamp_u, stamp_v);
         /* The stamp's own random flip (#CurvePatchStamp::flip, a hash draw below
          * #CurvePatchParams::stamp_flip_x_random / stamp_flip_y_random): mirror the stamp's
          * texture on one axis, the way the brush texture's flip bits mirror a plain dab's. */
@@ -711,25 +796,39 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
         if (stamp_falloff <= 0.0f) {
           continue;
         }
-        /* How much of what lies under this stamp it hides. Three factors, and each is needed:
+        /* How much of what lies under this stamp it hides. Four factors, and each is needed:
          * - the falloff, so stamps meet along a smooth seam instead of a square edge;
          * - the texture's ALPHA, so a brush alpha with real transparency lets the stamps below
          *   show through where it is transparent;
          * - the texture's INTENSITY, so a black region of a grayscale mask -- the ordinary way a
          *   Blender brush texture says "nothing here" -- does not punch a hole through the stamps
-         *   underneath while contributing nothing itself.
+         *   underneath while contributing nothing itself;
+         * - the brush's Mask slot coverage, sampled in this stamp's own UV frame. It cuts the
+         *   stamp's coverage exactly like a dab's, so a masked-out stamp neither paints nor hides
+         *   the stamps below it.
          * Clamped because a color texture's intensity is a luminance and an HDR one can exceed 1.
          */
         const float tex_alpha = stamp_tex_valid ? sample_rgba[3] : 1.0f;
-        const float alpha = std::clamp(stamp_falloff * tex_alpha * sample, 0.0f, 1.0f);
-        if (alpha <= 0.0f) {
+        const float alpha_unmasked = std::clamp(stamp_falloff * tex_alpha * sample, 0.0f, 1.0f);
+        if (alpha_unmasked <= 0.0f) {
           /* Fully transparent here: it neither paints nor hides, so it is not a contribution at
            * all. A stamp whose texture is black throughout no longer claims the vertex. */
           continue;
         }
+        const float alpha = alpha_unmasked * mask_coverage_at(mask_patch_uv, thread_id);
+        if (alpha <= 0.0f) {
+          /* The Mask removes this stamp entirely. */
+          continue;
+        }
 
-        if (alpha > dominant_alpha) {
-          dominant_alpha = alpha;
+        /* Dominance is decided on the UNMASKED coverage: the Mask is a clip, so letting it pick
+         * the reported PBR frame would make the texture's own `patch_uv` / slot jump wherever the
+         * mask happens to cross a stamp boundary. */
+        if (alpha_unmasked > dominant_alpha) {
+          dominant_alpha = alpha_unmasked;
+          /* The mask is a clip on the dominant stamp too: carry its mask-only ratio into the
+           * claim weight, without the texture alpha/falloff that `alpha` also contains. */
+          stamps_weight_mask_factor = curve_patch_stamp_mask_weight_factor(alpha, alpha_unmasked);
           tex_valid = stamp_tex_valid;
           patch_uv = stamp_patch_uv;
           patch_uv_valid = true;
@@ -738,9 +837,10 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
           tex_index = it->tex_index;
         }
 
-        /* The amplitude is the stamp's own strength: the texture's shape has already been folded
-         * into `alpha`, so `alpha * amplitude` reproduces the single-stamp result the winner-take-
-         * all merge used to hand on (`sample * stamp_falloff * strength`) exactly. */
+        /* The amplitude is the stamp's own strength: the texture's shape and the Mask slot
+         * coverage have already been folded into `alpha`, so `alpha * amplitude` reproduces the
+         * single-stamp result the winner-take-all merge used to hand on (`sample * stamp_falloff *
+         * strength`) and clips it exactly as a dab's Mask would. */
         const StampContribution contribution{it->depth,
                                              alpha,
                                              it->strength,
@@ -864,6 +964,15 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
        * PBR channel source has to be sampled in too. */
       patch_uv = float2(tex_u, tex_v);
       patch_uv_valid = true;
+      /* The Mask slot is sampled in the ribbon's own frame, before the brush texture's Size /
+       * Offset: `mask_coverage_at` applies the Mask slot's placement itself. */
+      mask_coverage = mask_coverage_at(patch_uv, thread_id);
+      if (mask_coverage <= 0.0f) {
+#if CURVE_PATCH_PROFILING
+        dbg_branch_funnel_.rej_late++;
+#endif
+        return std::nullopt;
+      }
       /* Same frame the LUT was rasterized in: `B = cross(T, plane_normal)` is the ribbon's `+u`
        * side (#curve_patch_ribbon_build), and `s` -- hence `v` -- grows along `T`. Reported as a
        * pair rather than a single angle so a swapped or mirrored patch stays describable. */
@@ -902,10 +1011,12 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
 
     /* Per-point opacity is a look property of the curve, like the per-curve one: it scales how much
      * the patch paints here, not what it samples. Multiplying the final height makes it apply
-     * uniformly to Ribbon and Stamps and to every effect that consumes the sample. */
+     * uniformly to Ribbon and Stamps and to every effect that consumes the sample. The Mask slot
+     * coverage is 1.0 in Stamps mode (each stamp already multiplied its own sample in), so this
+     * factor is what carries the Ribbon's Mask through to every effect. */
     const float point_opacity = item.geometry.spline.opacity_at(s);
     const float height = tex_value * stamp_strength * lateral_falloff * end_falloff * mask_factor *
-                         point_opacity * ctx.bstrength;
+                         point_opacity * ctx.bstrength * mask_coverage;
     /* `end_falloff` scales the claim WEIGHT as well as the height. Not for the branch merge just
      * above -- `relief_at()` picks the branch with the largest `|height|` and never reads the
      * weight -- but for the cross-pass blend in PHASE 2 (`pass_weight_accum`), which averages
@@ -915,10 +1026,14 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
      *
      * The point opacity scales the weight for the same reason, and for one more: the weight is
      * also the coverage a patch stamped over another composites with, so a transparent stretch
-     * must claim nothing there or it would hide the curve below instead of showing it. */
+     * must claim nothing there or it would hide the curve below instead of showing it. The Mask
+     * slot coverage is a clip too, so it scales the weight alongside the height; in Stamps mode it
+     * is 1.0 because each stamp's alpha already carried its own mask, and the dominant stamp's
+     * mask-only ratio (#stamps_weight_mask_factor) carries the mask into the weight instead. */
     return CurvePatchSample{orig,
                             height,
-                            lateral_falloff * end_falloff * point_opacity,
+                            lateral_falloff * end_falloff * point_opacity * mask_coverage *
+                                stamps_weight_mask_factor,
                             float4(tex_rgba[0], tex_rgba[1], tex_rgba[2], tex_rgba[3]),
                             tex_valid,
                             patch_uv,

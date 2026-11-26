@@ -27,6 +27,7 @@
 
 #include "BKE_brush.hh"
 #include "BKE_brush_material_correction.hh"
+#include "BKE_brush_mask_correction.hh"
 #include "BKE_curve_patch.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
@@ -2232,6 +2233,91 @@ static std::optional<std::string> rna_BrushMaterialPaintCorrection_path(const Po
   return std::nullopt;
 }
 
+static std::optional<std::string> rna_BrushMaskCorrection_path(const PointerRNA *ptr)
+{
+  const Brush *brush = reinterpret_cast<const Brush *>(ptr->owner_id);
+  if (brush == nullptr || brush->mask_correction == nullptr ||
+      brush->mask_correction != ptr->data)
+  {
+    return std::nullopt;
+  }
+  return "mask_correction";
+}
+
+/** Update for the Mask correction's own parameters: \a ptr points at the correction, so the brush
+ * has to come from `owner_id` (mirrors #rna_BrushMaterialPaint_update). */
+static void rna_BrushMaskCorrection_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
+{
+  Brush *br = reinterpret_cast<Brush *>(ptr->owner_id);
+  /* The cursor overlay previews the corrected coverage, so its cached texture has to be released
+   * before the usual brush notifier. */
+  BKE_paint_invalidate_overlay_all();
+  BKE_brush_tag_unsaved_changes(br);
+  WM_main_add_notifier(NC_BRUSH | NA_EDITED, br);
+}
+
+/** Turning a spatial stage on must make it visible at once: a radius that quantizes to zero texels
+ * would run a no-op filter and read as a broken toggle. The RNA default is already one; this covers
+ * a value the user had zeroed before re-enabling. */
+static void rna_BrushMaskCorrection_spatial_set(PointerRNA *ptr,
+                                                const bool value,
+                                                const short flag,
+                                                float &radius)
+{
+  BrushMaskCorrection *correction = static_cast<BrushMaskCorrection *>(ptr->data);
+  if (value) {
+    correction->flag |= flag;
+    if (radius <= 0.0f) {
+      radius = 1.0f;
+    }
+  }
+  else {
+    correction->flag &= short(~flag);
+  }
+}
+
+static bool rna_BrushMaskCorrection_use_sharpen_get(PointerRNA *ptr)
+{
+  return (static_cast<BrushMaskCorrection *>(ptr->data)->flag & BRUSH_MASK_CORRECTION_SHARPEN) != 0;
+}
+static void rna_BrushMaskCorrection_use_sharpen_set(PointerRNA *ptr, const bool value)
+{
+  BrushMaskCorrection *correction = static_cast<BrushMaskCorrection *>(ptr->data);
+  rna_BrushMaskCorrection_spatial_set(
+      ptr, value, BRUSH_MASK_CORRECTION_SHARPEN, correction->sharpen_radius);
+}
+
+static bool rna_BrushMaskCorrection_use_blur_get(PointerRNA *ptr)
+{
+  return (static_cast<BrushMaskCorrection *>(ptr->data)->flag & BRUSH_MASK_CORRECTION_BLUR) != 0;
+}
+static void rna_BrushMaskCorrection_use_blur_set(PointerRNA *ptr, const bool value)
+{
+  BrushMaskCorrection *correction = static_cast<BrushMaskCorrection *>(ptr->data);
+  rna_BrushMaskCorrection_spatial_set(
+      ptr, value, BRUSH_MASK_CORRECTION_BLUR, correction->blur_radius);
+}
+static bool rna_BrushMaskCorrection_use_morph_get(PointerRNA *ptr)
+{
+  return (static_cast<BrushMaskCorrection *>(ptr->data)->flag & BRUSH_MASK_CORRECTION_MORPH) != 0;
+}
+static void rna_BrushMaskCorrection_use_morph_set(PointerRNA *ptr, const bool value)
+{
+  BrushMaskCorrection *correction = static_cast<BrushMaskCorrection *>(ptr->data);
+  rna_BrushMaskCorrection_spatial_set(
+      ptr, value, BRUSH_MASK_CORRECTION_MORPH, correction->morph_radius);
+}
+static bool rna_BrushMaskCorrection_use_median_get(PointerRNA *ptr)
+{
+  return (static_cast<BrushMaskCorrection *>(ptr->data)->flag & BRUSH_MASK_CORRECTION_MEDIAN) != 0;
+}
+static void rna_BrushMaskCorrection_use_median_set(PointerRNA *ptr, const bool value)
+{
+  BrushMaskCorrection *correction = static_cast<BrushMaskCorrection *>(ptr->data);
+  rna_BrushMaskCorrection_spatial_set(
+      ptr, value, BRUSH_MASK_CORRECTION_MEDIAN, correction->median_radius);
+}
+
 static int rna_BrushMaterialPaintChannel_channel_get_rna(PointerRNA *ptr)
 {
   if (const std::optional<eMaterialPaintChannel> channel =
@@ -2824,6 +2910,31 @@ static void rna_BrushMaterialPaintChannel_use_correction_image_set(PointerRNA *p
   }
   /* Hiding the block releases it, parameters included: they describe nothing without it. */
   BKE_brush_material_paint_correction_delete(*channel);
+}
+
+/* Whether the brush carries a Mask "Correction Image" block at all, which is what the Mask panel's
+ * switch is about. Whether it is *applied* is the correction's own #enabled. */
+static bool rna_Brush_use_mask_correction_image_get(PointerRNA *ptr)
+{
+  return static_cast<const Brush *>(ptr->data)->mask_correction != nullptr;
+}
+
+static void rna_Brush_use_mask_correction_image_set(PointerRNA *ptr, const bool value)
+{
+  Brush *brush = static_cast<Brush *>(ptr->data);
+  if (value) {
+    if (brush->mask_correction == nullptr) {
+      /* The switch owns the block, and a freshly created block starts applied: the user asked for
+       * Correction Image, so showing it switched off would read as broken. The header's Apply
+       * Correction toggle can still switch the effects off afterwards without removing it. */
+      BKE_brush_mask_correction_ensure(*brush)->flag |= BRUSH_MASK_CORRECTION_ENABLED;
+    }
+  }
+  else {
+    /* Hiding the block releases it, parameters included: they describe nothing without it. */
+    BKE_brush_mask_correction_delete(*brush);
+  }
+  BKE_paint_invalidate_overlay_all();
 }
 
 static void rna_BrushCurvePatchSettings_texture_active_index_range(
@@ -4804,6 +4915,284 @@ static void rna_def_curves_sculpt_options(BlenderRNA *brna)
                            "Curve Parameter Falloff",
                            "Falloff that is applied from the tip to the root of each curve");
   RNA_def_property_update(prop, 0, "rna_BrushCurvesSculptSettings_update");
+}
+
+static void rna_def_brush_mask_correction(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  static const EnumPropertyItem prop_mask_correction_channel_items[] = {
+      {BRUSH_MASK_CORRECTION_CHANNEL_LUMINANCE,
+       "LUMINANCE",
+       0,
+       "Luminance",
+       "Rec.709 luminance of the sampled texel"},
+      {BRUSH_MASK_CORRECTION_CHANNEL_RED, "RED", 0, "Red", "Red component of the sampled texel"},
+      {BRUSH_MASK_CORRECTION_CHANNEL_GREEN,
+       "GREEN",
+       0,
+       "Green",
+       "Green component of the sampled texel"},
+      {BRUSH_MASK_CORRECTION_CHANNEL_BLUE,
+       "BLUE",
+       0,
+       "Blue",
+       "Blue component of the sampled texel"},
+      {BRUSH_MASK_CORRECTION_CHANNEL_ALPHA,
+       "ALPHA",
+       0,
+       "Alpha",
+       "Alpha component of the sampled texel"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem prop_mask_correction_blur_shape_items[] = {
+      {BRUSH_MASK_CORRECTION_BLUR_GAUSSIAN, "GAUSSIAN", 0, "Gaussian", "Gaussian blur"},
+      {BRUSH_MASK_CORRECTION_BLUR_BOX, "BOX", 0, "Box", "Box blur"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem prop_mask_correction_morph_mode_items[] = {
+      {BRUSH_MASK_CORRECTION_MORPH_ERODE,
+       "ERODE",
+       0,
+       "Erode",
+       "Shrink the bright areas: the darkest neighbor wins"},
+      {BRUSH_MASK_CORRECTION_MORPH_DILATE,
+       "DILATE",
+       0,
+       "Dilate",
+       "Grow the bright areas: the brightest neighbor wins"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  srna = RNA_def_struct(brna, "BrushMaskCorrection", nullptr);
+  RNA_def_struct_sdna(srna, "BrushMaskCorrection");
+  RNA_def_struct_path_func(srna, "rna_BrushMaskCorrection_path");
+  RNA_def_struct_ui_text(srna,
+                         "Mask Correction",
+                         "Extended correction of the Mask slot's scalar coverage");
+
+  prop = RNA_def_property(srna, "enabled", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", BRUSH_MASK_CORRECTION_ENABLED);
+  RNA_def_property_ui_text(prop,
+                           "Apply Correction",
+                           "Apply this correction to the sampled mask; switching it off keeps "
+                           "the block and its parameters");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "channel", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, prop_mask_correction_channel_items);
+  RNA_def_property_enum_sdna(prop, nullptr, "channel");
+  RNA_def_property_ui_text(prop, "Channel", "Which part of the sampled texture drives the mask");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "use_levels", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", BRUSH_MASK_CORRECTION_LEVELS);
+  RNA_def_property_ui_text(prop,
+                           "Levels",
+                           "Remap Input Black..Input White through Gamma onto Output Black.."
+                           "Output White");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "levels_in_black", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "levels_in_black");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01, 3);
+  RNA_def_property_ui_text(prop, "Input Black", "Input level treated as black");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "levels_in_white", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "levels_in_white");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01, 3);
+  RNA_def_property_ui_text(prop, "Input White", "Input level treated as white");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "levels_gamma", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "levels_gamma");
+  RNA_def_property_range(prop, 0.01f, 10.0f);
+  RNA_def_property_ui_range(prop, 0.01f, 10.0f, 0.01, 3);
+  RNA_def_property_ui_text(prop, "Gamma", "Gamma applied between the input levels");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "levels_out_black", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "levels_out_black");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01, 3);
+  RNA_def_property_ui_text(prop, "Output Black", "Output level for a black input");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "levels_out_white", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "levels_out_white");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01, 3);
+  RNA_def_property_ui_text(prop, "Output White", "Output level for a white input");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "use_smoothstep", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", BRUSH_MASK_CORRECTION_SMOOTHSTEP);
+  RNA_def_property_ui_text(prop,
+                           "Smoothstep",
+                           "Compress the range into Min..Max and soften the two ends");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "smoothstep_min", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "smoothstep_min");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01, 3);
+  RNA_def_property_ui_text(prop, "Min", "Value mapped to black");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "smoothstep_max", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "smoothstep_max");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01, 3);
+  RNA_def_property_ui_text(prop, "Max", "Value mapped to white");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "smoothstep_softness", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "smoothstep_softness");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01, 3);
+  RNA_def_property_ui_text(prop, "Softness", "Mix between a linear ramp (0) and a smoothstep (1)");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "use_curve", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", BRUSH_MASK_CORRECTION_CURVE);
+  RNA_def_property_ui_text(prop, "Curve", "Apply a curve to the sampled value");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "curve", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "curve");
+  RNA_def_property_struct_type(prop, "CurveMapping");
+  RNA_def_property_ui_text(prop, "Curve", "Curve applied to the sampled value");
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "use_threshold", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", BRUSH_MASK_CORRECTION_THRESHOLD);
+  RNA_def_property_ui_text(prop, "Threshold", "Turn the coverage into a hard on/off at Threshold");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "threshold", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "threshold");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01, 3);
+  RNA_def_property_ui_text(prop, "Threshold", "Values at or above this become full coverage");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "use_posterize", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", BRUSH_MASK_CORRECTION_POSTERIZE);
+  RNA_def_property_ui_text(
+      prop, "Posterize", "Quantize the coverage into a fixed number of levels");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "posterize_steps", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "posterize_steps");
+  RNA_def_property_range(prop, 1, 64);
+  RNA_def_property_ui_text(prop, "Steps", "Number of output levels");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "use_clamp", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", BRUSH_MASK_CORRECTION_CLAMP);
+  RNA_def_property_ui_text(prop, "Clamp", "Clamp the coverage into Min..Max");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "clamp_min", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "clamp_min");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01, 3);
+  RNA_def_property_ui_text(prop, "Minimum", "Lowest value after the clamp");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "clamp_max", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "clamp_max");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01, 3);
+  RNA_def_property_ui_text(prop, "Maximum", "Highest value after the clamp");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  /* No Invert stage here on purpose: the Mask slot already carries its own
+   * `Brush.use_mask_texture_invert` next to the slot, which is where the texture's direction
+   * belongs. A second toggle would only let the two disagree. */
+
+  prop = RNA_def_property(srna, "use_blur", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_BrushMaskCorrection_use_blur_get",
+                                 "rna_BrushMaskCorrection_use_blur_set");
+  RNA_def_property_ui_text(prop, "Blur", "Spatial blur of the image texture (image masks only)");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "blur_radius", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "blur_radius");
+  RNA_def_property_range(prop, 0.0f, 256.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 64.0f, 0.1, 2);
+  RNA_def_property_ui_text(prop, "Blur Radius", "Blur radius in image texels");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "blur_shape", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, prop_mask_correction_blur_shape_items);
+  RNA_def_property_enum_sdna(prop, nullptr, "blur_shape");
+  RNA_def_property_ui_text(prop, "Blur Shape", "Blur kernel");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "use_sharpen", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_BrushMaskCorrection_use_sharpen_get",
+                                 "rna_BrushMaskCorrection_use_sharpen_set");
+  RNA_def_property_ui_text(prop, "Sharpen", "Unsharp mask (image masks only)");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "sharpen_radius", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "sharpen_radius");
+  RNA_def_property_range(prop, 0.0f, 256.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 64.0f, 0.1, 2);
+  RNA_def_property_ui_text(prop, "Sharpen Radius", "Unsharp mask radius in image texels");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "sharpen_amount", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "sharpen_amount");
+  RNA_def_property_range(prop, 0.0f, 4.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 2.0f, 0.01, 3);
+  RNA_def_property_ui_text(prop, "Sharpen Amount", "Strength of the unsharp mask");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "use_morph", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_BrushMaskCorrection_use_morph_get",
+                                 "rna_BrushMaskCorrection_use_morph_set");
+  RNA_def_property_ui_text(prop, "Erode / Dilate", "Spatial erode or dilate (image masks only)");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "morph_radius", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "morph_radius");
+  RNA_def_property_range(prop, 0.0f, 256.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 64.0f, 0.1, 2);
+  RNA_def_property_ui_text(prop, "Morph Radius", "Erode/dilate radius in image texels");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "morph_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, prop_mask_correction_morph_mode_items);
+  RNA_def_property_enum_sdna(prop, nullptr, "morph_mode");
+  RNA_def_property_ui_text(prop, "Morph Mode", "Erode or dilate");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "use_median", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_BrushMaskCorrection_use_median_get",
+                                 "rna_BrushMaskCorrection_use_median_set");
+  RNA_def_property_ui_text(prop, "Median", "Spatial median filter (image masks only)");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
+  prop = RNA_def_property(srna, "median_radius", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "median_radius");
+  RNA_def_property_range(prop, 1.0f, 4.0f);
+  RNA_def_property_ui_range(prop, 1.0f, 4.0f, 1.0, 0);
+  RNA_def_property_ui_text(prop, "Median Radius", "Median filter radius in image texels (1..4)");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaskCorrection_update");
+
 }
 
 static void rna_def_brush_material_paint(BlenderRNA *brna)
@@ -7820,6 +8209,25 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Mask Texture", "");
   RNA_def_property_update(prop, NC_TEXTURE, "rna_Brush_secondary_tex_update");
 
+  /* The Mask slot's extended correction. The switch owns the whole block, like the channels'
+   * `use_correction_image`: it allocates on enable and releases on disable, and the block's own
+   * `enabled` only decides whether the effects are applied. */
+  prop = RNA_def_property(srna, "use_mask_correction_image", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_Brush_use_mask_correction_image_get",
+                                 "rna_Brush_use_mask_correction_image_set");
+  RNA_def_property_ui_text(
+      prop,
+      "Correction Image",
+      "Show the Mask slot's extended correction (channel, pointwise stack, spatial filters)");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "mask_correction", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "BrushMaskCorrection");
+  RNA_def_property_pointer_sdna(prop, nullptr, "mask_correction");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Mask Correction", "Extended correction of the Mask slot");
+
   prop = RNA_def_property(srna, "face_set_color_texture_slot", PROP_POINTER, PROP_NONE);
   RNA_def_property_struct_type(prop, "BrushTextureSlot");
   RNA_def_property_pointer_sdna(prop, nullptr, "face_set_color_mtex");
@@ -8082,6 +8490,7 @@ void RNA_def_brush(BlenderRNA *brna)
   rna_def_gpencil_options(brna);
   rna_def_curves_sculpt_options(brna);
   rna_def_brush_material_paint(brna);
+  rna_def_brush_mask_correction(brna);
   rna_def_brush_clone_stamp_mesh_settings(brna);
   rna_def_brush_curve_patch_slot_channel(brna);
   rna_def_brush_curve_patch_texture_slot(brna);

@@ -1885,7 +1885,8 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
             const CurvePatchSourceGeometry source{
                 chunk_positions, chunk_normals, nullptr, /*indices_are_mesh_verts*/ false};
             const CurvePatchSampler sampler(
-                item, target.texture, ctx, brush, source, chunk_mask, tex_pool);
+                item, target.texture, ctx, brush, source, chunk_mask, tex_pool,
+                OB_MODE_TEXTURE_PAINT);
 
             /* Destination tangent basis for a Normal source, plus the screen basis a texel with
              * no patch frame falls back to. Constant across a UV primitive, and a chunk never

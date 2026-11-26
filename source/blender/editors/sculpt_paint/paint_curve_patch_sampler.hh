@@ -23,7 +23,11 @@
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 
+#include "DNA_object_enums.h"
 #include "DNA_scene_enums.h"
+
+#include "BKE_brush.hh"
+#include "BKE_brush_mask_correction.hh"
 
 #include "paint_curve_patch_profile.hh"
 
@@ -116,6 +120,33 @@ float curve_patch_cull_tube_radius(const bke::CurvePatchGeometry &geometry, floa
  * effect, which would otherwise carry two copies of the same float/byte branch.
  */
 std::optional<float4> curve_patch_sample_image_bilinear(const ImBuf &ibuf, float2 patch_uv);
+
+/**
+ * The mask-only factor a Stamps contribution carries into the cross-pass claim weight:
+ * `masked_alpha / unmasked_alpha`, clamped to [0, 1].
+ *
+ * Stamps fold the Mask slot into each stamp's alpha, so the composited height already carries it.
+ * The claim weight must carry the mask as well, but multiplying by the composite coverage would
+ * also add the texture alpha and falloff. This ratio isolates the mask of the dominant stamp.
+ * Returns 1 when the unmasked coverage is zero (the open-mask identity).
+ */
+float curve_patch_stamp_mask_weight_factor(float masked_alpha, float unmasked_alpha);
+
+/**
+ * Mask slot coverage at \a uv in the patch's own `[-1, 1]` frame, through the mode-resolved slot
+ * (#Brush.mtex in Sculpt, #Brush.mask_mtex otherwise). Returns 1 when no Mask texture is assigned.
+ *
+ * The slot's Size / Offset, rotation, rectangle clip shape, aspect correction, static flips, the
+ * brush's sample bias and the slot's own invert (the brush texture's invert in Sculpt) all apply,
+ * exactly as they do for an Area-plane dab. Pressure masking and the per-dab random influence do
+ * not: a patch has no dab and no stroke RNG, so no #Paint is handed to the sampler.
+ */
+float curve_patch_mask_coverage(const Brush &brush,
+                                eObjectMode object_mode,
+                                const float2 &uv,
+                                const float2 &aspect_correction,
+                                int thread_id,
+                                ImagePool &tex_pool);
 
 /**
  * Pre-patch state the sampler reads. An effect that mutates geometry (relief) serves positions
@@ -225,7 +256,11 @@ class CurvePatchSampler {
                      * WITH a texture and no pool dereferenced null here, while a brush without one
                      * passed -- a defect no ordinary check catches. See
                      * #SculptSession::tex_pool_ensure. */
-                    ImagePool &tex_pool);
+                    ImagePool &tex_pool,
+                    /* Resolves which slot is the Mask: Sculpt Mode uses #Brush.mtex, the image
+                     * editor #Brush.mask_mtex. Defaults to Sculpt because that is where the patch
+                     * was born; the 2D writer passes #OB_MODE_TEXTURE_PAINT. */
+                    eObjectMode object_mode = OB_MODE_SCULPT);
 
   /** Read-only and thread-safe; `thread_id` indexes the texture pool's per-thread slot. */
   std::optional<CurvePatchSample> sample(int idx, int thread_id) const;
@@ -266,6 +301,16 @@ class CurvePatchSampler {
 #endif
 
  private:
+  /**
+   * Mask slot coverage at \a uv, in the patch's own `[-1, 1]` frame. Returns 1 when no Mask
+   * texture is assigned. Uses the Area-plane sampler of the mode-resolved Mask slot (#Brush.mtex
+   * in Sculpt, #Brush.mask_mtex otherwise) so Size / Offset, rotation, the rectangle clip shape,
+   * static flips, the sample bias and the slot's invert all behave exactly as they do for a dab.
+   * Pressure masking and the per-dab random influence are deliberately absent: a patch has no dab
+   * and no stroke RNG.
+   */
+  float mask_coverage_at(const float2 &uv, int thread_id) const;
+
   const CurvePatchItem &item_;
   const CurvePatchTextureBinding &texture_;
   const CurvePatchStrokeContext &ctx_;
@@ -280,6 +325,17 @@ class CurvePatchSampler {
   float end_endpoint_radius_;
   float2 mtex_size_;
   float2 mtex_ofs_;
+  /** Mask slot aspect correction, resolved once per sampler. The Mask is sampled in the patch's
+   * own UV frame, so its Size / Offset / rotation / flips still apply, but the coordinates come
+   * from the ribbon or the stamp rather than from the brush's view/area mapping. */
+  float2 mask_aspect_{1.0f};
+  /** The mode-resolved Mask slot this sampler reads (#Brush.mtex in Sculpt, #Brush.mask_mtex
+   * elsewhere), including which invert and flip contract applies. */
+  BrushMaskSlotView mask_slot_;
+  /** One resolved spatial Mask sampler for the whole chunk: the corrected map, its image
+   * identity and the pointwise stack are fixed for this patch, so neither `prepare()` nor the
+   * cache lookup runs per covered element. */
+  BrushMaskCorrectionSampler mask_correction_sampler_;
   /** Coverage of a tex-less PBR / Material slot: the Base Color alpha. */
   struct PbrMask {
     /** Null for a constant Base Color. */

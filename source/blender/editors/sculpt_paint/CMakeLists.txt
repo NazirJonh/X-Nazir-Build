@@ -478,6 +478,7 @@ if(WITH_GTESTS)
     mesh/sculpt_layer_mask_test.cc
     mesh/sculpt_undo_test.cc
     paint_curve_geometry_test.cc
+    paint_curve_patch_mask_test.cc
     paint_curve_patch_sampler_test.cc
     paint_image_curve_patch_raster_test.cc
     paint_curve_patch_session_test.cc

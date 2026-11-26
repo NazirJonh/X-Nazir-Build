@@ -34,6 +34,7 @@ enum ePaintMaterialEraseMode : int8_t;
 struct Brush;
 struct BrushCurvePatchSlotChannel;
 struct BrushCurvePatchTextureSlot;
+class BrushMaskCorrectionSampler;
 struct BrushMaterialPaint;
 struct ImBuf;
 struct Image;
@@ -438,7 +439,9 @@ enum class eBrushTextureSlot {
  * \a slot states what \a mtex is: it decides the flip contract (static bits plus, for the Brush
  * and Mask slots, the stroke's random flip) and whether the brush texture's invert applies, and
  * cannot be overridden per call — see #eBrushTextureSlot. The invert runs before
- * #Brush::texture_sample_bias, the order every sampler in this module keeps.
+ * #Brush::texture_sample_bias, the order every sampler in this module keeps. The Mask slot's bias
+ * is intentionally left to its caller, after channel selection, see
+ * #BKE_brush_mask_tex_bias_apply; the brush texture keeps the historical pre-channel addition.
  */
 float BKE_brush_sample_tex_3d(const Paint *paint,
                               const Brush *br,
@@ -457,9 +460,18 @@ float BKE_brush_sample_tex_3d(const Paint *paint,
  * stroke, and between dabs, the runtime value is 1.0 and the coverage is the configured one.
  * Callers that preview the mask while a stroke is running must not use this function (see
  * #BKE_brush_mask_tex_area_coverage's \a apply_influence_random).
+ *
+ * \param correction_sampler: Optional #BrushMaskCorrectionSampler resolved for the same \a br and
+ * Mask slot. Hot stroke loops pass one so `prepare()`, the identity hash, the image acquire and
+ * the cache lookup are not paid per texel; a null pointer keeps the one-shot contract.
  */
 float BKE_brush_sample_masktex(
-    const Paint *paint, Brush *br, const float2 &point, int thread, ImagePool *pool);
+    const Paint *paint,
+    Brush *br,
+    const float2 &point,
+    int thread,
+    ImagePool *pool,
+    const BrushMaskCorrectionSampler *correction_sampler = nullptr);
 
 /**
  * Whether the \a slot's texture mirrors its sampled coordinates on X/Y: the slot's static flip
@@ -526,6 +538,18 @@ void BKE_brush_texture_invert_apply(eBrushTextureSlot slot,
                                     float r_rgba[4]);
 
 /**
+ * The Mask slot's #Brush::texture_sample_bias contract: subtract the bias from the
+ * channel-selected coverage and clamp to [0, 1].
+ *
+ * One helper so the region (#BKE_brush_sample_masktex), Area
+ * (#BKE_brush_mask_tex_area_coverage_slot) and 3D mask paths agree on both sign and order. The
+ * bias runs after channel selection (the channel decides what "coverage" means) and before
+ * pressure, the slot's invert and the pointwise correction. The brush texture (non-Mask) keeps
+ * its historical pre-channel `+=` order in #BKE_brush_sample_tex_3d.
+ */
+float BKE_brush_mask_tex_bias_apply(const Brush &brush, float value);
+
+/**
  * Applies the RAMP/CUTOFF #Brush.mask_pressure curve to a Mask Texture sample. Shared by
  * #BKE_brush_sample_masktex and the PBR stroke paths that sample #Brush.mask_mtex with
  * surface-mapped coordinates. The slot's own invert is applied afterward by
@@ -548,8 +572,9 @@ float BKE_brush_mask_tex_influence_apply(const Paint *paint, float coverage);
 
 /**
  * The one clamp-then-mirror rule for Mask Texture coverage: clamped to 0..1, then inverted
- * (`1 - c`) when \a invert is set. Shared by the Mask slot (#Brush.mask_mtex) and the Mask Source
- * coverage (#material::mask_coverage_finish), so neither path reimplements the formula.
+ * (`1 - c`) when \a invert is set. Shared by the mode-resolved Mask slot (#Brush.mtex in Sculpt,
+ * #Brush.mask_mtex elsewhere) and the Mask Source coverage
+ * (#material::mask_coverage_finish), so neither path reimplements the formula.
  */
 inline float BKE_brush_mask_coverage_finish(const bool invert, const float raw)
 {
@@ -558,13 +583,15 @@ inline float BKE_brush_mask_coverage_finish(const bool invert, const float raw)
 }
 
 /**
- * Whether the Mask slot (#Brush.mask_mtex) mirrors its coverage: #Brush.use_mask_texture_invert,
- * stored in #Brush.flag2 as #BRUSH_MASK_TEXTURE_INVERT. Independent of the Mask Source's invert.
+ * Whether the non-Sculpt Mask slot (#Brush.mask_mtex) mirrors its coverage:
+ * #Brush.use_mask_texture_invert, stored in #Brush.flag2 as #BRUSH_MASK_TEXTURE_INVERT. Sculpt uses
+ * the brush texture's #BRUSH_TEXTURE_INVERT instead, see #BKE_brush_mask_slot_view_get. Independent
+ * of the Mask Source's invert.
  * Defined in brush.cc so this header does not need the full #Brush definition.
  */
 bool BKE_brush_mask_texture_invert_get(const Brush &brush);
 
-/** #BKE_brush_mask_coverage_finish applied with the Mask slot's own invert. */
+/** #BKE_brush_mask_coverage_finish applied with the non-Sculpt Mask slot's own invert. */
 float BKE_brush_mask_tex_coverage_finish(const Brush &brush, float raw);
 
 namespace bke {
@@ -634,6 +661,10 @@ class BrushMaskLut {
  * #bke::PaintRuntime::mask_influence_random_value (see #BKE_brush_mask_tex_influence_apply).
  * Overlay previews pass false: the random factor is per dab and must not make the cursor show a
  * different mask than the one the user configured.
+ * \param correction_sampler: Optional #BrushMaskCorrectionSampler resolved for the same \a brush
+ * and Mask slot. A hot loop resolves it once and reuses it for every element, so the correction's
+ * prepared data, hash, image acquire and map lookup are not paid per sample. It must have been
+ * resolved with the slot this function samples; null resolves one locally.
  *
  * The Mask slot's flip contract (static bits plus the stroke's random flip, see
  * #BKE_brush_mtex_flip_x) is applied to the query coordinates before the LUT or texture
@@ -649,7 +680,33 @@ float BKE_brush_mask_tex_area_coverage(const Brush &brush,
                                        int thread,
                                        ImagePool *pool,
                                        const bke::BrushMaskLut *lut = nullptr,
-                                       bool apply_influence_random = true);
+                                       bool apply_influence_random = true,
+                                       const BrushMaskCorrectionSampler *correction_sampler =
+                                           nullptr);
+
+/**
+ * The slot-aware form of #BKE_brush_mask_tex_area_coverage: samples \a mtex through \a slot and
+ * applies \a invert as the slot's own mirror. Callers that resolve the Mask slot by object mode
+ * pass the result of #BKE_brush_mask_slot_view_get; the legacy wrapper above keeps the Image
+ * Paint slot (#Brush.mask_mtex) for the existing region-mode callers.
+ *
+ * \param correction_sampler: See #BKE_brush_mask_tex_area_coverage. It must have been resolved
+ * for the same \a mtex; Curve Patch resolves one per sampler instead of per covered element.
+ */
+float BKE_brush_mask_tex_area_coverage_slot(const Brush &brush,
+                                            const MTex &mtex,
+                                            eBrushTextureSlot slot,
+                                            bool invert,
+                                            const Paint *paint,
+                                            const float2 &local,
+                                            float rake_rotation,
+                                            const float2 &aspect_correction,
+                                            int thread,
+                                            ImagePool *pool,
+                                            const bke::BrushMaskLut *lut = nullptr,
+                                            bool apply_influence_random = true,
+                                            const BrushMaskCorrectionSampler *correction_sampler =
+                                                nullptr);
 
 /**
  * Scale to apply to the texture sampling coordinates so that a non-square image texture keeps its
@@ -675,6 +732,20 @@ void BKE_brush_tex_aspect_correction_update(const Paint &paint, const Brush &bru
  * attributes got switched in sculpt mode.
  */
 const MTex *BKE_brush_mask_texture_get(const Brush *brush, eObjectMode object_mode);
+
+/**
+ * The mode-aware Mask slot, resolved in one place: in Sculpt Mode the legacy convention swaps the
+ * slots, so the Mask is #Brush.mtex sampled through #eBrushTextureSlot::Brush and mirrored by the
+ * brush texture's #BRUSH_TEXTURE_INVERT; everywhere else it is #Brush.mask_mtex sampled through
+ * #eBrushTextureSlot::Mask and mirrored by #BRUSH_MASK_TEXTURE_INVERT.
+ */
+struct BrushMaskSlotView {
+  const MTex *mtex = nullptr;
+  eBrushTextureSlot slot = eBrushTextureSlot::Mask;
+  bool invert = false;
+};
+
+BrushMaskSlotView BKE_brush_mask_slot_view_get(const Brush &brush, eObjectMode object_mode);
 
 /**
  * Get the color texture for this given object mode.

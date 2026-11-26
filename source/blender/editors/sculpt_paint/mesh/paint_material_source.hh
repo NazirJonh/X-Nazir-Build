@@ -193,6 +193,10 @@ std::optional<eMaterialPaintChannel> mask_source_channel_get(const BrushMaterial
  * \param lut: stroke-lifetime Mask table, see #bke::BrushMaskLut; used by the Area mapping only.
  * \param view_point_2d: region-space position for the non-Area modes; a negative component means
  *                       "unavailable", and the Area mapping is used instead.
+ * \param correction_sampler: Optional #BrushMaskCorrectionSampler resolved for this Mask slot and
+ *                            brush. A per-texel loop (a dab, a Curve Patch chunk) resolves it
+ *                            once so the correction's prepared stack and spatial map are not
+ *                            rebuilt for every texel. Null resolves one locally.
  * \return coverage in [0, 1]; 1 when no Mask texture is assigned, so an absent Mask never clips.
  */
 float paint_mask_texture_coverage(const Brush &brush,
@@ -202,7 +206,8 @@ float paint_mask_texture_coverage(const Brush &brush,
                                   const float2 &view_point_2d,
                                   int thread,
                                   ImagePool *pool,
-                                  const bke::BrushMaskLut *lut = nullptr);
+                                  const bke::BrushMaskLut *lut = nullptr,
+                                  const BrushMaskCorrectionSampler *correction_sampler = nullptr);
 
 /**
  * Whether \a channel's sampled texture can be inverted by #BrushMaterialPaintChannel.source_invert:

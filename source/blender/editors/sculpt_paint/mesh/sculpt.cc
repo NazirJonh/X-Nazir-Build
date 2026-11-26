@@ -3791,6 +3791,21 @@ void sculpt_apply_texture(const SculptSession &ss,
    * samples the brush texture slot: both its flip and its invert apply. */
   sculpt_sample_brush_mtex(
       ss, brush, mtex, eBrushTextureSlot::Brush, brush_point, thread_id, r_value, r_rgba);
+
+  /* "Correction Image" also applies to the ordinary Sculpt Mask stroke, whose mask is this legacy
+   * brush texture. The sampler is resolved once per stroke (#StrokeCache) so this hot per-vertex
+   * path only evaluates the snapshot: raw sample (brush invert and bias already applied above) →
+   * channel selection → pointwise stack, with no stage applied twice. Only the scalar coverage is
+   * corrected: `r_rgba` stays the texture's own color for callers that read it (vector
+   * displacement), not a mask value. */
+  if (ss.cache != nullptr && ss.cache->mask_correction_sampler.has_value()) {
+    const BrushMaskCorrectionSampler &sampler = *ss.cache->mask_correction_sampler;
+    if (sampler.enabled()) {
+      const float rgba_array[4] = {r_rgba.x, r_rgba.y, r_rgba.z, r_rgba.w};
+      *r_value = BKE_brush_mask_correction_channel_value_for_brush(brush, *r_value, rgba_array);
+      *r_value = sampler.apply_pointwise(*r_value);
+    }
+  }
 }
 
 bool sculpt_sample_face_set_color_texture(const SculptSession &ss,
@@ -8556,6 +8571,10 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
     ss.cache->brush = brush;
   }
 
+  /* Never carry a previous stroke's correction snapshot into the next one; #stroke_cache_init
+   * resolves the current one once the stroke actually starts. */
+  ss.cache->mask_correction_sampler.reset();
+
   const Scene *scene = CTX_data_scene(C);
   if (scene && cursor::is_enabled(*scene)) {
     const cursor::CursorState cursor_state = cursor::state_get(*scene, ob);
@@ -9623,6 +9642,19 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
     cache->vc = vc;
     cache->brush = brush;
     cache->paint = this->paint;
+
+    /* Resolve the legacy Sculpt Mask slot's correction once per stroke (per object), so the
+     * per-vertex texture path only reads a ready snapshot instead of rebuilding the stack and
+     * copying the curve for every sample. Immutable afterwards: the stroke's worker threads share
+     * it. */
+    cache->mask_correction_sampler.reset();
+    if (brush != nullptr && BKE_brush_mask_correction_active(*brush)) {
+      const MTex *mask_tex = BKE_brush_mask_texture_get(brush, OB_MODE_SCULPT);
+      if (mask_tex->tex != nullptr) {
+        cache->mask_correction_sampler = BrushMaskCorrectionSampler::resolve(
+            *brush, *mask_tex, &ss.tex_pool_ensure());
+      }
+    }
 
     /* Cache projection matrix. */
     cache->projection_mat = ED_view3d_ob_project_mat_get(cache->vc->rv3d, &ob);

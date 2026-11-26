@@ -48,6 +48,7 @@
 
 #include "BKE_attribute.hh"
 #include "BKE_brush.hh"
+#include "BKE_brush_mask_correction.hh"
 #include "BKE_image.hh"
 #include "BKE_image_paint_selection.hh"
 #include "BKE_image_wrappers.hh"
@@ -1643,6 +1644,14 @@ static Array<RowFactorCache> compute_paint_row_factors(
               const Span<material::TexelSampleContext> contexts =
                   tile_cache.row_contexts[row_i].as_span().slice(range);
               const int thread_id = BLI_task_parallel_thread_id(nullptr);
+              /* Resolve the Mask correction once for this chunk: the texel loop must not rebuild
+               * its prepared stack or look the spatial map up per element. */
+              BrushMaskCorrectionSampler correction_sampler =
+                  BKE_brush_mask_correction_active(brush) ?
+                      BrushMaskCorrectionSampler::resolve(brush, brush.mask_mtex, ss.tex_pool()) :
+                      BrushMaskCorrectionSampler();
+              const BrushMaskCorrectionSampler *correction_sampler_ptr =
+                  correction_sampler.enabled() ? &correction_sampler : nullptr;
               for (const int i : range.index_range()) {
                 if (factors[i] == 0.0f) {
                   continue;
@@ -1657,7 +1666,8 @@ static Array<RowFactorCache> compute_paint_row_factors(
                     contexts[i].view_point_2d,
                     thread_id,
                     ss.tex_pool(),
-                    cache.mask_lut.get());
+                    cache.mask_lut.get(),
+                    correction_sampler_ptr);
               }
             }
 

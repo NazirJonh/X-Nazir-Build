@@ -74,6 +74,7 @@ set(SRC
   intern/brush.cc
   intern/brush_layer_source.cc
   intern/brush_material_correction.cc
+  intern/brush_mask_correction.cc
   intern/bvhutils.cc
   intern/cachefile.cc
   intern/callbacks.cc
@@ -466,6 +467,7 @@ set(SRC
   BKE_bpath.hh
   BKE_brush.hh
   BKE_brush_material_correction.hh
+  BKE_brush_mask_correction.hh
   BKE_bvhutils.hh
   BKE_cachefile.hh
   BKE_callbacks.hh
@@ -909,6 +911,7 @@ if(WITH_GTESTS)
     intern/attribute_storage_test.cc
     intern/bake_items_serialize_test.cc
     intern/bpath_test.cc
+    intern/brush_mask_correction_test.cc
     intern/brush_test.cc
     intern/cryptomatte_test.cc
     intern/curve_patch_build_test.cc

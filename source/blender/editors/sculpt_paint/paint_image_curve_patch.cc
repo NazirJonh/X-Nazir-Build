@@ -41,6 +41,7 @@
 #include "DNA_brush_types.h"
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
+#include "DNA_object_enums.h"
 #include "DNA_paint_vector_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
@@ -434,7 +435,7 @@ static CurvePatchLiveInputs image_curve_patch_live_inputs_capture(ImageCurvePatc
   r_params = image_curve_patch_params_resolve(session, paint, brush, session.doc.active_item());
   r_params.final_quality = false;
 
-  CurvePatchLiveInputs in = curve_patch_live_inputs_capture(paint, brush);
+  CurvePatchLiveInputs in = curve_patch_live_inputs_capture(paint, brush, OB_MODE_TEXTURE_PAINT);
   in.blend = brush.blend;
   /* Toggling Symmetry X/Y mid-session does not touch the Brush at all -- #symmetry_flags lives on
    * `Paint` -- so without this the watchdog's compare never changed and the checkbox had no effect

@@ -170,7 +170,7 @@ static CurvePatchLiveInputs curve_patch_live_inputs_capture_sculpt(const Paint &
                                                                    const Brush &brush,
                                                                    const Object &ob)
 {
-  CurvePatchLiveInputs in = curve_patch_live_inputs_capture(paint, brush);
+  CurvePatchLiveInputs in = curve_patch_live_inputs_capture(paint, brush, OB_MODE_SCULPT);
   in.symm = mesh_symmetry_xyz_get(ob);
   return in;
 }

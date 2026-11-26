@@ -532,8 +532,9 @@ void BKE_paint_layers_input_transforms_get(const Material &ma,
 /**
  * Render the slice \a reader lays in \a channel on the context's tile, at the source row's
  * resolution for that tile. The buffers are reference counted and outlive the slice cache; \a
- * dst_rect limits a partial render to that rectangle, leaving the rest zero, and is never cached.
- * Each tile is its own cache entry. Used by the developer GPU verification.
+ * r_color is RGBA and \a r_coverage is a one-float-per-texel grey. \a dst_rect limits a partial
+ * render to that rectangle, leaving the rest zero, and is never cached. Each tile is its own cache
+ * entry. Used by the developer GPU verification.
  */
 bool BKE_paint_layers_slice_render(const Material &ma,
                                    const MaterialPaintLayer &reader,

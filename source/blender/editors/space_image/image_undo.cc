@@ -31,8 +31,10 @@
 #include "BLI_listbase_wrapper.hh"
 #include "BLI_map.hh"
 #include "BLI_math_base.h"
+#include "BLI_math_half.hh"
 #include "BLI_math_vector.hh"
 #include "BLI_rect.h"
+#include "BLI_set.hh"
 #include "BLI_string.h"
 #include "BLI_threads.h"
 #include "BLI_utildefines.h"
@@ -53,6 +55,7 @@
 #include "BKE_image_paint_selection.hh"
 #include "BKE_main.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 #include "BKE_undo_system.hh"
@@ -385,16 +388,41 @@ static uint32_t index_from_xy(uint32_t tile_x, uint32_t tile_y, const uint32_t t
 }
 
 struct UndoImageTile {
+  /** Float or byte tile. Null when #half stores the pixels (a paint layer's own float map). */
   ImBuf *ibuf;
+  /** FP16 storage, #channels per texel, row stride #ED_IMAGE_UNDO_TILE_SIZE. Half the memory of
+   * the float tile for the stack's internal paint maps; null for every other tile. */
+  uint16_t *half = nullptr;
+  /** Channels the tile was allocated with (float/half tiles only). */
+  int channels = 0;
   int users;
 };
 
-static UndoImageTile *utile_alloc(bool has_float)
+/** Whether \a image's float pixels can be kept as FP16 in undo: only the maps the Paint Layers
+ * stack minted for itself (a painted row's channel map, a normal-to-mask bake). A user-assigned
+ * HDR image keeps full float, so Image Editor undo of generic images stays exact. */
+static bool utile_can_store_half(const Image &image, const ImBuf &ibuf)
 {
-  UndoImageTile *utile = MEM_new_zeroed<UndoImageTile>("ImageUndoTile");
+  return ibuf.float_data() != nullptr && ibuf.channels == 4 &&
+         BKE_paint_layers_image_is_internal(image);
+}
+
+static UndoImageTile *utile_alloc(const bool has_float,
+                                  const bool use_half,
+                                  const int channels)
+{
+  UndoImageTile *utile = MEM_new<UndoImageTile>(__func__);
+  if (use_half) {
+    BLI_assert(has_float);
+    utile->channels = channels;
+    utile->half = MEM_new_array_uninitialized<uint16_t>(
+        size_t(ED_IMAGE_UNDO_TILE_SIZE) * ED_IMAGE_UNDO_TILE_SIZE * size_t(channels), __func__);
+    return utile;
+  }
   utile->ibuf = IMB_allocImBuf(ED_IMAGE_UNDO_TILE_SIZE,
                                ED_IMAGE_UNDO_TILE_SIZE,
                                has_float ? ImBufFlags::FloatData : ImBufFlags::ByteData);
+  utile->channels = has_float ? channels : 4;
   return utile;
 }
 
@@ -406,7 +434,19 @@ static void utile_init_from_imbuf(UndoImageTile *utile,
   int2 tile_pos;
   int2 tile_copy_size;
   calc_tile_rect(*ibuf, x_tile, y_tile, tile_pos, tile_copy_size);
-  if (ibuf->float_data()) {
+  if (utile->half != nullptr) {
+    const int channels = utile->channels;
+    BLI_assert(channels == ibuf->channels);
+    const float *src = ibuf->float_data();
+    for (int ty = 0; ty < tile_copy_size.y; ty++) {
+      const int64_t src_offset = (int64_t(tile_pos.y + ty) * ibuf->x + tile_pos.x) * channels;
+      const int64_t dst_offset = int64_t(ty) * ED_IMAGE_UNDO_TILE_SIZE * channels;
+      math::float_to_half_array(src + src_offset,
+                          utile->half + dst_offset,
+                          size_t(tile_copy_size.x) * channels);
+    }
+  }
+  else if (ibuf->float_data()) {
     IMB_copy_rect(utile->ibuf->float_data_for_write(),
                   int2(ED_IMAGE_UNDO_TILE_SIZE),
                   ibuf->float_data(),
@@ -435,7 +475,19 @@ static void utile_restore(const UndoImageTile *utile,
   int2 tile_pos;
   int2 tile_copy_size;
   calc_tile_rect(*ibuf, x_tile, y_tile, tile_pos, tile_copy_size);
-  if (ibuf->float_data()) {
+  if (utile->half != nullptr) {
+    const int channels = utile->channels;
+    BLI_assert(channels == ibuf->channels);
+    float *dst = ibuf->float_data_for_write();
+    for (int ty = 0; ty < tile_copy_size.y; ty++) {
+      const int64_t src_offset = int64_t(ty) * ED_IMAGE_UNDO_TILE_SIZE * channels;
+      const int64_t dst_offset = (int64_t(tile_pos.y + ty) * ibuf->x + tile_pos.x) * channels;
+      math::half_to_float_array(utile->half + src_offset,
+                          dst + dst_offset,
+                          size_t(tile_copy_size.x) * channels);
+    }
+  }
+  else if (ibuf->float_data()) {
     IMB_copy_rect(ibuf->float_data_for_write(),
                   int2(ibuf->x, ibuf->y),
                   utile->ibuf->float_data(),
@@ -473,9 +525,25 @@ static void utile_decref(UndoImageTile *utile)
   utile->users -= 1;
   BLI_assert(utile->users >= 0);
   if (utile->users == 0) {
-    IMB_freeImBuf(utile->ibuf);
+    if (utile->half != nullptr) {
+      MEM_delete(utile->half);
+    }
+    if (utile->ibuf != nullptr) {
+      IMB_freeImBuf(utile->ibuf);
+    }
     MEM_delete(utile);
   }
+}
+
+/** The bytes one tile holds, for the undo stack's `data_size` (#U.undomemory). */
+static size_t utile_storage_bytes(const UndoImageTile &utile)
+{
+  if (utile.half != nullptr) {
+    return sizeof(UndoImageTile) +
+           size_t(ED_IMAGE_UNDO_TILE_SIZE) * ED_IMAGE_UNDO_TILE_SIZE * size_t(utile.channels) *
+               sizeof(uint16_t);
+  }
+  return sizeof(UndoImageTile) + (utile.ibuf != nullptr ? IMB_get_size_in_memory(utile.ibuf) : 0);
 }
 
 /** \} */
@@ -531,7 +599,9 @@ static UndoImageBuf *ubuf_from_image_no_tiles(Image *image, const ImBuf *ibuf)
   return ubuf;
 }
 
-static void ubuf_from_image_all_tiles(UndoImageBuf *ubuf, const ImBuf *ibuf)
+static void ubuf_from_image_all_tiles(UndoImageBuf *ubuf,
+                                      const ImBuf *ibuf,
+                                      const bool use_half)
 {
   const bool has_float = ibuf->float_data();
   int i = 0;
@@ -539,7 +609,7 @@ static void ubuf_from_image_all_tiles(UndoImageBuf *ubuf, const ImBuf *ibuf)
     for (uint x_tile = 0; x_tile < ubuf->tiles_dims[0]; x_tile += 1) {
 
       BLI_assert(ubuf->tiles[i] == nullptr);
-      UndoImageTile *utile = utile_alloc(has_float);
+      UndoImageTile *utile = utile_alloc(has_float, use_half, ibuf->channels);
       utile->users = 1;
       utile_init_from_imbuf(utile, x_tile, y_tile, ibuf);
       ubuf->tiles[i] = utile;
@@ -1061,10 +1131,24 @@ static bool image_undosys_step_encode(bContext *C, Main * /*bmain*/, UndoStep *u
         UndoImageHandle *uh = uhandle_ensure(&us->handles, ptile->image, &ptile->iuser);
         UndoImageBuf *ubuf_pre = uhandle_ensure_ubuf(uh, ptile->image, ptile->ibuf);
 
-        UndoImageTile *utile = MEM_new_zeroed<UndoImageTile>("UndoImageTile");
-        utile->users = 1;
-        utile->ibuf = ptile->ptile_ibuf;
-        ptile->ptile_ibuf = nullptr;
+        UndoImageTile *utile = nullptr;
+        const bool half = utile_can_store_half(*ptile->image, *ptile->ptile_ibuf);
+        if (half) {
+          /* The paint tile is a float ImBuf; keep its pixels as FP16 like every other tile of this
+           * stack-owned map, instead of adopting the full float buffer. */
+          utile = utile_alloc(true, true, ptile->ptile_ibuf->channels);
+          utile->users = 1;
+          utile_init_from_imbuf(utile, ptile->x_tile, ptile->y_tile, ptile->ptile_ibuf);
+          IMB_freeImBuf(ptile->ptile_ibuf);
+          ptile->ptile_ibuf = nullptr;
+        }
+        else {
+          utile = MEM_new<UndoImageTile>(__func__);
+          utile->users = 1;
+          utile->ibuf = ptile->ptile_ibuf;
+          utile->channels = ptile->ptile_ibuf->channels;
+          ptile->ptile_ibuf = nullptr;
+        }
         const uint tile_index = index_from_xy(ptile->x_tile, ptile->y_tile, ubuf_pre->tiles_dims);
 
         BLI_assert(ubuf_pre->tiles[tile_index] == nullptr);
@@ -1110,6 +1194,7 @@ static bool image_undosys_step_encode(bContext *C, Main * /*bmain*/, UndoStep *u
         ImBuf *ibuf = BKE_image_acquire_ibuf(uh.image_ref.ptr, &uh.iuser, nullptr);
 
         const bool has_float = ibuf->float_data();
+        const bool use_half = has_float && utile_can_store_half(*uh.image_ref.ptr, *ibuf);
 
         BLI_assert(ubuf_pre.post == nullptr);
         ubuf_pre.post = ubuf_from_image_no_tiles(uh.image_ref.ptr, ibuf);
@@ -1118,7 +1203,7 @@ static bool image_undosys_step_encode(bContext *C, Main * /*bmain*/, UndoStep *u
         if (ubuf_pre.image_dims[0] != ubuf_post->image_dims[0] ||
             ubuf_pre.image_dims[1] != ubuf_post->image_dims[1])
         {
-          ubuf_from_image_all_tiles(ubuf_post, ibuf);
+          ubuf_from_image_all_tiles(ubuf_post, ibuf, use_half);
         }
         else {
           /* Search for the previous buffer. */
@@ -1148,7 +1233,7 @@ static bool image_undosys_step_encode(bContext *C, Main * /*bmain*/, UndoStep *u
                 else {
                   /* No earlier copy for this tile: keep the adopted pre-state and copy the current
                    * pixels into a fresh post-state tile. */
-                  UndoImageTile *utile = utile_alloc(has_float);
+                  UndoImageTile *utile = utile_alloc(has_float, use_half, ibuf->channels);
                   utile_init_from_imbuf(utile, x_tile, y_tile, ibuf);
                   ubuf_post->tiles[i] = utile;
                   utile->users = 1;
@@ -1201,6 +1286,32 @@ static bool image_undosys_step_encode(bContext *C, Main * /*bmain*/, UndoStep *u
     PaintMode paint_mode = BKE_paintmode_get_active_from_context(C);
     BLI_assert(ELEM(paint_mode, PaintMode::Texture2D, PaintMode::Texture3D));
     us->paint_mode = paint_mode;
+  }
+
+  /* Account this step's tile storage for #U.undomemory. A tile shared with an earlier step is
+   * counted again here; the memory limit is a ceiling, so the conservative over-count only trims
+   * earlier steps. */
+  {
+    Set<const UndoImageTile *> counted;
+    size_t bytes = 0;
+    const auto count_buffer = [&](const UndoImageBuf *buf) {
+      if (buf == nullptr) {
+        return;
+      }
+      for (uint i = 0; i < buf->tiles_len; i++) {
+        const UndoImageTile *tile = buf->tiles[i];
+        if (tile != nullptr && counted.add(tile)) {
+          bytes += utile_storage_bytes(*tile);
+        }
+      }
+    };
+    for (const UndoImageHandle &uh : us->handles) {
+      for (const UndoImageBuf &ubuf : uh.buffers) {
+        count_buffer(&ubuf);
+        count_buffer(ubuf.post);
+      }
+    }
+    us->step.data_size = bytes;
   }
 
   us_p->is_applied = true;
@@ -1510,6 +1621,7 @@ void ED_image_undo_push(Image *image, ImBuf *ibuf, ImageUser *iuser, ImageUndoSt
   if (ubuf_reference) {
     memcpy(ubuf_pre->tiles, ubuf_reference->tiles, sizeof(*ubuf_pre->tiles) * ubuf_pre->tiles_len);
     const bool has_float = ibuf->float_data();
+    const bool use_half = has_float && utile_can_store_half(*image, *ibuf);
     int i = 0;
     for (uint y_tile = 0; y_tile < ubuf_pre->tiles_dims[1]; y_tile += 1) {
       for (uint x_tile = 0; x_tile < ubuf_pre->tiles_dims[0]; x_tile += 1) {
@@ -1521,7 +1633,7 @@ void ED_image_undo_push(Image *image, ImBuf *ibuf, ImageUser *iuser, ImageUndoSt
           /* The reference leaves untouched tiles null (see #image_undosys_step_encode), but this
            * is a full push: an operation over the whole image (a fill, a selection op) changes the
            * untouched tiles too, so their pre-state is captured from the live pixels as well. */
-          utile = utile_alloc(has_float);
+          utile = utile_alloc(has_float, use_half, ibuf->channels);
           utile->users = 1;
           utile_init_from_imbuf(utile, x_tile, y_tile, ibuf);
           ubuf_pre->tiles[i] = utile;
@@ -1532,7 +1644,9 @@ void ED_image_undo_push(Image *image, ImBuf *ibuf, ImageUser *iuser, ImageUndoSt
     BLI_assert(i == ubuf_pre->tiles_len);
   }
   else {
-    ubuf_from_image_all_tiles(ubuf_pre, ibuf);
+    ubuf_from_image_all_tiles(ubuf_pre,
+                              ibuf,
+                              ibuf->float_data() && utile_can_store_half(*image, *ibuf));
   }
 }
 

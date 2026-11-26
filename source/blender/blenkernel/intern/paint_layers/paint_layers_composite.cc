@@ -3359,11 +3359,11 @@ static void anchor_slice_images_get(const Material &ma,
 }
 
 /**
- * Total memory the slice cache may hold, counted as it is allocated: a colour and a coverage buffer
- * of four floats per pixel each, so one 4K pair is 512 MiB. A composite of the shaded channels
- * needs one pair per channel of a reader at once, and an entry evicted between two channels is
- * rendered whole again; 4 GiB holds the working set of a reader at 4K and keeps the few most
- * recent others. A pair larger than the budget is never cached.
+ * Total memory the slice cache may hold, counted as it is allocated: a colour buffer of four floats
+ * per pixel and a coverage buffer of one, so one 4K pair is 320 MiB. A composite of the shaded
+ * channels needs one pair per channel of a reader at once, and an entry evicted between two
+ * channels is rendered whole again; 4 GiB holds the working set of a reader at 4K and keeps the
+ * few most recent others. A pair larger than the budget is never cached.
  */
 constexpr size_t PAINT_LAYER_ANCHOR_SLICE_CACHE_BYTES =
     size_t(bke::paint_cache::anchor_slice_cache_default_bytes);
@@ -3385,10 +3385,10 @@ static size_t anchor_slice_color_bytes(const ImBuf *ibuf)
   return ibuf != nullptr ? size_t(ibuf->x) * size_t(ibuf->y) * sizeof(float[4]) : 0;
 }
 
-/** Coverage is stored as RGBA too: consumers read every channel. */
+/** Coverage is one float per texel: the slice's content coverage is a scalar plane. */
 static size_t anchor_slice_coverage_bytes(const ImBuf *ibuf)
 {
-  return ibuf != nullptr ? size_t(ibuf->x) * size_t(ibuf->y) * sizeof(float[4]) : 0;
+  return ibuf != nullptr ? size_t(ibuf->x) * size_t(ibuf->y) * sizeof(float) : 0;
 }
 
 /** The cache owns references only; dropping an entry simply releases them. */
@@ -3516,11 +3516,18 @@ static bool paint_layer_chain_member_dimensions_resolve(
   return true;
 }
 
-/** An RGBA float buffer of \a width x \a height, owned by the returned shared pointer. */
-static std::shared_ptr<ImBuf> anchor_slice_buffer_new(const int width, const int height)
+/** A float buffer of \a width x \a height and \a channels, owned by the returned shared pointer.
+ * The colour slice uses four, the coverage one; both start zeroed. */
+static std::shared_ptr<ImBuf> anchor_slice_buffer_new(const int width,
+                                                      const int height,
+                                                      const int channels = 4)
 {
-  ImBuf *ibuf = IMB_allocImBuf(width, height, ImBufFlags::FloatData);
+  ImBuf *ibuf = IMB_allocImBuf(width, height, ImBufFlags::Zero);
   if (ibuf == nullptr) {
+    return {};
+  }
+  if (!IMB_alloc_float_pixels(ibuf, channels, /*initialize_pixels=*/true)) {
+    IMB_freeImBuf(ibuf);
     return {};
   }
   return std::shared_ptr<ImBuf>(ibuf, [](ImBuf *buffer) { IMB_freeImBuf(buffer); });
@@ -3560,9 +3567,10 @@ static void anchor_slice_buffers_clear_if_partial(const int *dst_rect,
   if (dst_rect == nullptr) {
     return;
   }
-  const size_t size = size_t(color.x) * color.y * sizeof(float[4]);
-  memset(color.float_data_for_write(), 0, size);
-  memset(coverage.float_data_for_write(), 0, size);
+  const size_t color_size = size_t(color.x) * color.y * sizeof(float[4]);
+  memset(color.float_data_for_write(), 0, color_size);
+  const size_t coverage_size = size_t(coverage.x) * coverage.y * sizeof(float);
+  memset(coverage.float_data_for_write(), 0, coverage_size);
 }
 
 int BKE_paint_layers_tile_resolve(const int tile_number,
@@ -3739,10 +3747,7 @@ static bool anchor_slice_fill(const Material &ma,
         color_pixels[index * 4 + 2] = gray;
         /* A mask point read as content is opaque grey; read as a mask item it is the scalar. */
         color_pixels[index * 4 + 3] = 1.0f;
-        coverage_pixels[index * 4 + 0] = 1.0f;
-        coverage_pixels[index * 4 + 1] = 1.0f;
-        coverage_pixels[index * 4 + 2] = 1.0f;
-        coverage_pixels[index * 4 + 3] = 1.0f;
+        coverage_pixels[index] = 1.0f;
       }
     }
     return true;
@@ -3797,12 +3802,8 @@ static bool anchor_slice_fill(const Material &ma,
       if (!full) {
         memcpy(color_pixels + dst * 4, region_color.data() + src * 4, sizeof(float[4]));
       }
-      /* The consumers read the coverage buffer as RGBA with the value in each colour channel. */
-      const float value = region_coverage[src];
-      coverage_pixels[dst * 4 + 0] = value;
-      coverage_pixels[dst * 4 + 1] = value;
-      coverage_pixels[dst * 4 + 2] = value;
-      coverage_pixels[dst * 4 + 3] = 1.0f;
+      /* The coverage is a scalar plane, one float per texel. */
+      coverage_pixels[dst] = region_coverage[src];
     }
   }
   return true;
@@ -3832,7 +3833,7 @@ static bool anchor_slice_render_new(const Material &ma,
     return false;
   }
   std::shared_ptr<ImBuf> color = anchor_slice_buffer_new(width, height);
-  std::shared_ptr<ImBuf> coverage = anchor_slice_buffer_new(width, height);
+  std::shared_ptr<ImBuf> coverage = anchor_slice_buffer_new(width, height, 1);
   if (color == nullptr || coverage == nullptr) {
     return false;
   }

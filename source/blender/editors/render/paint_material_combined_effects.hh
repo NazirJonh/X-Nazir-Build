@@ -414,9 +414,10 @@ struct EffectDispatchArgs {
    * The canvas texel the stage textures' origin sits at: an `input_tx`/`aux_tx`/intermediate
    * `result_img` texel is read or written at `texel - texture_origin` in `effect_comp`, while the
    * canvas arithmetic of the kernel (the noise grid, the block cut, the distance fields, every
-   * clamp) stays in canvas texels. Zero when the stage is the whole canvas -- the path every
-   * ordinary run takes, the regional input render being off unless `BLENDER_PBR_EFFECT_REGION`
-   * asks for it. A whole-canvas kind is never dispatched with a non-zero origin
+   * clamp) stays in canvas texels. Zero when the stage is the whole canvas (a first render, or a
+   * plan the guard refuses); non-zero only for a narrowed stage, which the regional input render
+   * runs by default (`BLENDER_PBR_EFFECT_REGION=0` turns it off). A whole-canvas kind is never
+   * dispatched with a non-zero origin
    * (#BKE_paint_layers_effect_input_region_supported refuses one).
    */
   int2 texture_origin = int2(0);

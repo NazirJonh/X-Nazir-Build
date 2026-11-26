@@ -834,6 +834,22 @@ static bool composite_ibuf_is_rgba(const ImBuf *ibuf, const int width, const int
 }
 
 /**
+ * A coverage buffer: the live slice's scalar plane (one float per texel) or an RGBA one from a map
+ * or a bake. The tile decode reads the first channel for either and expands a one-channel buffer
+ * as a grey, so both layouts are valid.
+ */
+static bool composite_ibuf_is_coverage(const ImBuf *ibuf, const int width, const int height)
+{
+  if (ibuf == nullptr || ibuf->x != width || ibuf->y != height) {
+    return false;
+  }
+  if (!ELEM(ibuf->channels, 0, 1, 4)) {
+    return false;
+  }
+  return ibuf->byte_buffer.data != nullptr || ibuf->float_buffer.data != nullptr;
+}
+
+/**
  * Whether \a ibuf is a readable RGBA buffer that a CPU-computed effect can be sampled from: the
  * stack's own dimensions for a whole-canvas result, or a cropped one whose origin places it inside
  * the stack. A cropped buffer is only ever sampled inside its covered rectangle.
@@ -1823,7 +1839,7 @@ static bool composite_layer_validate_linear(const PaintMaterialCompositeLayer &l
     return false;
   }
   if (layer.anchor_point_coverage != nullptr &&
-      !composite_ibuf_is_rgba(layer.anchor_point_coverage.get(), width, height))
+      !composite_ibuf_is_coverage(layer.anchor_point_coverage.get(), width, height))
   {
     return false;
   }
@@ -1873,7 +1889,7 @@ static bool composite_layer_validate_linear(const PaintMaterialCompositeLayer &l
       return false;
     }
     if (correction.anchor_point_coverage != nullptr &&
-        !composite_ibuf_is_rgba(correction.anchor_point_coverage, width, height))
+        !composite_ibuf_is_coverage(correction.anchor_point_coverage, width, height))
     {
       return false;
     }

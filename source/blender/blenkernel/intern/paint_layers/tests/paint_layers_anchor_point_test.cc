@@ -857,8 +857,10 @@ TEST_F(PaintLayersAnchorPointTest, slice_cache_counts_both_buffers_as_allocated)
   std::shared_ptr<ImBuf> coverage;
   ASSERT_TRUE(BKE_paint_layers_slice_render(
       *ma, *fixture.reader, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &color, &coverage));
-  EXPECT_EQ(paint_layer_anchor_point_slice_cache_bytes(), size_t(8) * 8 * 2 * sizeof(float[4]))
-      << "a colour and a coverage buffer of four floats per texel each";
+  EXPECT_EQ(paint_layer_anchor_point_slice_cache_bytes(),
+            size_t(8) * 8 * (sizeof(float[4]) + sizeof(float)))
+      << "a colour buffer of four floats and a coverage buffer of one per texel";
+  EXPECT_EQ(coverage->channels, 1) << "the coverage is a scalar plane";
   paint_layer_anchor_point_slice_cache_clear();
 }
 
@@ -917,7 +919,7 @@ TEST_F(PaintLayersAnchorPointTest, slice_cache_evicts_by_bytes)
                                             &color,
                                             &coverage));
   const size_t pair_bytes = size_t(color->x) * color->y * sizeof(float[4]) +
-                            size_t(coverage->x) * coverage->y * sizeof(float[4]);
+                            size_t(coverage->x) * coverage->y * sizeof(float);
   AnchorSliceCacheBudgetGuard guard(pair_bytes);
   paint_layer_anchor_point_slice_cache_clear();
 

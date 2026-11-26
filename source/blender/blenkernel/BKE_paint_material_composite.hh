@@ -747,9 +747,9 @@ struct PaintMaterialCompositeRowParams : PaintMaterialCompositeConstant {
   const CurveMapping *adjustment_curves = nullptr;
   /**
    * An Anchor Point slice laid as a row: straight colour and content alpha, plus the coverage it
-   * lays (a grey in RGB). The description owns a reference (the slice cache may evict and clear its
-   * own entry at any time), so the buffers live as long as this description; null for every other
-   * row.
+   * lays (a one-channel grey buffer, the colour RGBA). The description owns a reference (the slice
+   * cache may evict and clear its own entry at any time), so the buffers live as long as this
+   * description; null for every other row.
    */
   std::shared_ptr<ImBuf> anchor_point_color;
   std::shared_ptr<ImBuf> anchor_point_coverage;

@@ -799,7 +799,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, reader_layer_equals_source_without_u
   }
 }
 
-TEST_F(PaintLayersAnchorPointCompositeTest, slice_cache_coverage_layout_is_rgba)
+TEST_F(PaintLayersAnchorPointCompositeTest, slice_cache_coverage_layout_is_scalar)
 {
   MaterialPaintLayer *source = add_layer_with_image("Source", add_image("Source", 4, 255, 0, 0));
   MaterialPaintLayer *point = add_point(*source);
@@ -821,24 +821,20 @@ TEST_F(PaintLayersAnchorPointCompositeTest, slice_cache_coverage_layout_is_rgba)
       *ma, *reader, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &partial_color, &partial_coverage, rect));
   ASSERT_NE(full_coverage, nullptr);
   ASSERT_NE(partial_coverage, nullptr);
+  EXPECT_EQ(full_coverage->channels, 1);
+  EXPECT_EQ(partial_coverage->channels, 1);
   /* A full render fills every pixel: a coverage buffer left zero would fail here. */
   const float *full = full_coverage->float_data();
   for (int i = 0; i < full_coverage->x * full_coverage->y; i++) {
-    EXPECT_FLOAT_EQ(full[i * 4 + 0], 1.0f) << "the source alpha covers fully at texel " << i;
-    EXPECT_FLOAT_EQ(full[i * 4 + 1], 1.0f);
-    EXPECT_FLOAT_EQ(full[i * 4 + 2], 1.0f);
-    EXPECT_FLOAT_EQ(full[i * 4 + 3], 1.0f);
+    EXPECT_FLOAT_EQ(full[i], 1.0f) << "the source alpha covers fully at texel " << i;
   }
-  /* A partial render writes the rectangle and leaves the rest zeroed, alpha included. */
+  /* A partial render writes the rectangle and leaves the rest zeroed. */
   const float *partial = partial_coverage->float_data();
   for (int y = 0; y < partial_coverage->y; y++) {
     for (int x = 0; x < partial_coverage->x; x++) {
       const int i = y * partial_coverage->x + x;
       const bool inside = x >= rect[0] && x < rect[2] && y >= rect[1] && y < rect[3];
-      EXPECT_FLOAT_EQ(partial[i * 4 + 0], inside ? 1.0f : 0.0f) << "texel " << x << "," << y;
-      EXPECT_FLOAT_EQ(partial[i * 4 + 1], partial[i * 4 + 0]);
-      EXPECT_FLOAT_EQ(partial[i * 4 + 2], partial[i * 4 + 0]);
-      EXPECT_FLOAT_EQ(partial[i * 4 + 3], inside ? 1.0f : 0.0f);
+      EXPECT_FLOAT_EQ(partial[i], inside ? 1.0f : 0.0f) << "texel " << x << "," << y;
     }
   }
 }
@@ -892,7 +888,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, slice_cache_same_key_two_inserts_cou
     EXPECT_EQ(paint_layer_anchor_point_slice_cache_entry_count(), 1)
         << "round " << round << ": the second insert reuses the rendered entry";
     const size_t pair_bytes = size_t(first_color->x) * first_color->y * sizeof(float[4]) +
-                              size_t(first_color->x) * first_color->y * sizeof(float[4]);
+                              size_t(first_color->x) * first_color->y * sizeof(float);
     EXPECT_EQ(paint_layer_anchor_point_slice_cache_bytes(), pair_bytes)
         << "round " << round << ": the bytes are counted once";
   }
@@ -1100,7 +1096,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, slice_describe_equals_slice_render_i
     EXPECT_FLOAT_EQ(described_color[i], color->float_data()[i]);
   }
   for (int i = 0; i < width * height; i++) {
-    EXPECT_FLOAT_EQ(described_coverage[i], coverage->float_data()[i * 4]);
+    EXPECT_FLOAT_EQ(described_coverage[i], coverage->float_data()[i]);
   }
 }
 

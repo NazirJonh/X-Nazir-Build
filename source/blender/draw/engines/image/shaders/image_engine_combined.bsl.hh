@@ -2782,8 +2782,9 @@ struct EffectResources {
    * The canvas texel the stage textures' origin sits at: #input_tx, #aux_tx and an intermediate
    * #result_img are read and written at `texel - texture_origin`, while the canvas arithmetic of
    * the kernel (the noise grid, the block cut, the distance fields, every clamp) stays in canvas
-   * texels. Zero while the stage is the whole canvas (the ordinary path); the stage's origin when
-   * the regional input render is enabled and the guard allowed a band.
+   * texels. Zero while the stage is the whole canvas (a first render, or a refused plan); the
+   * stage's origin when the regional input render narrowed it (on by default,
+   * `BLENDER_PBR_EFFECT_REGION=0` turns it off).
    */
   [[push_constant]] const int2 texture_origin;
   /**
@@ -2831,9 +2832,9 @@ void effect_comp([[resource_table]] EffectResources &srt,
    * stage's own grid, so their reads and stores subtract its origin. `texel` stays the canvas
    * texel every kernel's arithmetic uses -- the Noise's hash, the Pixelate's block cut, the
    * distance-field labels and distances, every clamp -- and the final result is written back at it
-   * when this is the last pass. With the origin at zero (the whole canvas, the ordinary path) the
-   * two are the same texel. The float32 field a reduction or a flooding walks, and the pyramid
-   * levels it folds, stay canvas-addressed: those kinds are outside the regional guard
+   * when this is the last pass. With the origin at zero (the whole canvas) the two are the same
+   * texel. The float32 field a reduction or a flooding walks, and the pyramid levels it folds,
+   * stay canvas-addressed: those kinds are outside the regional guard
    * (#BKE_paint_layers_effect_input_region_supported) and never see a non-zero origin. */
   const int2 local = texel - srt.texture_origin;
   /* The grid `input_tx` really is: the canvas whole, the stage when the input is narrow. The

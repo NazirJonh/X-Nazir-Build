@@ -50,19 +50,21 @@
 namespace blender::ed::material_combined {
 
 /**
- * `BLENDER_PBR_EFFECT_REGION=1` (or `true`) enables the regional effect input render: a pass plan
- * whose region can be narrowed lays only the stage the plan reads, instead of the whole canvas. A
- * developer switch read once per process, off by default, so the whole-canvas path is the one
- * every ordinary run takes and the region arithmetic stays a comparison.
+ * The regional effect input render: a pass plan whose region can be narrowed lays only the stage
+ * the plan reads, instead of the whole canvas. On by default now that the guard, the shader's
+ * stage mapping and the A/B pixel check are in place; `BLENDER_PBR_EFFECT_REGION=0` (or `false`)
+ * turns it off for a comparison or a rollback, read once per process. With the region whole -- a
+ * first render, a plan the guard refuses -- the arithmetic falls back to the canvas, so the switch
+ * only changes what a narrowed dispatch costs.
  */
 static bool combined_effect_input_region_enabled()
 {
   static const bool enabled = []() {
     const char *env = std::getenv("BLENDER_PBR_EFFECT_REGION");
     if (env == nullptr) {
-      return false;
+      return true;
     }
-    return std::strcmp(env, "1") == 0 || std::strcmp(env, "true") == 0;
+    return std::strcmp(env, "0") != 0 && std::strcmp(env, "false") != 0;
   }();
   return enabled;
 }
@@ -276,11 +278,11 @@ bool combined_effect_jobs_render(const Material &ma,
                          provider_widened);
       }
 
-      /* The stage the effect's input is laid over. Off by default (the whole canvas); the env
-       * switch turns the regional path on for a plan the guard allows a band, and the stage is the
-       * union of what its passes read (see #BKE_paint_layers_effect_input_region). Anything empty
-       * or as large as the canvas falls back to the whole canvas, so a regional run is never
-       * smaller than the plan needs and never larger than today. */
+      /* The stage the effect's input is laid over. On by default for a plan the guard allows a
+       * band (`BLENDER_PBR_EFFECT_REGION=0` turns it off); the stage is the union of what its
+       * passes read (see #BKE_paint_layers_effect_input_region). Anything empty or as large as the
+       * canvas falls back to the whole canvas, so a regional run is never smaller than the plan
+       * needs and never larger than before. */
       int2 stage_origin = int2(0);
       int2 stage_size = canvas;
       bool regional = false;

@@ -1801,6 +1801,7 @@ bool combined_preview_gpu_update(const Material &ma,
       Vector<float> gpu_samples;
       Vector<float> cpu_samples;
       const int components = gray ? 1 : 3;
+      const int cpu_channels = cpu_ibuf.channels == 0 ? 4 : cpu_ibuf.channels;
       const auto add_sample = [&](const int x, const int y) {
         if (x < 0 || y < 0 || x >= size.x || y >= size.y) {
           return;
@@ -1812,10 +1813,12 @@ bool combined_preview_gpu_update(const Material &ma,
         const int cx = std::clamp(int(uv.x * cpu_ibuf.x), 0, cpu_ibuf.x - 1);
         const int cy = std::clamp(int(uv.y * cpu_ibuf.y), 0, cpu_ibuf.y - 1);
         const float *gpu = &gpu_pixels[(int64_t(y) * size.x + x) * 4];
-        const float *cpu = cpu_ibuf.float_data() + (int64_t(cy) * cpu_ibuf.x + cx) * 4;
+        const float *cpu = cpu_ibuf.float_data() + (int64_t(cy) * cpu_ibuf.x + cx) * cpu_channels;
         if (gray) {
           gpu_samples.append(gpu[0]);
-          cpu_samples.append((cpu[0] + cpu[1] + cpu[2]) / 3.0f);
+          /* A scalar coverage buffer is a grey in its only channel; an RGBA one carries it in
+           * rgb. */
+          cpu_samples.append(cpu_channels == 1 ? cpu[0] : (cpu[0] + cpu[1] + cpu[2]) / 3.0f);
         }
         else {
           for (const int k : IndexRange(3)) {

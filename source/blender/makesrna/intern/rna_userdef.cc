@@ -7139,6 +7139,19 @@ static void rna_def_userdef_system(BlenderRNA *brna)
       "gigabytes after use");
   RNA_def_property_update(prop, 0, "rna_userdef_texture_pool_budget_update");
 
+  prop = RNA_def_property(srna, "gpu_image_texture_budget", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "gpu_image_texture_budget_mb");
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_range(prop, 0, max_memory_in_megabytes_int());
+  RNA_def_property_ui_text(
+      prop,
+      "GPU Image Texture Budget",
+      "The VRAM the images' GPU textures may hold at once, in MiB; the texture collector frees "
+      "the least recently used ones beyond it even before their time-out. 0 keeps the collector "
+      "to the time-out alone, which lets a stack of 4K maps hold hundreds of MiB of VRAM while "
+      "idle");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
   /* Geometry Nodes. */
 
   prop = RNA_def_property(srna, "geometry_nodes_stack_limit", PROP_INT, PROP_NONE);
@@ -7251,7 +7264,7 @@ static void rna_def_userdef_system(BlenderRNA *brna)
       prop,
       "Texture Time Out",
       "Time since last access of a GL texture in seconds after which it is freed "
-      "(set to 0 to keep textures allocated)");
+      "(set to 0 to keep textures allocated unless GPU Image Texture Budget is set)");
 
   prop = RNA_def_property(srna, "texture_collection_rate", PROP_INT, PROP_NONE);
   RNA_def_property_int_sdna(prop, nullptr, "texcollectrate");

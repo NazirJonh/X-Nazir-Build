@@ -697,7 +697,7 @@ void WM_exit_ex(bContext *C, const bool do_python_exit, const bool do_user_exit_
   bke::subdiv::exit();
 
   if (gpu_is_init) {
-    BKE_image_free_unused_gpu_textures();
+    BKE_image_free_unused_gpu_textures(false);
     /* Exiting never leaves paint or sculpt mode, so the brush overlay textures cached there are
      * still alive. They must go before the GPU backend does, or the Vulkan allocator asserts on
      * the unfreed image. */

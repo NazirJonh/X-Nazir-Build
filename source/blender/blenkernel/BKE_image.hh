@@ -1103,8 +1103,11 @@ void BKE_image_paint_set_mipmap(Main *bmain, bool mipmap);
 
 /**
  * Delayed free of OpenGL buffers by main thread.
+ *
+ * \param enforce_budget: Also run the VRAM budget LRU pass. Pass `false` on exit, when the GPU
+ * context is destroyed anyway and the extra work is pointless.
  */
-void BKE_image_free_unused_gpu_textures();
+void BKE_image_free_unused_gpu_textures(bool enforce_budget = true);
 
 RenderSlot *BKE_image_add_renderslot(Image *ima, const char *name);
 bool BKE_image_remove_renderslot(Image *ima, ImageUser *iuser, int slot);

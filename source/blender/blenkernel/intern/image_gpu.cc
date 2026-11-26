@@ -8,6 +8,8 @@
 
 #include "MEM_guardedalloc.h"
 
+#include <cstdio>
+
 #include "BLI_boxpack_2d.h"
 #include "BLI_linklist.h"
 #include "BLI_listbase.h"
@@ -15,6 +17,7 @@
 #include "BLI_rect.h"
 #include "BLI_threads.h"
 #include "BLI_time.h"
+#include "BLI_vector.hh"
 
 #include "DNA_image_types.h"
 #include "DNA_userdef_types.h"
@@ -27,6 +30,8 @@
 #include "BKE_image.hh"
 #include "BKE_image_partial_update.hh"
 #include "BKE_main.hh"
+
+#include "paint_layers/paint_layers_cache_budgets.hh"
 
 #include "GPU_capabilities.hh"
 #include "GPU_state.hh"
@@ -43,6 +48,7 @@ using namespace blender::bke::image::partial_update;
 /* Prototypes. */
 static void gpu_free_unused_buffers();
 static void image_free_gpu(Image *ima, const bool immediate);
+static void image_gpu_budget_enforce(Main *bmain);
 static void image_update_gputexture_ex(
     Image *ima, ImageTile *tile, ImBuf *ibuf, int x, int y, int w, int h);
 
@@ -562,10 +568,14 @@ static void gpu_free_unused_buffers()
   }
 }
 
-void BKE_image_free_unused_gpu_textures()
+void BKE_image_free_unused_gpu_textures(const bool enforce_budget)
 {
   if (BLI_thread_is_main()) {
     gpu_free_unused_buffers();
+    if (enforce_budget) {
+      /* Keep the VRAM budget enforced even when no 3D viewport runs the time-out collector. */
+      image_gpu_budget_enforce(G.main);
+    }
   }
 }
 
@@ -621,8 +631,97 @@ void BKE_image_free_anim_gputextures(Main *bmain)
   }
 }
 
+/** The VRAM all of \a ima's GPU textures hold, mip chains included. */
+static size_t image_gpu_textures_bytes(const Image &ima)
+{
+  if (ima.runtime == nullptr) {
+    return 0;
+  }
+  size_t bytes = 0;
+  for (int eye = 0; eye < 2; eye++) {
+    for (int i = 0; i < TEXTARGET_COUNT; i++) {
+      const gpu::Texture *texture = ima.runtime->gputexture[i][eye];
+      if (texture != nullptr) {
+        bytes += GPU_texture_vram_size_get(texture);
+      }
+    }
+  }
+  return bytes;
+}
+
+/** Keep the image GPU textures under the VRAM budget: the least recently used image with a
+ * texture goes first, one image at a time, until the total fits. Runs on its own one-second
+ * cadence, independent of the time-out collector and its collection rate, so the budget also
+ * holds with `textimeout == 0` and without a 3D viewport. */
+static void image_gpu_budget_enforce(Main *bmain)
+{
+  static int64_t lasttime = 0;
+  const int64_t ctime = BLI_time_now_seconds_i();
+  if (bmain == nullptr || G.is_rendering || ctime - lasttime < 1) {
+    return;
+  }
+
+  const int64_t budget_bytes = int64_t(U.gpu_image_texture_budget_mb) * 1024 * 1024;
+  if (budget_bytes <= 0) {
+    return;
+  }
+
+  /* An image used since the previous budget pass is not the one to give up: only images that
+   * stayed untouched for a whole pass are candidates. */
+  const int64_t previous_time = lasttime;
+  lasttime = ctime;
+
+  struct BudgetEntry {
+    Image *ima;
+    int64_t bytes;
+  };
+  Vector<BudgetEntry> entries;
+  int64_t total_bytes = 0;
+  for (Image &ima : bmain->images) {
+    const int64_t bytes = int64_t(image_gpu_textures_bytes(ima));
+    if (bytes > 0) {
+      entries.append({&ima, bytes});
+      total_bytes += bytes;
+    }
+  }
+
+  int freed_images = 0;
+  while (total_bytes > budget_bytes) {
+    BudgetEntry *oldest = nullptr;
+    for (BudgetEntry &entry : entries) {
+      if (entry.bytes == 0 || (entry.ima->flag & IMA_NOCOLLECT) != 0) {
+        continue;
+      }
+      if (previous_time != 0 && entry.ima->runtime->lastused >= previous_time) {
+        continue;
+      }
+      if (oldest == nullptr || entry.ima->runtime->lastused < oldest->ima->runtime->lastused) {
+        oldest = &entry;
+      }
+    }
+    if (oldest == nullptr) {
+      break;
+    }
+    BKE_image_free_gputextures(oldest->ima);
+    total_bytes -= oldest->bytes;
+    oldest->bytes = 0;
+    freed_images++;
+  }
+
+  if (bke::paint_cache::paint_mem_log_enabled()) {
+    fprintf(stderr,
+            "PAINT_MEM image_gpu total_bytes=%lld budget_bytes=%lld freed_images=%d\n",
+            (long long)total_bytes,
+            (long long)budget_bytes,
+            freed_images);
+  }
+}
+
 void BKE_image_free_old_gputextures(Main *bmain)
 {
+  /* The VRAM budget does not depend on the time-out or its collection rate. */
+  image_gpu_budget_enforce(bmain);
+
   static int64_t lasttime = 0;
   int64_t ctime = BLI_time_now_seconds_i();
 
@@ -630,7 +729,9 @@ void BKE_image_free_old_gputextures(Main *bmain)
    * Run garbage collector once for every collecting period of time
    * if textimeout is 0, that's the option to NOT run the collector
    */
-  if (U.textimeout == 0 || ctime % U.texcollectrate || ctime == lasttime) {
+  if (U.textimeout == 0 || (U.texcollectrate > 0 && ctime % U.texcollectrate) ||
+      ctime == lasttime)
+  {
     return;
   }
 
@@ -649,8 +750,8 @@ void BKE_image_free_old_gputextures(Main *bmain)
         BKE_image_free_gputextures(&ima);
         ima.runtime->lastused = ctime;
       }
-      /* Otherwise, just kill the buffers. A modified image is kept: its pixels exist nowhere else,
-       * and freeing the cache does not honor the dirty flag the cache limiter does. */
+      /* Otherwise, just kill the buffers. A modified image is kept: its pixels exist nowhere
+       * else, and freeing the cache does not honor the dirty flag the cache limiter does. */
       else if (!BKE_image_is_dirty(&ima)) {
         BKE_image_free_buffers(&ima);
       }

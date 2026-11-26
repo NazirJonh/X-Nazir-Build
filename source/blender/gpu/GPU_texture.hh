@@ -1042,6 +1042,16 @@ size_t GPU_texture_read_size_get(const gpu::Texture *texture,
                                  eGPUDataFormat data_format,
                                  int mip_level);
 
+/**
+ * The VRAM the \a texture holds: the storage of every mip level it carries, in bytes. The budget
+ * accounting of the image GPU textures and of the texture pool's parked scratch reads this.
+ *
+ * `to_bytesize(TextureFormat)` is the uncompressed texel size. Block-compressed formats are
+ * rounded up by counting every texel as uncompressed, so e.g. BC1 may be over-counted; the estimate
+ * errs on the high side rather than letting a ceiling under-report.
+ */
+size_t GPU_texture_vram_size_get(const gpu::Texture *texture);
+
 /** \} */
 
 /* -------------------------------------------------------------------- */

@@ -8,6 +8,8 @@
 
 #include "BLI_string.h"
 
+#include <algorithm>
+
 #include "DNA_userdef_types.h"
 
 #include "GPU_framebuffer.hh"
@@ -572,6 +574,48 @@ size_t GPU_texture_read_size_get(const Texture *texture, eGPUDataFormat data_for
 {
   BLI_assert(texture);
   return texture->read_size_get(mip_level, data_format);
+}
+
+size_t GPU_texture_vram_size_get(const Texture *texture)
+{
+  BLI_assert(texture);
+  /* Every mip level the texture carries. The type shapes the layer count the way the pool's cost
+   * accounting needs it: a 1D texture has no height, a 1D array's layers sit in the height, a 2D
+   * array's in the depth, and a cube has six faces per layer. A cubemap's depth already counts its
+   * six faces per layer (see `Texture::init_cubemap`), so it must not be multiplied by six again. */
+  const GPUTextureType type = texture->type_get();
+  int width = std::max(1, texture->width_get());
+  int height = std::max(1, texture->height_get());
+  int layers = std::max(1, texture->depth_get());
+  if (type == GPU_TEXTURE_1D) {
+    height = 1;
+  }
+  else if (type == GPU_TEXTURE_1D_ARRAY) {
+    height = 1;
+    layers = std::max(1, texture->height_get());
+  }
+  else if (type == GPU_TEXTURE_CUBE) {
+    layers = 6;
+  }
+  else if (type == GPU_TEXTURE_CUBE_ARRAY) {
+    layers = std::max(1, texture->depth_get());
+  }
+  const size_t texel_bytes = to_bytesize(texture->format_get());
+  size_t bytes = 0;
+  int mip_width = width;
+  int mip_height = height;
+  /* A texture with no mip chain reports zero; count its base level rather than call it free. */
+  const int mip_num = std::max(1, texture->mip_count());
+  for (int mip = 0; mip < mip_num; mip++) {
+    bytes += size_t(mip_width) * size_t(mip_height) * size_t(layers) * texel_bytes;
+    mip_width = std::max(1, mip_width >> 1);
+    mip_height = std::max(1, mip_height >> 1);
+    /* A 3D texture's mip chain halves its depth too; an array's layers stay whole. */
+    if (type == GPU_TEXTURE_3D) {
+      layers = std::max(1, layers >> 1);
+    }
+  }
+  return bytes;
 }
 
 void GPU_texture_clear(gpu::Texture *tex, eGPUDataFormat data_format, const void *data)

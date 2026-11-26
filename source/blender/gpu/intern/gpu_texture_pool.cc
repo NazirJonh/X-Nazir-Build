@@ -125,7 +125,7 @@ Texture *TexturePoolImpl::acquire_texture_impl(int3 extent,
   if (match_index != -1) {
     TextureHandle handle = {pool_[match_index].texture};
     acquired_.add(handle);
-    parked_bytes_ -= texture_pool_allocation_bytes(handle.texture);
+    parked_bytes_ -= GPU_texture_vram_size_get(handle.texture);
     pool_.remove_and_reorder(match_index);
     return handle.texture;
   }
@@ -166,51 +166,7 @@ Texture *TexturePoolImpl::acquire_texture_impl(int3 extent,
 
   acquired_.add(handle);
   return handle.texture;
-}  // namespace blender::gpu
-
-/** The VRAM a parked texture holds, mip chain and array layers included. */
-size_t texture_pool_allocation_bytes(const Texture *tex)
-{
-  const GPUTextureType type = tex->type_get();
-  const int width = std::max(1, tex->width_get());
-  /* A 1D texture has no height, and a 1D array's layers sit in the height; a 2D array's in the
-   * depth. A cubemap's depth already counts its six faces per layer (see `Texture::init_cubemap`),
-   * so it must not be multiplied by six again. */
-  int height = std::max(1, tex->height_get());
-  int layers = std::max(1, tex->depth_get());
-  if (type == GPU_TEXTURE_1D) {
-    height = 1;
-  }
-  else if (type == GPU_TEXTURE_1D_ARRAY) {
-    height = 1;
-    layers = std::max(1, tex->height_get());
-  }
-  else if (type == GPU_TEXTURE_CUBE) {
-    layers = 6;
-  }
-  else if (type == GPU_TEXTURE_CUBE_ARRAY) {
-    layers = std::max(1, tex->depth_get());
-  }
-  /* `to_bytesize(TextureFormat)` is the uncompressed texel size: the pool's transient scratch is
-   * an uncompressed render target, so a block-compressed format would be counted wrong -- keep the
-   * estimate from under-reporting by at least counting every mip and layer. */
-  const size_t texel_bytes = to_bytesize(tex->format_get());
-  size_t bytes = 0;
-  int mip_width = width;
-  int mip_height = height;
-  /* A texture with no mip chain reports zero; count its base level rather than call it free. */
-  const int mip_num = std::max(1, tex->mip_count());
-  for ([[maybe_unused]] const int mip : IndexRange(mip_num)) {
-    bytes += size_t(mip_width) * size_t(mip_height) * size_t(layers) * texel_bytes;
-    mip_width = std::max(1, mip_width >> 1);
-    mip_height = std::max(1, mip_height >> 1);
-    /* A 3D texture's mip chain halves its depth too; an array's layers stay whole. */
-    if (type == GPU_TEXTURE_3D) {
-      layers = std::max(1, layers >> 1);
-    }
-  }
-  return bytes;
-}
+}  // acquire_texture_impl
 
 void TexturePoolImpl::enforce_pool_budget(const size_t incoming_bytes)
 {
@@ -226,7 +182,7 @@ void TexturePoolImpl::enforce_pool_budget(const size_t incoming_bytes)
     int64_t largest = -1;
     size_t largest_bytes = 0;
     for (const int64_t i : pool_.index_range()) {
-      const size_t bytes = texture_pool_allocation_bytes(pool_[i].texture);
+      const size_t bytes = GPU_texture_vram_size_get(pool_[i].texture);
       if (bytes > largest_bytes) {
         largest_bytes = bytes;
         largest = i;
@@ -250,7 +206,7 @@ void TexturePoolImpl::release_texture(Texture *tex)
   /* Park the texture only if the parked total still fits the budget; a release that would push it
    * over evicts the largest parked textures first and, if even an empty pool cannot take this one,
    * frees it instead, so a pass's scratch does not outlive the pass that used it. */
-  const size_t bytes = texture_pool_allocation_bytes(tex);
+  const size_t bytes = GPU_texture_vram_size_get(tex);
   const uint64_t budget = g_texture_pool_budget_bytes.load(std::memory_order_relaxed);
   if (budget != 0) {
     enforce_pool_budget(bytes);
@@ -290,7 +246,7 @@ void TexturePoolImpl::reset(bool force_free)
   for (int i = pool_.size() - 1; i >= 0; i--) {
     TextureHandle &tex = pool_[i];
     if (tex.unused_cycles_count >= max_unused_cycles_ || force_free) {
-      parked_bytes_ -= texture_pool_allocation_bytes(tex.texture);
+      parked_bytes_ -= GPU_texture_vram_size_get(tex.texture);
       GPU_texture_free(tex.texture);
       pool_.remove_and_reorder(i);
     }

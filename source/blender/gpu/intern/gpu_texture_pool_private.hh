@@ -13,12 +13,10 @@
 
 namespace blender::gpu {
 
-/**
- * The VRAM a texture allocation holds, mip chain and array layers included. Shared by the pools
- * that park individual textures (TexturePoolImpl, GLTexturePool, MTLTexturePool); the Vulkan pool
- * budgets whole unused allocations instead and measures those by `allocation_info.size`.
- */
-size_t texture_pool_allocation_bytes(const Texture *tex);
+/* The pools that park individual textures (TexturePoolImpl, GLTexturePool, MTLTexturePool) measure
+ * a parked texture by `GPU_texture_vram_size_get` (see GPU_texture.hh), which includes its mip chain
+ * and array layers; the Vulkan pool budgets whole unused allocations instead and measures those by
+ * `allocation_info.size`. */
 
 /**
  * Whether `BLENDER_PAINT_MEM_LOG` is set, read once. Gates the per-reset `PAINT_MEM texpool` probe

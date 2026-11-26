@@ -1000,6 +1000,7 @@ class USERPREF_PT_system_memory(SystemPanel, CenterAlignMixIn, Panel):
 
         col = layout.column()
         col.prop(system, "gpu_texture_pool_budget")
+        col.prop(system, "gpu_image_texture_budget")
 
         if sys.platform != "darwin":
             layout.separator()

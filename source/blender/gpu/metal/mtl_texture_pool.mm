@@ -114,7 +114,7 @@ Texture *MTLTexturePool::acquire_texture_impl(int3 extent,
   /* Acquire the compatible texture, or create a new one as a last resort. */
   if (match_index != -1) {
     texture_handle.texture = pool_[match_index].texture;
-    parked_bytes_ -= texture_pool_allocation_bytes(texture_handle.texture);
+    parked_bytes_ -= GPU_texture_vram_size_get(texture_handle.texture);
     pool_.remove_and_reorder(match_index);
   }
   else {
@@ -236,7 +236,7 @@ void MTLTexturePool::release_texture(Texture *tex)
    * it over evicts the largest parked allocations first and, if even an empty pool cannot take this
    * one, frees it instead. The view is always destroyed here. */
   const uint64_t budget = GPU_texture_pool_budget_get();
-  const size_t bytes = texture_pool_allocation_bytes(texture_handle.texture);
+  const size_t bytes = GPU_texture_vram_size_get(texture_handle.texture);
   if (budget != 0) {
     enforce_pool_budget(bytes);
     if (parked_bytes_ + uint64_t(bytes) > budget) {
@@ -272,7 +272,7 @@ void MTLTexturePool::enforce_pool_budget(const uint64_t incoming_bytes)
     int64_t largest = -1;
     uint64_t largest_bytes = 0;
     for (const int64_t i : pool_.index_range()) {
-      const uint64_t bytes = texture_pool_allocation_bytes(pool_[i].texture);
+      const uint64_t bytes = GPU_texture_vram_size_get(pool_[i].texture);
       if (bytes > largest_bytes) {
         largest_bytes = bytes;
         largest = i;
@@ -312,7 +312,7 @@ void MTLTexturePool::reset(bool force_free)
   for (int i = pool_.size() - 1; i >= 0; i--) {
     AllocationHandle &handle = pool_[i];
     if (handle.unused_cycles_count >= max_unused_cycles_ || force_free) {
-      parked_bytes_ -= texture_pool_allocation_bytes(handle.texture);
+      parked_bytes_ -= GPU_texture_vram_size_get(handle.texture);
       GPU_texture_free(handle.texture);
       pool_.remove_and_reorder(i);
     }

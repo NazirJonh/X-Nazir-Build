@@ -1759,6 +1759,12 @@ struct UserDef {
    */
   int gpu_texture_pool_budget_mb = 0;
   /**
+   * The VRAM the images' GPU textures may hold at once, in MiB; the texture collector frees the
+   * least recently used ones beyond it even before their time-out. Zero keeps the collector to
+   * the time-out alone, which lets a stack of 4K maps hold hundreds of MiB of VRAM while idle.
+   */
+  int gpu_image_texture_budget_mb = 0;
+  /**
    * The memory the paint layer caches may hold at once, in MiB, shared by them proportionally to
    * their built-in defaults: the Anchor Point slices, the effect and mask-effect results, the GPU
    * effect results, the stroke corrections, the composite and the Combined preview. Zero keeps
@@ -1768,6 +1774,8 @@ struct UserDef {
    * not part of the sum (see paint_mask_coverage_cache.hh).
    */
   int paint_layers_cache_budget_mb = 0;
+  /** Keeps #runtime on its eight-byte boundary: three ints precede it. */
+  char _pad_gpu_image_budget[4] = {};
 
   /** Runtime data (keep last). */
   UserDef_Runtime runtime;

@@ -510,7 +510,8 @@ static bool paint_layer_mask_effect_compute(const Material &ma,
                                             const int tile_number,
                                             const PaintLayerSurfaceRef painted_object,
                                             std::shared_ptr<ImBuf> &r_color,
-                                            Vector<PaintLayerEffectSource> &r_synced)
+                                            Vector<PaintLayerEffectSource> &r_synced,
+                                            std::shared_ptr<ImBuf> &r_answer)
 {
   bke::paint_perf::ScopedTimer perf_total("mask_effect.cpu.total");
   int width = 0;
@@ -596,6 +597,9 @@ static bool paint_layer_mask_effect_compute(const Material &ma,
   Vector<Image *> images;
   BKE_paint_layers_mask_effect_input_images(ma, row, effect, images);
   r_synced = map_sources_snapshot(images);
+  /* The mask cache stores the same scalar grey it answers: the compute hands the identical buffer
+   * back so the cycle never materializes anything (the fallback would return it too). */
+  r_answer = color;
   r_color = std::move(color);
   perf_total.note(
       "kind=%d size=%dx%d path=%s", int(effect.kind_subtype), width, height, compute_path);
@@ -633,7 +637,8 @@ static bool mask_effect_region_compute(
     const rcti &maps_region,
     std::shared_ptr<ImBuf> &r_patched,
     Vector<PaintLayerEffectSource> &r_patched_synced,
-    rcti &r_region_valid)
+    rcti &r_region_valid,
+    std::shared_ptr<ImBuf> &r_answer)
 {
   bke::paint_perf::ScopedTimer perf_total("mask_effect.cpu.region");
   const int width = cached->x;
@@ -732,6 +737,8 @@ static bool mask_effect_region_compute(
   }
   /* The versions are taken after the render: an edit that landed while it ran is read next time. */
   r_patched_synced = map_sources_snapshot(images);
+  /* The mask patch's float buffer is the answer; the entry keeps it as its stored grey too. */
+  r_answer = patched;
   r_patched = std::move(patched);
   r_region_valid = valid;
   perf_total.note("kind=%d size=%dx%d region=%d,%d-%d,%d",
@@ -819,9 +826,11 @@ std::shared_ptr<ImBuf> paint_layer_mask_effect_buffer_get(
       height,
       images,
       g_paint_mask_effect_cache_budget,
-      [&](std::shared_ptr<ImBuf> &r_color, Vector<PaintLayerEffectSource> &r_synced) {
+      [&](std::shared_ptr<ImBuf> &r_color,
+          Vector<PaintLayerEffectSource> &r_synced,
+          std::shared_ptr<ImBuf> &r_answer) {
         return paint_layer_mask_effect_compute(
-            ma, row, effect, tile_number, painted_object, r_color, r_synced);
+            ma, row, effect, tile_number, painted_object, r_color, r_synced, r_answer);
       },
       changed_region,
       r_valid_region,
@@ -829,7 +838,8 @@ std::shared_ptr<ImBuf> paint_layer_mask_effect_buffer_get(
           const rcti &maps_region,
           std::shared_ptr<ImBuf> &r_patched,
           Vector<PaintLayerEffectSource> &r_patched_synced,
-          rcti &r_region_valid) {
+          rcti &r_region_valid,
+          std::shared_ptr<ImBuf> &r_answer) {
         return mask_effect_region_compute(ma,
                                           row,
                                           effect,
@@ -841,7 +851,8 @@ std::shared_ptr<ImBuf> paint_layer_mask_effect_buffer_get(
                                           maps_region,
                                           r_patched,
                                           r_patched_synced,
-                                          r_region_valid);
+                                          r_region_valid,
+                                          r_answer);
       });
   if (color != nullptr && r_valid_region != nullptr && changed_region != nullptr &&
       !BLI_rcti_is_empty(changed_region))

@@ -1322,6 +1322,7 @@ float4 projection_normal_to_tangent(float4 mapped,
                                     int pflags,
                                     float2 uv,
                                     int2 canvas_size,
+                                    int2 texel_origin,
                                     float4x4 frame_rot,
                                     float4x4 n_to_controller)
 {
@@ -1329,6 +1330,11 @@ float4 projection_normal_to_tangent(float4 mapped,
     return mapped;
   }
   int2 surface_texel = clamp(int2(floor(uv * float2(canvas_size))), int2(0), canvas_size - int2(1));
+  /* A Decal's `pos_tx` holds only its patch's crop: translate the canvas texel, and treat a texel
+   * outside the crop as uncovered (the whole-canvas texture had zeros there). */
+  int2 pos_texel = surface_texel - texel_origin;
+  int2 pos_size = max(textureSize(pos_tx, 0), int2(1));
+  bool pos_valid = all(greaterThanEqual(pos_texel, int2(0))) && all(lessThan(pos_texel, pos_size));
   float4 surface_n = texelFetch(nrm_tx, surface_texel, 0);
   int tri_id = int(surface_n.w + 0.5f);
   int2 table_size = textureSize(tri_tx, 0);
@@ -1357,10 +1363,13 @@ float4 projection_normal_to_tangent(float4 mapped,
   float3 n_frame = mapped.xyz * (1.0f / mapped.w) * 2.0f - 1.0f;
   float3 n_world = (frame_rot * float4(n_frame, 0.0f)).xyz;
   if ((pflags & COMBINED_PROJ_DECAL) != 0) {
+    if (!pos_valid) {
+      return mapped;
+    }
     /* The frame turns with the unfold: the axes of the patch triangle this texel was laid on, the
      * sum of the axes weighted by the vector's components (`decal_frame->axes` on the CPU). The
      * table holds three texels per triangle id, `textureSize` texels a row. */
-    int decal_tri = int(texelFetch(pos_tx, surface_texel, 0).z + 0.5f);
+    int decal_tri = int(texelFetch(pos_tx, pos_texel, 0).z + 0.5f);
     int2 frames_size = textureSize(decal_tx, 0);
     int frame_index = decal_tri * 3;
     int2 frame_texel = int2(frame_index % max(frames_size.x, 1), frame_index / max(frames_size.x, 1));
@@ -1393,6 +1402,7 @@ float4 projection_sample_map(sampler2D tx,
                              sampler2D nrm_tx,
                              float2 uv,
                              int2 canvas_size,
+                             int2 texel_origin,
                              float4x4 p_to_q,
                              float4x4 n_to_frame,
                              float4 params_0,
@@ -1417,7 +1427,15 @@ float4 projection_sample_map(sampler2D tx,
 {
   float4 result = float4(0.0f);
   int2 surface_texel = clamp(int2(floor(uv * float2(canvas_size))), int2(0), canvas_size - int2(1));
-  float4 surface_p = texelFetch(pos_tx, surface_texel, 0);
+  /* A Decal's `pos_tx` holds only its patch's crop: translate the canvas texel, and leave a texel
+   * outside the crop transparent. The whole-canvas texture it replaces held zeros there, so the
+   * result is the same; the surface normal stays on the full canvas. */
+  int2 pos_texel = surface_texel - texel_origin;
+  int2 pos_size = max(textureSize(pos_tx, 0), int2(1));
+  if (any(lessThan(pos_texel, int2(0))) || any(greaterThanEqual(pos_texel, pos_size))) {
+    return result;
+  }
+  float4 surface_p = texelFetch(pos_tx, pos_texel, 0);
   if (surface_p.w <= 0.0f) {
     return result;
   }
@@ -1567,6 +1585,9 @@ struct MaskResources {
   [[push_constant]] const float4 proj_atlas_2;
   [[push_constant]] const float2 proj_atlas_cell;
   [[push_constant]] const int2 proj_canvas_size;
+  /** The canvas texel the projection `pos_tx` texture's (0, 0) stands for: non-zero for a Decal,
+   * whose texture holds only its patch's crop. */
+  [[push_constant]] const int2 proj_texel_origin;
   [[push_constant]] const int proj_mode;
   [[push_constant]] const int proj_axis;
   [[push_constant]] const int proj_flags;
@@ -1652,6 +1673,7 @@ void mask_comp([[resource_table]] MaskResources &srt,
                                 srt.proj_nrm_tx,
                                 uv,
                                 srt.proj_canvas_size,
+                                srt.proj_texel_origin,
                                 srt.proj_p_to_q,
                                 srt.proj_n_to_frame,
                                 srt.proj_params_0,
@@ -1753,6 +1775,7 @@ void mask_comp([[resource_table]] MaskResources &srt,
                                   srt.proj_nrm_tx,
                                   uv,
                                   srt.proj_canvas_size,
+                                  srt.proj_texel_origin,
                                   srt.proj_p_to_q,
                                   srt.proj_n_to_frame,
                                   srt.proj_params_0,
@@ -1818,6 +1841,7 @@ void mask_comp([[resource_table]] MaskResources &srt,
                               srt.proj_nrm_tx,
                               uv,
                               srt.proj_canvas_size,
+                              srt.proj_texel_origin,
                               srt.proj_p_to_q,
                               srt.proj_n_to_frame,
                               srt.proj_params_0,
@@ -1915,6 +1939,9 @@ struct LayerResources {
   [[push_constant]] const float2 proj_atlas_cell;
   /** The size of the surface map, in texels. */
   [[push_constant]] const int2 proj_canvas_size;
+  /** The canvas texel the projection `pos_tx` texture's (0, 0) stands for: non-zero for a Decal,
+   * whose texture holds only its patch's crop. */
+  [[push_constant]] const int2 proj_texel_origin;
   /** A `COMBINED_PROJ_*` mode, the projection axis and the `COMBINED_PROJ_*` flag bits. */
   [[push_constant]] const int proj_mode;
   [[push_constant]] const int proj_axis;
@@ -2010,6 +2037,7 @@ void layer_comp([[resource_table]] LayerResources &srt,
                                     srt.proj_nrm_tx,
                                     uv,
                                     srt.proj_canvas_size,
+                                    srt.proj_texel_origin,
                                     srt.proj_p_to_q,
                                     srt.proj_n_to_frame,
                                     srt.proj_params_0,
@@ -2042,6 +2070,7 @@ void layer_comp([[resource_table]] LayerResources &srt,
                                              srt.proj_flags,
                                              uv,
                                              srt.proj_canvas_size,
+                                             srt.proj_texel_origin,
                                              srt.proj_frame_rot,
                                              srt.proj_n_to_controller);
         }
@@ -2166,6 +2195,9 @@ struct CorrectionResources {
   [[push_constant]] const float4 proj_atlas_2;
   [[push_constant]] const float2 proj_atlas_cell;
   [[push_constant]] const int2 proj_canvas_size;
+  /** The canvas texel the projection `pos_tx` texture's (0, 0) stands for: non-zero for a Decal,
+   * whose texture holds only its patch's crop. */
+  [[push_constant]] const int2 proj_texel_origin;
   [[push_constant]] const int proj_mode;
   [[push_constant]] const int proj_axis;
   [[push_constant]] const int proj_flags;
@@ -2247,6 +2279,7 @@ void correction_comp([[resource_table]] CorrectionResources &srt,
                               srt.proj_nrm_tx,
                               uv,
                               srt.proj_canvas_size,
+                              srt.proj_texel_origin,
                               srt.proj_p_to_q,
                               srt.proj_n_to_frame,
                               srt.proj_params_0,
@@ -2745,6 +2778,15 @@ float4 slot_bilinear_fetch(sampler2D tx, const int2 size, const float su, const 
   return ma_mb * t00 + a_mb * t10 + ma_b * t01 + a_b * t11;
 }
 
+/** Whether a flooding label is the border sentinel: a border texel no region may cross or offer.
+ * The label is a canvas texel (two non-negative coordinates), so a negative coordinate is outside
+ * every texel and is what the two-component field uses in place of the third "border" component the
+ * four-component field used to carry. */
+bool flood_label_is_border(const float2 label)
+{
+  return label.x < 0.0f;
+}
+
 struct EffectResources {
   /** This pass's source: the effect input, a ping-pong buffer, the luminance buffer for a High Pass
    * tail, or the original for a Sharpen tail. */
@@ -2755,21 +2797,30 @@ struct EffectResources {
   [[sampler(1)]] sampler2D aux_tx;
   /** This pass's destination: a scratch buffer, or the cache texture on the last pass. */
   [[image(0, write, SFLOAT_16_16_16_16)]] image2D result_img;
-  /** The float32 destination of the passes whose values a half float would round away: the Color
-   * Match's pyramid (the alpha-weighted sums of the whole canvas) and the Fill Area's label field
-   * (the labels are texel coordinates, which a half float holds exactly only to 2048). The host
-   * binds the pass's own pyramid level or field texture here and binds slot 0 beside it for every
-   * dispatch, unused or not; every pass but the four float32 ones writes #result_img. The flooding
-   * steps also read it back: their walk is sequential and each texel takes the label the texel
-   * before it has just been given, so the field is declared read-write like the accumulator images
-   * above. */
+  /** The float32 destination of the Color Match's pyramid: the alpha-weighted sums of the whole
+   * canvas, four components (the colour sum and the weight sum) that a half float would round
+   * away. The host binds the pass's own pyramid level here for a reduction dispatch and a one-texel
+   * placeholder for every other pass, unused or not. Every pass but the float32 ones writes
+   * #result_img. */
   [[image(1, read_write, SFLOAT_32_32_32_32)]] image2D field_img;
-  /** The canvas size: the window clamps to it on every pass, whatever the dispatch region is. */
+  /** The Fill Area's label field, two float32 components: a label is the canvas texel the flooding
+   * walked to, which is a 2D coordinate -- the labels are texels, a half float holds exactly only
+   * to 2048, and the field needs no colour. The border flag the old four-component field kept in a
+   * third component rides as the coordinate sentinel #flood_label_is_border instead, and the dead
+   * alpha is dropped, so the field pair costs half the bytes of the reduction pair. The flooding
+   * steps also read it back: their walk is sequential and each texel takes the label the texel
+   * before it has just been given, so the field is declared read-write. */
+  [[image(2, read_write, SFLOAT_32_32)]] image2D flood_img;
+  /** The canvas size: the canvas-addressed arithmetic of the kernels (the block cut, the noise
+   * grid, the canvas-edge tests) clamps to it, whatever the dispatch region is. The window kernels
+   * do not: they clamp to the stage texture's own size (`textureSize(input_tx)`), which is smaller
+   * than the canvas on a regional stage. */
   [[push_constant]] const int2 texture_size;
   /**
    * The first texel of this dispatch. A pass computes only its rectangle (the region for the last
-   * pass, the region grown by the halo for the ones before it); the window still clamps to #texture_size
-   * so it reads the neighbourhood the previous pass left valid over that grown rectangle.
+   * pass, the region grown by the halo for the ones before it); the window kernels still clamp to
+   * the stage size, so they read the neighbourhood the previous pass left valid over that grown
+   * rectangle.
    */
   [[push_constant]] const int2 dispatch_origin;
   /**
@@ -3376,15 +3427,15 @@ void effect_comp([[resource_table]] EffectResources &srt,
        * read at -- `pass_params.x` names it, 0 the alpha as it is, 1 the scene-linear luminance
        * clamped into [0, 1] (a mask item always reads the luminance, its grey carrying no alpha of
        * its own; the plan folds that in) -- is border at or over the threshold in `pass_params.y`,
-       * the CPU's own inclusive edge. A border texel stamps the background label and no region:
-       * the label zero with the flag in blue unset, a barrier the labels never cross or offer. A
-       * texel short of the border on the canvas edge stamps the background label with the flag
-       * set -- the seed the background swallows its region from, the CPU's uv-border IGNORE mode;
-       * the FILL mode's largest-region rule and the debug ramp stay on the CPU. Every other texel
-       * short of the border stamps its own coordinates, the candidate label its region's flooding
-       * narrows to. The labels are texel coordinates, exact in a half float only to 2048 -- the
-       * field the host binds here is float32, so a 4K map's labels are exact. The alpha is the
-       * store's standard one, carried for the ping-pong. */
+       * the CPU's own inclusive edge. A border texel stamps #flood_label_is_border's sentinel, a
+       * barrier the labels never cross or offer. A texel short of the border on the canvas edge
+       * stamps the background label zero -- the seed the background swallows its region from, the
+       * CPU's uv-border IGNORE mode; the FILL mode's largest-region rule and the debug ramp stay on
+       * the CPU. Every other texel short of the border stamps its own coordinates, the candidate
+       * label its region's flooding narrows to. The labels are texel coordinates, exact in a half
+       * float only to 2048 -- the field the host binds here is float32, so a 4K map's labels are
+       * exact. The field is two components: the coordinates, with the border flag encoded as the
+       * sentinel. */
       const float scalar = (srt.pass_params.x == 0.0f) ? source.w :
                                                          clamp(dot(source.xyz,
                                                                    srt.luma_coefficients.xyz),
@@ -3394,8 +3445,13 @@ void effect_comp([[resource_table]] EffectResources &srt,
       const bool on_edge = (texel.x == 0 || texel.y == 0 ||
                             texel.x == srt.texture_size.x - 1 ||
                             texel.y == srt.texture_size.y - 1);
-      const float2 label = (border || on_edge) ? float2(0.0f) : float2(texel);
-      imageStore(srt.field_img, texel, float4(label, border ? 0.0f : 1.0f, pass_alpha));
+      /* The border is the negative sentinel; the background edge the zero label; every other texel
+       * its own coordinates. A label is never negative, so the sentinel cannot collide with one.
+       * The fill components are the RGBA defaults an RG32F field reads as (0, 1): the store keeps
+       * only the two label components, the rest is not a flag the field carries anymore. */
+      const float2 label = border ? float2(-1.0f) :
+                           (on_edge ? float2(0.0f) : float2(texel));
+      imageStore(srt.flood_img, texel, float4(label, 0.0f, 1.0f));
       return;
     }
     case COMBINED_PASS_FLOOD_STEP: {
@@ -3416,35 +3472,35 @@ void effect_comp([[resource_table]] EffectResources &srt,
        * length, not this pass, is what bounds how winding it may be.
        *
        * The walk reads the label it has just written back through the field itself
-       * (#field_img being read-write), and the line's texels before the sweep through `input_tx`;
-       * a border texel keeps the label and the flag it came in with. The flag and the alpha carry
-       * through unchanged; the field is float32, so the coordinates are exact. */
+       * (#flood_img being read-write), and the line's texels before the sweep through `input_tx`;
+       * a border texel keeps the sentinel it came in with. The border sentinel gates the walk: a
+       * border label is never adopted and never offers -- the flag the old third component carried. */
       const int2 field_size = textureSize(srt.input_tx, 0);
       if (srt.pass_params.x == 1.0f) {
         /* The rows: down the line, then back up it, the second walk reading the labels the first
          * has written. */
         const int y = texel.y;
         float4 carried = texelFetch(srt.input_tx, int2(0, y), 0);
-        imageStore(srt.field_img, int2(0, y), carried);
+        imageStore(srt.flood_img, int2(0, y), carried);
         for (int x = 1; x < field_size.x; x++) {
           float4 own = texelFetch(srt.input_tx, int2(x, y), 0);
-          if (own.z != 0.0f && carried.z != 0.0f &&
+          if (!flood_label_is_border(own.xy) && !flood_label_is_border(carried.xy) &&
               (carried.x < own.x || (carried.x == own.x && carried.y < own.y)))
           {
             own.xy = carried.xy;
           }
-          imageStore(srt.field_img, int2(x, y), own);
+          imageStore(srt.flood_img, int2(x, y), own);
           carried = own;
         }
-        carried = imageLoad(srt.field_img, int2(field_size.x - 1, y));
+        carried = imageLoad(srt.flood_img, int2(field_size.x - 1, y));
         for (int x = field_size.x - 2; x >= 0; x--) {
-          float4 own = imageLoad(srt.field_img, int2(x, y));
-          if (own.z != 0.0f && carried.z != 0.0f &&
+          float4 own = imageLoad(srt.flood_img, int2(x, y));
+          if (!flood_label_is_border(own.xy) && !flood_label_is_border(carried.xy) &&
               (carried.x < own.x || (carried.x == own.x && carried.y < own.y)))
           {
             own.xy = carried.xy;
           }
-          imageStore(srt.field_img, int2(x, y), own);
+          imageStore(srt.flood_img, int2(x, y), own);
           carried = own;
         }
         return;
@@ -3452,26 +3508,26 @@ void effect_comp([[resource_table]] EffectResources &srt,
       /* The columns: the same walk across them, down and back up. */
       const int x = texel.x;
       float4 carried = texelFetch(srt.input_tx, int2(x, 0), 0);
-      imageStore(srt.field_img, int2(x, 0), carried);
+      imageStore(srt.flood_img, int2(x, 0), carried);
       for (int y = 1; y < field_size.y; y++) {
         float4 own = texelFetch(srt.input_tx, int2(x, y), 0);
-        if (own.z != 0.0f && carried.z != 0.0f &&
+        if (!flood_label_is_border(own.xy) && !flood_label_is_border(carried.xy) &&
             (carried.x < own.x || (carried.x == own.x && carried.y < own.y)))
         {
           own.xy = carried.xy;
         }
-        imageStore(srt.field_img, int2(x, y), own);
+        imageStore(srt.flood_img, int2(x, y), own);
         carried = own;
       }
-      carried = imageLoad(srt.field_img, int2(x, field_size.y - 1));
+      carried = imageLoad(srt.flood_img, int2(x, field_size.y - 1));
       for (int y = field_size.y - 2; y >= 0; y--) {
-        float4 own = imageLoad(srt.field_img, int2(x, y));
-        if (own.z != 0.0f && carried.z != 0.0f &&
+        float4 own = imageLoad(srt.flood_img, int2(x, y));
+        if (!flood_label_is_border(own.xy) && !flood_label_is_border(carried.xy) &&
             (carried.x < own.x || (carried.x == own.x && carried.y < own.y)))
         {
           own.xy = carried.xy;
         }
-        imageStore(srt.field_img, int2(x, y), own);
+        imageStore(srt.flood_img, int2(x, y), own);
         carried = own;
       }
       return;
@@ -3483,8 +3539,8 @@ void effect_comp([[resource_table]] EffectResources &srt,
        * border texels are the boundary condition the fill takes its colour from, and the
        * background ones are never read, two texels side by side short of the border being one
        * region, so an enclosed texel's neighbours are border or its own region only. The flood
-       * field in aux_tx names the three: the flag in blue unset is border, the background label
-       * zero with the flag set is background, the rest enclosed. The first step (`radius` one)
+       * field in aux_tx names the three: the negative sentinel label is border, the zero label the
+       * background, the rest enclosed. The first step (`radius` one)
        * reads the original, where the CPU's read side holds the border's straightened colours and
        * zeros on the enclosed texels it zeroed at init -- a neighbour short of the border
        * contributes nothing, a border neighbour its straightened colour, premultiplied divided
@@ -3497,7 +3553,7 @@ void effect_comp([[resource_table]] EffectResources &srt,
        * through. Alpha is the store's standard one; the coverage lives in the flood field, which
        * the tail reads. */
       const float4 field = texelFetch(srt.aux_tx, texel, 0);
-      const bool border = field.z == 0.0f;
+      const bool border = flood_label_is_border(field.xy);
       const bool background = (!border && field.x == 0.0f && field.y == 0.0f);
       if (border) {
         if (srt.radius == 1 && srt.pass_params.w != 0.0f && source.w >= 0.01f && source.w < 1.0f) {
@@ -3521,7 +3577,7 @@ void effect_comp([[resource_table]] EffectResources &srt,
           }
           if (first) {
             const float4 neighbour_field = texelFetch(srt.aux_tx, at, 0);
-            if (neighbour_field.z == 0.0f) {
+            if (flood_label_is_border(neighbour_field.xy)) {
               /* A border neighbour: the straightened colour the CPU's read side holds. */
               const float4 neighbour = texelFetch(srt.input_tx, at, 0);
               float3 colour = neighbour.xyz;
@@ -3559,7 +3615,8 @@ void effect_comp([[resource_table]] EffectResources &srt,
        * fill's edge fades out without the border's own colours smearing in, which is why this tail
        * runs ahead of the pair and not behind it. */
       const float4 field = texelFetch(srt.aux_tx, texel, 0);
-      const bool enclosed = (field.z != 0.0f) && !(field.x == 0.0f && field.y == 0.0f);
+      const bool enclosed = !flood_label_is_border(field.xy) &&
+                            !(field.x == 0.0f && field.y == 0.0f);
       if (enclosed) {
         rgb = (srt.pass_params.x != 0.0f) ? srt.pass_params2.rgb : source.rgb;
       }
@@ -3576,7 +3633,8 @@ void effect_comp([[resource_table]] EffectResources &srt,
         for (int y = lo_y; y <= hi_y; y++) {
           for (int x = lo_x; x <= hi_x; x++) {
             const float4 neighbour = texelFetch(srt.aux_tx, int2(x, y), 0);
-            coverage += ((neighbour.z != 0.0f) && !(neighbour.x == 0.0f && neighbour.y == 0.0f)) ?
+            coverage += ((!flood_label_is_border(neighbour.xy)) &&
+                         !(neighbour.x == 0.0f && neighbour.y == 0.0f)) ?
                             1.0f :
                             0.0f;
           }

@@ -3517,7 +3517,8 @@ static bool paint_layer_chain_member_dimensions_resolve(
 }
 
 /** A float buffer of \a width x \a height and \a channels, owned by the returned shared pointer.
- * The colour slice uses four, the coverage one; both start zeroed. */
+ * The colour slice uses four, the coverage one. Both start zeroed: #ImBufFlags::Zero only means
+ * "no flags", the zeroing comes from \a initialize_pixels below. */
 static std::shared_ptr<ImBuf> anchor_slice_buffer_new(const int width,
                                                       const int height,
                                                       const int channels = 4)
@@ -3556,21 +3557,6 @@ static bool anchor_slice_region_get(const int *dst_rect,
     r_y1 = clamp_i(dst_rect[3], 0, height);
   }
   return r_x1 > r_x0 && r_y1 > r_y0;
-}
-
-/** The unwritten part of a partial render is defined as zero, never uninitialized memory. A
- * complete render writes every pixel, so it skips the pass. */
-static void anchor_slice_buffers_clear_if_partial(const int *dst_rect,
-                                                  ImBuf &color,
-                                                  ImBuf &coverage)
-{
-  if (dst_rect == nullptr) {
-    return;
-  }
-  const size_t color_size = size_t(color.x) * color.y * sizeof(float[4]);
-  memset(color.float_data_for_write(), 0, color_size);
-  const size_t coverage_size = size_t(coverage.x) * coverage.y * sizeof(float);
-  memset(coverage.float_data_for_write(), 0, coverage_size);
 }
 
 int BKE_paint_layers_tile_resolve(const int tile_number,
@@ -3837,7 +3823,8 @@ static bool anchor_slice_render_new(const Material &ma,
   if (color == nullptr || coverage == nullptr) {
     return false;
   }
-  anchor_slice_buffers_clear_if_partial(dst_rect, *color, *coverage);
+  /* The buffers were born zeroed, so a partial render's unwritten part is already defined as
+   * zero; only the region this render writes is filled below. */
   if (!anchor_slice_fill(
           ma, reader, channel, ref, dst_rect, *color, *coverage, painted_object, tile_number))
   {
@@ -4150,6 +4137,24 @@ void BKE_paint_layers_effect_input_images(const PaintMaterialCompositeImageLayer
   }
 }
 
+/** Whether the CPU kernel of \a effect may rest as FP16 in the effect cache between evaluations.
+ * The kernels always run in float: only a result at rest is packed, and #paint_layer_effect_buffer_get
+ * materializes a float buffer on the next read.
+ *
+ * The whole-map kinds keep f32. Their reach is #EffectReach::WholeMap -- a flood, a distance field,
+ * a reduce, the canvas-addressed passes -- and their result is exactly what a bake or a regional
+ * decision reads, so the stage does not add a half quantization on top of a whole-map answer. Every
+ * other kind (a local or pointwise kernel) rests as FP16: its four components, alpha included, are
+ * kept, and the relative error of a half texel is about 1e-3, the tolerance the effect tests name.
+ */
+static bool paint_layer_effect_half_allowed(const MaterialPaintLayer &effect)
+{
+  float params[PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM] = {};
+  composite_filter_params(effect, params);
+  return BKE_paint_layers_effect_reach(eMaterialPaintLayerFilter(effect.kind_subtype), params) !=
+         EffectReach::WholeMap;
+}
+
 /** Render the input of \a effect on \a tile_number and apply its kernel, into a buffer of the
  * input's own size. */
 static bool paint_layer_effect_compute(const Material &ma,
@@ -4157,8 +4162,9 @@ static bool paint_layer_effect_compute(const Material &ma,
                                        const MaterialPaintLayer &effect,
                                        const int channel,
                                        const int tile_number,
-                                       std::shared_ptr<ImBuf> &r_color,
+                                       PaintLayerEffectBuffer &r_color,
                                        Vector<AnchorSliceSource> &r_synced,
+                                       std::shared_ptr<ImBuf> &r_answer,
                                        PaintLayerSurfaceRef painted_object)
 {
   /* Timed in two halves because the GPU plan replaces them differently: the kernel is what an
@@ -4228,7 +4234,11 @@ static bool paint_layer_effect_compute(const Material &ma,
         BKE_paint_layers_effect_input_images(entry, r_input_images);
       });
   r_synced = map_sources_snapshot(images);
-  r_color = std::move(color);
+  /* The kernel's own float buffer is the caller's answer: keep a reference before the resting form
+   * takes the shared pointer, so a half entry never forces a read-back on the miss that made it. */
+  r_answer = color;
+  r_color = paint_layer_effect_buffer_pack(std::move(color),
+                                           paint_layer_effect_half_allowed(effect));
   perf_total.note("kind=%d size=%dx%d region=full", int(effect.kind_subtype), width, height);
   return true;
 }
@@ -4317,8 +4327,9 @@ static bool paint_layer_chain_member_effect_compute(const Material &ma,
                                                     const MaterialPaintLayer &member,
                                                     const int channel,
                                                     const int tile_number,
-                                                    std::shared_ptr<ImBuf> &r_color,
+                                                    PaintLayerEffectBuffer &r_color,
                                                     Vector<AnchorSliceSource> &r_synced,
+                                                    std::shared_ptr<ImBuf> &r_answer,
                                                     PaintLayerSurfaceRef painted_object)
 {
   bke::paint_perf::ScopedTimer perf_total("effect.cpu.total");
@@ -4396,7 +4407,9 @@ static bool paint_layer_chain_member_effect_compute(const Material &ma,
         BKE_paint_layers_effect_input_images(entry, r_input_images);
       });
   r_synced = map_sources_snapshot(images);
-  r_color = std::move(color);
+  r_answer = color;
+  r_color = paint_layer_effect_buffer_pack(std::move(color),
+                                           paint_layer_effect_half_allowed(member));
   perf_total.note("kind=%d size=%dx%d region=full", int(member.kind_subtype), width, height);
   return true;
 }
@@ -4471,15 +4484,17 @@ static bool paint_layer_effect_region_compute(
     const PaintMaterialCompositeImageLayer &dims_entry,
     const Span<Image *> images,
     const bool from_slot,
-    const std::shared_ptr<ImBuf> &cached,
+    const PaintLayerEffectBuffer &cached,
     const rcti &changed,
-    std::shared_ptr<ImBuf> &r_patched,
+    PaintLayerEffectBuffer &r_patched,
     Vector<AnchorSliceSource> &r_synced,
-    rcti &r_valid)
+    rcti &r_valid,
+    std::shared_ptr<ImBuf> &r_answer)
 {
   bke::paint_perf::ScopedTimer perf_total("effect.cpu.region");
-  const int width = cached->x;
-  const int height = cached->y;
+  int width = 0;
+  int height = 0;
+  paint_layer_effect_buffer_dimensions(cached, width, height);
   if (!paint_layer_effect_region_update_supported(effect) ||
       !BKE_paint_layers_effect_region_is_exact(dims_entry, images, width, height))
   {
@@ -4563,7 +4578,15 @@ static bool paint_layer_effect_region_compute(
     return false;
   }
 
-  std::shared_ptr<ImBuf> patched = paint_layer_anchor_slice_buffer_clone(*cached);
+  std::shared_ptr<ImBuf> patched;
+  if (cached.halfs != nullptr) {
+    /* A half entry has no float buffer to clone: materializing it is already the private copy the
+     * patch writes into and the entry keeps its FP16 pixels untouched. */
+    patched = paint_layer_effect_buffer_read(cached);
+  }
+  else {
+    patched = paint_layer_anchor_slice_buffer_clone(*cached.floats);
+  }
   if (patched == nullptr) {
     return false;
   }
@@ -4580,7 +4603,10 @@ static bool paint_layer_effect_region_compute(
   /* The versions are taken after the render: an edit that landed while it ran is read next time.
    * The same maps the entry was described from, the slot included. */
   r_synced = map_sources_snapshot(images);
-  r_patched = std::move(patched);
+  /* The patched float buffer is the answer; the entry keeps its FP16 form. */
+  r_answer = patched;
+  r_patched = paint_layer_effect_buffer_pack(std::move(patched),
+                                             paint_layer_effect_half_allowed(effect));
   r_valid = valid;
   perf_total.note("kind=%d size=%dx%d region=%d,%d-%d,%d",
                   int(effect.kind_subtype),
@@ -5029,17 +5055,20 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
       height,
       images,
       g_paint_effect_cache_budget,
-      [&](std::shared_ptr<ImBuf> &r_color, Vector<PaintLayerEffectSource> &r_synced) {
+      [&](PaintLayerEffectBuffer &r_color,
+          Vector<PaintLayerEffectSource> &r_synced,
+          std::shared_ptr<ImBuf> &r_answer) {
         return paint_layer_effect_compute(
-            ma, row, effect, channel, tile_number, r_color, r_synced, painted_object);
+            ma, row, effect, channel, tile_number, r_color, r_synced, r_answer, painted_object);
       },
       changed_region,
       r_valid_region,
-      [&](const std::shared_ptr<ImBuf> &cached,
+      [&](const PaintLayerEffectBuffer &cached,
           const rcti &maps_region,
-          std::shared_ptr<ImBuf> &r_patched,
+          PaintLayerEffectBuffer &r_patched,
           Vector<PaintLayerEffectSource> &r_patched_synced,
-          rcti &r_region_valid) {
+          rcti &r_region_valid,
+          std::shared_ptr<ImBuf> &r_answer) {
         return paint_layer_effect_region_compute(ma,
                                                  row,
                                                  effect,
@@ -5053,7 +5082,8 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
                                                  maps_region,
                                                  r_patched,
                                                  r_patched_synced,
-                                                 r_region_valid);
+                                                 r_region_valid,
+                                                 r_answer);
       });
   if (color != nullptr && r_valid_region != nullptr && changed_region != nullptr &&
       !BLI_rcti_is_empty(changed_region))
@@ -5174,9 +5204,19 @@ static std::shared_ptr<ImBuf> paint_layer_chain_member_effect_buffer_get(
       height,
       images,
       g_paint_effect_cache_budget,
-      [&](std::shared_ptr<ImBuf> &r_color, Vector<PaintLayerEffectSource> &r_synced) {
-        return paint_layer_chain_member_effect_compute(
-            ma, row, chain, member, channel, tile_number, r_color, r_synced, painted_object);
+      [&](PaintLayerEffectBuffer &r_color,
+          Vector<PaintLayerEffectSource> &r_synced,
+          std::shared_ptr<ImBuf> &r_answer) {
+        return paint_layer_chain_member_effect_compute(ma,
+                                                       row,
+                                                       chain,
+                                                       member,
+                                                       channel,
+                                                       tile_number,
+                                                       r_color,
+                                                       r_synced,
+                                                       r_answer,
+                                                       painted_object);
       });
   return result;
 }

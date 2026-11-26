@@ -199,6 +199,8 @@ static bool decal_map_build_impl(const PaintMaterialDecalParams &params,
   r_map.height = height;
   r_map.q = Array<float2>();
   r_map.patch_tri = Array<int>();
+  r_map.crop_min = int2(0);
+  r_map.crop_max = int2(-1);
   r_map.frames.clear();
   r_map.tris.clear();
   r_map.patch_tris_num = 0;
@@ -427,21 +429,49 @@ static bool decal_map_build_impl(const PaintMaterialDecalParams &params,
     box_max = math::max(box_max, int2(box.z, box.w));
   }
   if (box_max.x >= box_min.x) {
+    const int padding = BKE_paint_composite_island_padding(std::max(width, height));
     BKE_paint_composite_pad_islands(
         island,
         width,
         height,
-        BKE_paint_composite_island_padding(std::max(width, height)),
+        padding,
         box_min,
         box_max,
         [&](const int64_t dst, const int64_t src) {
           r_map.q[dst] = r_map.q[src];
           r_map.patch_tri[dst] = r_map.patch_tri[src];
         });
+    /* The padding grows the island's box by the same number of texels on every side; the skip above
+     * already clamped the growth to the canvas, so the box below is the exact area the GPU copy
+     * needs. Keeping the padded texels makes the crop pixel-identical: the shader reads them as
+     * covered, exactly as it read them from the whole-canvas texture. */
+    r_map.crop_min = int2(std::max(0, box_min.x - padding), std::max(0, box_min.y - padding));
+    r_map.crop_max = int2(std::min(width - 1, box_max.x + padding),
+                          std::min(height - 1, box_max.y + padding));
   }
 
   const double end_time = BLI_time_now_seconds();
   r_map.build_seconds = float(end_time - start_time);
+  return true;
+}
+
+bool BKE_paint_material_decal_crop_get(const PaintMaterialDecalMap &map,
+                                       int2 &r_origin,
+                                       int2 &r_size)
+{
+  if (map.width <= 0 || map.height <= 0) {
+    return false;
+  }
+  if (map.crop_max.x < map.crop_min.x || map.crop_max.y < map.crop_min.y) {
+    return false;
+  }
+  if (map.crop_min.x < 0 || map.crop_min.y < 0 ||
+      map.crop_max.x >= map.width || map.crop_max.y >= map.height)
+  {
+    return false;
+  }
+  r_origin = map.crop_min;
+  r_size = int2(map.crop_max.x - map.crop_min.x + 1, map.crop_max.y - map.crop_min.y + 1);
   return true;
 }
 

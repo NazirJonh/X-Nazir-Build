@@ -50,6 +50,37 @@ struct DecalTestMesh {
   }
 };
 
+/* A flat plane in the unit UV square, finely tessellated: the unfold's patch is a handful of quads,
+ * so its footprint stays well inside the canvas. */
+static DecalTestMesh plane_grid(const int n)
+{
+  DecalTestMesh mesh;
+  const int stride = n + 1;
+  for (int y = 0; y <= n; y++) {
+    for (int x = 0; x <= n; x++) {
+      mesh.positions.append(float3(2.0f * float(x) / float(n) - 1.0f,
+                                   2.0f * float(y) / float(n) - 1.0f,
+                                   0.0f));
+    }
+  }
+  for (int y = 0; y < n; y++) {
+    for (int x = 0; x < n; x++) {
+      const int v0 = y * stride + x;
+      const int v1 = v0 + 1;
+      const int v2 = v0 + stride;
+      const int v3 = v2 + 1;
+      const float u0 = float(x) / float(n);
+      const float u1 = float(x + 1) / float(n);
+      const float vv0 = float(y) / float(n);
+      const float vv1 = float(y + 1) / float(n);
+      const float2 uv[4] = {
+          float2(u0, vv0), float2(u1, vv0), float2(u1, vv1), float2(u0, vv1)};
+      mesh.add_quad(int4(v0, v1, v3, v2), uv);
+    }
+  }
+  return mesh;
+}
+
 /* On a flat surface facing the frame the map coordinate is Planar's `q.xy`, also for a frame
  * turned around its depth axis. */
 TEST(paint_material_decal_map, plane_matches_planar)
@@ -90,6 +121,149 @@ TEST(paint_material_decal_map, plane_matches_planar)
       }
     }
   }
+}
+
+/* A typical decal covers a fraction of the canvas: its GPU copy is the patch's padded box, and the
+ * box's texels sampled through its origin are the whole-canvas map's, texel for texel. */
+TEST(paint_material_decal_map, crop_box_is_the_padded_patch_and_preserves_texels)
+{
+  const DecalTestMesh mesh = plane_grid(32);
+
+  PaintMaterialDecalParams params;
+  params.center = float3(0.0f, 0.0f, 0.0f);
+  params.half_size = float2(0.3f, 0.3f);
+  params.radius = 0.35f;
+  params.axis = 2;
+
+  constexpr int size = 256;
+  PaintMaterialDecalMap map;
+  ASSERT_TRUE(mesh.build(params, size, map));
+
+  int2 origin;
+  int2 crop_size;
+  ASSERT_TRUE(BKE_paint_material_decal_crop_get(map, origin, crop_size));
+  EXPECT_GT(crop_size.x, 0);
+  EXPECT_GT(crop_size.y, 0);
+  EXPECT_LT(crop_size.x, size);
+  EXPECT_LT(crop_size.y, size);
+  EXPECT_GE(origin.x, 0);
+  EXPECT_GE(origin.y, 0);
+  EXPECT_LE(origin.x + crop_size.x, size);
+  EXPECT_LE(origin.y + crop_size.y, size);
+
+  int64_t covered = 0;
+  int2 covered_min(size, size);
+  int2 covered_max(-1, -1);
+  for (const int y : IndexRange(size)) {
+    for (const int x : IndexRange(size)) {
+      const int64_t index = int64_t(y) * size + x;
+      const int full_tri = map.patch_tri[index];
+      if (full_tri < 0) {
+        continue;
+      }
+      covered++;
+      covered_min = int2(std::min(covered_min.x, x), std::min(covered_min.y, y));
+      covered_max = int2(std::max(covered_max.x, x), std::max(covered_max.y, y));
+      /* The crop holds every covered texel, padding included. */
+      EXPECT_GE(x, origin.x);
+      EXPECT_GE(y, origin.y);
+      EXPECT_LT(x, origin.x + crop_size.x);
+      EXPECT_LT(y, origin.y + crop_size.y);
+    }
+  }
+  EXPECT_GT(covered, 0);
+
+  /* The crop is exactly the patch's texel box. #BKE_paint_composite_pad_islands copies the island
+   * into the padding ring (so `patch_tri` is set there too), which means this pins the padding
+   * inside the crop: a regression that cropped only the triangle-laid texels (the bare box, no
+   * padding) would leave the ring out and fail the containment loop above and these bounds. */
+  EXPECT_EQ(origin.x, covered_min.x);
+  EXPECT_EQ(origin.y, covered_min.y);
+  EXPECT_EQ(origin.x + crop_size.x, covered_max.x + 1);
+  EXPECT_EQ(origin.y + crop_size.y, covered_max.y + 1);
+
+  /* The pass's cropped read: a canvas texel is translated by the origin, and one outside the crop is
+   * the zero texel the whole-canvas texture held. Every texel matches the full map. */
+  for (const int y : IndexRange(size)) {
+    for (const int x : IndexRange(size)) {
+      const int64_t index = int64_t(y) * size + x;
+      const bool inside = x >= origin.x && y >= origin.y && x < origin.x + crop_size.x &&
+                          y < origin.y + crop_size.y;
+      const int crop_tri = inside ? map.patch_tri[index] : -1;
+      EXPECT_EQ(crop_tri, map.patch_tri[index]);
+    }
+  }
+
+  /* The VRAM the position texture takes follows the footprint, not the canvas. */
+  const size_t full_bytes = size_t(size) * size * sizeof(float4);
+  const size_t crop_bytes = size_t(crop_size.x) * crop_size.y * sizeof(float4);
+  EXPECT_LT(crop_bytes, full_bytes);
+}
+
+/* A box that cannot be uploaded (empty patch, zero size, off the canvas) is refused, so the caller
+ * falls back to the whole canvas instead of reading uninitialized texels. */
+TEST(paint_material_decal_map, crop_box_refuses_unusable_rectangles)
+{
+  DecalTestMesh mesh;
+  mesh.positions = {float3(-1, -1, 0), float3(1, -1, 0), float3(1, 1, 0), float3(-1, 1, 0)};
+  const float2 uv[4] = {float2(0, 0), float2(1, 0), float2(1, 1), float2(0, 1)};
+  mesh.add_quad(int4(0, 1, 2, 3), uv);
+
+  PaintMaterialDecalParams params;
+  params.half_size = float2(0.4f, 0.4f);
+  params.radius = 0.5f;
+  constexpr int size = 64;
+  PaintMaterialDecalMap map;
+  ASSERT_TRUE(mesh.build(params, size, map));
+
+  int2 origin;
+  int2 crop_size;
+  ASSERT_TRUE(BKE_paint_material_decal_crop_get(map, origin, crop_size));
+
+  /* A zero-sized box: the patch laid no texel. */
+  map.crop_max = int2(map.crop_min.x - 1, map.crop_min.y - 1);
+  EXPECT_FALSE(BKE_paint_material_decal_crop_get(map, origin, crop_size));
+
+  /* A box reaching off the canvas. */
+  map.crop_min = int2(-1, 0);
+  map.crop_max = int2(1, 1);
+  EXPECT_FALSE(BKE_paint_material_decal_crop_get(map, origin, crop_size));
+
+  /* A box past the far edge. */
+  map.crop_min = int2(0, 0);
+  map.crop_max = int2(map.width, 1);
+  EXPECT_FALSE(BKE_paint_material_decal_crop_get(map, origin, crop_size));
+
+  /* A map with no canvas has no usable crop either. */
+  map.crop_min = int2(0, 0);
+  map.crop_max = int2(1, 1);
+  map.width = 0;
+  EXPECT_FALSE(BKE_paint_material_decal_crop_get(map, origin, crop_size));
+}
+
+/* A decal whose patch reaches the whole tile gets the whole canvas: the crop never has to grow past
+ * the map, and a full-coverage box is still valid. */
+TEST(paint_material_decal_map, crop_box_covers_the_canvas_for_a_full_patch)
+{
+  DecalTestMesh mesh;
+  mesh.positions = {float3(-1, -1, 0), float3(1, -1, 0), float3(1, 1, 0), float3(-1, 1, 0)};
+  const float2 uv[4] = {float2(0, 0), float2(1, 0), float2(1, 1), float2(0, 1)};
+  mesh.add_quad(int4(0, 1, 2, 3), uv);
+
+  PaintMaterialDecalParams params;
+  params.half_size = float2(1.0f, 1.0f);
+  params.radius = 4.0f;
+  constexpr int size = 64;
+  PaintMaterialDecalMap map;
+  ASSERT_TRUE(mesh.build(params, size, map));
+
+  int2 origin;
+  int2 crop_size;
+  ASSERT_TRUE(BKE_paint_material_decal_crop_get(map, origin, crop_size));
+  EXPECT_EQ(origin.x, 0);
+  EXPECT_EQ(origin.y, 0);
+  EXPECT_EQ(crop_size.x, size);
+  EXPECT_EQ(crop_size.y, size);
 }
 
 /* Two faces of a cube whose shared edge is a UV seam (the faces sit in separate islands): the map

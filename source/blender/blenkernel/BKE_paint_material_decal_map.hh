@@ -167,6 +167,14 @@ struct PaintMaterialDecalMap {
   int width = 0;
   int height = 0;
   /**
+   * The inclusive texel box of the patch plus the filtering padding, in the canvas the map was
+   * built at. The GPU uploads only this box; #BKE_paint_material_decal_crop_get validates it and
+   * tells a caller when the whole canvas has to stand in. `crop_max < crop_min` means no texel is
+   * covered (no triangle was laid into the tile).
+   */
+  int2 crop_min = int2(0);
+  int2 crop_max = int2(-1);
+  /**
    * The map coordinate, normalized like Planar's `q.xy`: the unfolded plane position over the half
    * extent, so the frame's footprint is `[-1, 1]`. `q.x` is the map's U axis, `q.y` its V axis.
    */
@@ -190,6 +198,15 @@ struct PaintMaterialDecalMap {
            size_t(this->tris.size()) * sizeof(PaintMaterialDecalTri);
   }
 };
+
+/**
+ * The texel box of \a map the GPU has to hold for a pixel-identical result: its patch plus the
+ * filtering padding. \return false when the box is not a usable sub-rectangle of the map's canvas
+ * (no patch, zero size, outside the canvas); a caller then falls back to the whole canvas.
+ */
+bool BKE_paint_material_decal_crop_get(const PaintMaterialDecalMap &map,
+                                       int2 &r_origin,
+                                       int2 &r_size);
 
 /**
  * The inverse of a Decal map: from a map coordinate `q` back to the tile UV of the surface point

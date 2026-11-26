@@ -4355,9 +4355,12 @@ TEST_F(PaintLayersOwnedEffectTest, a_partial_folded_effect_matches_the_full_rend
     for (const int x : IndexRange(0, 256)) {
       for (const int k : IndexRange(4)) {
         const int64_t i = (int64_t(y) * 512 + x) * 4 + k;
-        EXPECT_NEAR(partial[i], full[i], 1e-4f)
+        /* The full render's Blur entered the effect cache and rests as FP16 (stage 2.3a), while
+         * the cropped partial compute is a fresh float buffer: the two may differ by one half ulp.
+         * 2e-3 covers that rounding on the scene-linear [0, 1] range the fill uses. */
+        EXPECT_NEAR(partial[i], full[i], 2e-3f)
             << "the cropped effect's pixel " << x << "," << y << " component " << k
-            << " is the full render's";
+            << " is the full render's within the half rounding";
       }
     }
   }
@@ -4378,18 +4381,19 @@ TEST_F(PaintLayersOwnedEffectTest, a_partial_folded_effect_matches_the_full_rend
   ASSERT_EQ(partial.size(), full.size());
 
   /* Just past the content's edge, inside the halo: the cropped kernel's band has to agree with the
-   * full one, or a stroke at the edge would leave a seam. */
+   * full one, or a stroke at the edge would leave a seam. The full render's cached Blur rests as
+   * FP16, the cropped one is float, so one half ulp is the allowed seam. */
   for (const int x : {128, 129, 130, 131, 135}) {
     for (const int k : IndexRange(4)) {
       const int64_t i = (int64_t(60) * 512 + x) * 4 + k;
-      EXPECT_NEAR(partial[i], full[i], 1e-4f)
+      EXPECT_NEAR(partial[i], full[i], 2e-3f)
           << "the halo texel " << x << ",60 component " << k << " matches the full render";
     }
   }
   for (const int y : {128, 129, 130}) {
     for (const int k : IndexRange(4)) {
       const int64_t i = (int64_t(y) * 512 + 60) * 4 + k;
-      EXPECT_NEAR(partial[i], full[i], 1e-4f)
+      EXPECT_NEAR(partial[i], full[i], 2e-3f)
           << "the halo texel 60," << y << " component " << k << " matches the full render";
     }
   }
@@ -4421,7 +4425,12 @@ TEST_F(PaintLayersOwnedEffectTest, a_whole_map_effect_below_the_blur_refuses_the
     for (const int x : IndexRange(0, 256)) {
       for (const int k : IndexRange(4)) {
         const int64_t i = (int64_t(y) * 512 + x) * 4 + k;
-        EXPECT_NEAR(partial[i], full[i], 1e-4f)
+        /* `full` is the first ask (the kernel's exact float); `partial` is the second ask. A
+         * whole-map correction makes the full-canvas fallback re-render the reduce, and the Blur
+         * entry it reads may rest as FP16, so the two answers agree within the stage's half
+         * tolerance rather than bit for bit. 5e-3 leaves room for the reduce re-accumulation on
+         * the HDR values the fill lays (about 1.875 here), still far below one 8-bit step. */
+        EXPECT_NEAR(partial[i], full[i], 5e-3f)
             << "the whole-canvas fallback's pixel " << x << "," << y << " matches the full render";
       }
     }

@@ -21,6 +21,7 @@
 #include "ED_paint_layers_bake.hh"
 
 #include "paint_layers_shader_bake_backend_intern.hh"
+#include "paint_material_combined_effects.hh"
 #include "render_material_bake_intern.hh"
 
 #include "BLI_index_range.hh"
@@ -657,6 +658,28 @@ TEST_F(MaterialBakeTest, node_group_filter_wires_the_convention_by_name)
   /* The built material holds a user on the definition and on the input image; free it here so the
    * users drop before the fixture's main is freed. */
   BKE_id_free(bmain, built);
+}
+
+/**
+ * The Fill Area's label field is a 2D coordinate, so its pair is RG32F: two components instead of
+ * the reduction pyramid's four, and half the bytes. A 4K field pair (two canvas halves) drops from
+ * 2 x 256 MiB to 2 x 128 MiB. The format is a named constant the dispatcher allocates through, so
+ * this pins what the accounting above claims.
+ */
+TEST(EffectFieldFormatTest, field_pair_is_rg32f_half_of_rgba32f)
+{
+  using namespace blender::ed::material_combined;
+  EXPECT_EQ(effect_field_texture_format, gpu::TextureFormat::SFLOAT_32_32);
+  const int field_bytes = gpu::to_bytesize(gpu::to_data_format(effect_field_texture_format));
+  const int rgba_bytes = gpu::to_bytesize(
+      gpu::to_data_format(gpu::TextureFormat::SFLOAT_32_32_32_32));
+  EXPECT_EQ(field_bytes, 8);
+  EXPECT_EQ(field_bytes * 2, rgba_bytes);
+
+  /* The 4K accounting: a canvas of 4096 x 4096 texels, two halves a pair. */
+  const int64_t canvas_texels = int64_t(4096) * 4096;
+  EXPECT_EQ(canvas_texels * field_bytes * 2, int64_t(2) * 128 * 1024 * 1024);
+  EXPECT_EQ(canvas_texels * rgba_bytes * 2, int64_t(2) * 256 * 1024 * 1024);
 }
 
 }  // namespace blender::ed::material_bake::tests

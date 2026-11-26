@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <type_traits>
 #include <utility>
 
 #include "BLI_rect.h"
@@ -34,6 +35,8 @@
 
 #include "DNA_image_types.h"
 #include "IMB_imbuf_types.hh"
+
+#include "paint_layers_effect_half.hh"
 
 namespace blender {
 
@@ -192,7 +195,13 @@ struct EffectCacheEntry {
   EffectCacheKey key;
   int width = 0;
   int height = 0;
-  std::shared_ptr<ImBuf> color;
+  /**
+   * The result in its resting form: FP16 for the kinds whose reach is not #EffectReach::WholeMap,
+   * float for the whole-map ones (see #PaintLayerEffectBuffer). A caller always receives a float
+   * #ImBuf through #paint_layer_effect_buffer_read; the float copy of a half entry lives only as
+   * long as the caller's reference, never beside the half storage.
+   */
+  PaintLayerEffectBuffer color;
   /** The maps the input was rendered from, with the versions they had. */
   Vector<PaintLayerEffectSource> synced;
   size_t bytes = 0;
@@ -303,11 +312,29 @@ template<typename Entry> struct PaintLayerEffectCacheStore {
 
 /** The bytes \a buffer costs: one float per texel per channel. The row effect cache keeps an RGBA
  * buffer and the mask effect cache one scalar channel, so the count reads the buffer itself rather
- * than assuming RGBA. */
+ * than assuming RGBA. A half effect entry is counted by #paint_layer_effect_buffer_bytes below at
+ * its real FP16 cost, not at this float cost. */
 inline size_t paint_layer_effect_buffer_bytes(const ImBuf &buffer)
 {
   const size_t channels = buffer.channels == 0 ? 4 : size_t(buffer.channels);
   return size_t(buffer.x) * size_t(buffer.y) * channels * sizeof(float);
+}
+
+/** The bytes a stored buffer costs: the mask cache's float entry is counted at its real float cost,
+ * and a row effect entry at its resting form -- FP16 is exactly half of an RGBA float buffer. The
+ * budget and every accounting test read this, so the saving is the one the cache actually holds. */
+inline size_t paint_layer_effect_buffer_bytes(const std::shared_ptr<ImBuf> &stored)
+{
+  return stored != nullptr ? paint_layer_effect_buffer_bytes(*stored) : 0;
+}
+
+inline size_t paint_layer_effect_buffer_bytes(const PaintLayerEffectBuffer &stored)
+{
+  if (stored.halfs != nullptr) {
+    /* Four FP16 components per texel: half of an RGBA float texel. */
+    return size_t(stored.halfs->width) * size_t(stored.halfs->height) * 4 * sizeof(uint16_t);
+  }
+  return paint_layer_effect_buffer_bytes(stored.floats);
 }
 
 /* Declared first: the no-region wrapper below forwards to it, and the unqualified call must find
@@ -330,11 +357,14 @@ std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute_region(
  * The one cycle both effect caches run -- the row's (`paint_layer_effect_buffer_get`) and the mask
  * item's (`paint_layer_mask_effect_buffer_get`): find a live entry of \a key at \a width x
  * \a height whose maps have not changed since they were rendered from \a images, or compute one
- * and insert it. \a compute fills the result and the staleness snapshot of its maps; it runs
- * outside the mutex, so a nested cache taking \a mutex cannot deadlock against it, and two threads
- * that miss together may both run it -- a benign duplicate compute, the second result replacing
- * the first. The returned buffer goes out before the entry goes back, so the caller keeps it
- * alive through its own reference whatever the cache does next.
+ * and insert it. \a compute fills the result and the staleness snapshot of its maps, and, when it
+ * already holds the float buffer the kernel produced, hands that buffer over in \a r_answer -- the
+ * cache then serves it without a second materialization. (A mask compute answers its stored scalar
+ * grey there too; a compute that leaves it null falls back to #paint_layer_effect_buffer_read of
+ * the stored form.) \a compute runs outside the mutex, so a nested cache taking \a mutex cannot
+ * deadlock against it, and two threads that miss together may both run it -- a benign duplicate
+ * compute, the second result replacing the first. The returned buffer goes out before the entry
+ * goes back, so the caller keeps it alive through its own reference whatever the cache does next.
  */
 template<typename Entry, typename Compute>
 std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute(
@@ -360,11 +390,12 @@ std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute(
       std::forward<Compute>(compute),
       static_cast<const rcti *>(nullptr),
       static_cast<rcti *>(nullptr),
-      [](const std::shared_ptr<ImBuf> &,
+      [](const auto &,
          const rcti &,
-         std::shared_ptr<ImBuf> &,
+         auto &,
          Vector<PaintLayerEffectSource> &,
-         rcti &) { return false; });
+         rcti &,
+         std::shared_ptr<ImBuf> &) { return false; });
 }
 
 /**
@@ -375,8 +406,11 @@ std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute(
  * by -- the one \a map_sources_changes reported, which is the exact truth the staleness came from,
  * not the caller's earlier estimate -- and fills \a r_color with the patched result and \a
  * r_synced with the maps' fresh snapshot, naming the rectangle the patch made correct in \a
- * r_valid. False, or an update refused by the caller's own gates (a kind whose kernel is not a
- * local function of the neighbourhood), leaves the entry to \a compute as before.
+ * r_valid. When the patch holds the float buffer it wrote, it hands it over in \a r_answer so the
+ * cache serves it without materializing the stored form again; a null answer falls back to
+ * #paint_layer_effect_buffer_read. False, or an update refused by the caller's own gates (a kind
+ * whose kernel is not a local function of the neighbourhood), leaves the entry to \a compute as
+ * before.
  *
  * The update runs outside the mutex, like \a compute: the copy taken under it is what it patches,
  * and the patched result is put back with the same drop-and-insert the full compute ends with, so
@@ -402,9 +436,17 @@ std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute_region(
     rcti *r_valid_region,
     RegionUpdate &&region_update)
 {
-  std::shared_ptr<ImBuf> cached;
+  /* The stored form of an entry: a float #ImBuf for the mask cache, #PaintLayerEffectBuffer for the
+   * row cache (float or FP16). The cycle only ever moves this value around; #read below is the one
+   * place it turns into the float buffer a caller receives. */
+  using Stored = std::decay_t<decltype(store.entries[0].color)>;
+  Stored cached;
   rcti maps_region;
   bool region_offered = false;
+  /* A standing result answered inside the mutex but read outside it: materializing a half entry is
+   * a whole-canvas allocation the lock must not cover. */
+  Stored standing;
+  bool standing_hit = false;
   {
     std::lock_guard<std::mutex> lock(mutex);
     for (int i = 0; i < int(store.entries.size()); i++) {
@@ -422,7 +464,7 @@ std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute_region(
          * whole, so the band a caller that lays a map from it is missing can be written straight
          * from it -- and the whole canvas otherwise, the caller knowing no narrower band to name.
          * #paint_layer_effect_buffer_get grows an offered band by the halo and clamps it. */
-        std::shared_ptr<ImBuf> color = entry.color;
+        standing = entry.color;
         if (r_valid_region != nullptr) {
           if (changed_region != nullptr) {
             *r_valid_region = *changed_region;
@@ -433,7 +475,8 @@ std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute_region(
         }
         /* Move to the back: the vector is the LRU order. */
         store.touch(i);
-        return color;
+        standing_hit = true;
+        break;
       }
       if (change == ePixelChange::Region && changed_region == nullptr &&
           BKE_paint_layers_bake_stroke_active_get())
@@ -442,12 +485,13 @@ std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute_region(
          * canvas at every dab is what the stroke deferral already avoids for the bake; the
          * composite keeps the last result until the stroke ends, then the next ask recomputes it
          * once. A region-offering caller (the bake) still patches / recomputes as before. */
-        std::shared_ptr<ImBuf> color = entry.color;
+        standing = entry.color;
         if (r_valid_region != nullptr) {
           BLI_rcti_init(r_valid_region, 0, 0, 0, 0);
         }
         store.touch(i);
-        return color;
+        standing_hit = true;
+        break;
       }
       if (change == ePixelChange::Region && changed_region != nullptr) {
         /* The entry was found by the full key equality above -- parameters, tile and both input
@@ -466,12 +510,31 @@ std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute_region(
     }
   }
 
+  if (standing_hit) {
+    return paint_layer_effect_buffer_read(standing);
+  }
+
   if (region_offered) {
-    std::shared_ptr<ImBuf> patched;
+    Stored patched;
     Vector<PaintLayerEffectSource> patched_synced;
     rcti patched_valid;
-    if (region_update(cached, maps_region, patched, patched_synced, patched_valid)) {
-      const size_t bytes = paint_layer_effect_buffer_bytes(*patched);
+    /* The patch's own float buffer, when it has one: the cache serves it instead of materializing
+     * the stored half again. A patch that answers only its stored form leaves this null. */
+    std::shared_ptr<ImBuf> patched_answer;
+    if (region_update(cached,
+                      maps_region,
+                      patched,
+                      patched_synced,
+                      patched_valid,
+                      patched_answer))
+    {
+      int patched_width = 0;
+      int patched_height = 0;
+      paint_layer_effect_buffer_dimensions(patched, patched_width, patched_height);
+      const size_t bytes = paint_layer_effect_buffer_bytes(patched);
+      std::shared_ptr<ImBuf> answer = patched_answer != nullptr ?
+                                           patched_answer :
+                                           paint_layer_effect_buffer_read(patched);
       std::lock_guard<std::mutex> lock(mutex);
       /* The same put-back the full compute ends with: an entry of the effect and tile is replaced
        * by the patch, the other tiles' entries stay, and a buffer still shared with a live
@@ -482,9 +545,9 @@ std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute_region(
         store.enforce_budget(bytes, budget, no_release);
         Entry entry;
         entry.key = key;
-        entry.width = patched->x;
-        entry.height = patched->y;
-        entry.color = patched;
+        entry.width = patched_width;
+        entry.height = patched_height;
+        entry.color = std::move(patched);
         entry.synced = std::move(patched_synced);
         entry.bytes = bytes;
         store.total_bytes += bytes;
@@ -493,21 +556,33 @@ std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute_region(
       if (r_valid_region != nullptr) {
         *r_valid_region = patched_valid;
       }
-      return patched;
+      return answer;
     }
     /* The patch was refused (the kind, the region or the input): the full compute answers, the
      * cached buffer stays until it returns. */
   }
 
-  std::shared_ptr<ImBuf> color;
+  Stored color;
   Vector<PaintLayerEffectSource> synced;
-  if (!compute(color, synced)) {
+  /* The float buffer a row compute already produced: the one the kernels ran on. It is served to
+   * the caller as is, so a miss on a half entry never round-trips through FP16. A mask compute
+   * answers its stored grey here; null falls back to materializing the stored form. */
+  std::shared_ptr<ImBuf> answer;
+  if (!compute(color, synced, answer)) {
     if (r_valid_region != nullptr) {
       BLI_rcti_init(r_valid_region, 0, 0, 0, 0);
     }
     return {};
   }
-  const size_t bytes = paint_layer_effect_buffer_bytes(*color);
+  int color_width = 0;
+  int color_height = 0;
+  paint_layer_effect_buffer_dimensions(color, color_width, color_height);
+  const size_t bytes = paint_layer_effect_buffer_bytes(color);
+  if (answer == nullptr) {
+    /* No compute buffer was offered (the mask cache's stored scalar, or a compute that packed
+     * without handing the float source back): materialize the stored form outside the lock. */
+    answer = paint_layer_effect_buffer_read(color);
+  }
 
   std::lock_guard<std::mutex> lock(mutex);
   /* An entry of the same effect and tile with other parameters is stale -- the description can only
@@ -520,9 +595,9 @@ std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute_region(
     store.enforce_budget(bytes, budget, no_release);
     Entry entry;
     entry.key = key;
-    entry.width = color->x;
-    entry.height = color->y;
-    entry.color = color;
+    entry.width = color_width;
+    entry.height = color_height;
+    entry.color = std::move(color);
     entry.synced = std::move(synced);
     entry.bytes = bytes;
     store.total_bytes += bytes;
@@ -532,7 +607,7 @@ std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute_region(
     /* The whole result is new: every texel of it is worth writing where a caller keeps one. */
     BLI_rcti_init(r_valid_region, 0, width, 0, height);
   }
-  return color;
+  return answer;
 }
 
 /** \} */

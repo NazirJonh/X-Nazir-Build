@@ -1817,8 +1817,11 @@ bool combined_preview_gpu_update(const Material &ma,
         if (gray) {
           gpu_samples.append(gpu[0]);
           /* A scalar coverage buffer is a grey in its only channel; an RGBA one carries it in
-           * rgb. */
-          cpu_samples.append(cpu_channels == 1 ? cpu[0] : (cpu[0] + cpu[1] + cpu[2]) / 3.0f);
+           * rgb. A two-channel buffer has no such convention here and falls back to its first
+           * channel instead of reading past the texel. */
+          cpu_samples.append(cpu_channels == 1   ? cpu[0] :
+                             cpu_channels >= 3 ? (cpu[0] + cpu[1] + cpu[2]) / 3.0f :
+                                                 cpu[0]);
         }
         else {
           for (const int k : IndexRange(3)) {

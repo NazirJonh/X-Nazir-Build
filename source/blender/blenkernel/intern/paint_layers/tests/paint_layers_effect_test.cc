@@ -26,6 +26,7 @@
 #include "BLI_math_base.h"
 #include "BLI_math_color.h"
 #include "BLI_math_constants.h"
+#include "BLI_math_half.hh"
 #include "BLI_memory_utils.hh"
 #include "BLI_rect.h"
 #include "BLI_ustring.hh"
@@ -51,7 +52,9 @@
 
 #include "DNA_windowmanager_types.h"
 
+#include "../paint_layers_effect_cache_intern.hh"
 #include "../paint_layers_effect_footprint.hh"
+#include "../paint_layers_effect_half.hh"
 #include "../paint_layers_intern.hh"
 #include "../paint_layers_kind.hh"
 
@@ -60,6 +63,15 @@ namespace blender::bke::tests {
 namespace {
 
 constexpr eMaterialPaintChannel kColor = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+
+/**
+ * The absolute tolerance a result that rested as FP16 may differ from a full-float one by. A half
+ * texel's relative error is about 1e-3, but next to a value near zero the absolute gap is a half
+ * ulp of the value's own magnitude -- the step the round-to-nearest-even conversion takes. 2e-3
+ * covers two independent roundings (a cached half entry patched and packed again) on values in the
+ * scene-linear [0, 1] range the effect tests use, alpha and edge texels included.
+ */
+constexpr float kHalfEffectTolerance = 2e-3f;
 
 }  // namespace
 
@@ -2751,26 +2763,171 @@ TEST_F(PaintLayersEffectTest, the_budget_bounds_what_the_cache_keeps)
   add_effect(*second, MA_PAINT_LAYER_FILTER_BLUR);
   add_effect(*third, MA_PAINT_LAYER_FILTER_BLUR);
 
-  /* An 8x8 RGBA float buffer is 1024 bytes. A budget of two holds the two most recent of the
-   * three: the third's insert evicts the least recently used first. */
+  /* An 8x8 RGBA FP16 effect result is 512 bytes (stage 2.3a: a Blur's result rests as half; the
+   * read materializes the float buffer the composite uses but never stores it). A budget of two
+   * holds the two most recent of the three: the third's insert evicts the least recently used
+   * first. */
   const size_t saved_budget = paint_layer_effect_cache_budget();
-  paint_layer_effect_cache_set_budget(size_t(2) * 1024);
+  paint_layer_effect_cache_set_budget(size_t(2) * 512);
   Vector<float> pixels;
   int width = 0;
   int height = 0;
   ASSERT_TRUE(render_channel(pixels, width, height));
   EXPECT_LE(paint_layer_effect_cache_entry_count(), 2);
-  EXPECT_LE(paint_layer_effect_cache_bytes(), size_t(2) * 1024);
+  EXPECT_LE(paint_layer_effect_cache_bytes(), size_t(2) * 512);
 
   /* A budget below one entry caches nothing, and the composite still shows the blur: the buffer
    * is served to the caller, only never kept. */
-  paint_layer_effect_cache_set_budget(512);
+  paint_layer_effect_cache_set_budget(256);
   BKE_paint_layers_effect_cache_free_all();
   ASSERT_TRUE(render_channel(pixels, width, height));
   EXPECT_EQ(paint_layer_effect_cache_entry_count(), 0);
   EXPECT_EQ(paint_layer_effect_cache_bytes(), 0);
   paint_layer_effect_cache_set_budget(saved_budget);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name FP16 resting form (stage 2.3a)
+ * \{ */
+
+TEST_F(PaintLayersEffectTest, a_blur_rests_as_half_and_accounts_half_the_float_bytes)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *blur = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 1));
+
+  std::shared_ptr<ImBuf> result = owned_effect_result(*row, *blur);
+  ASSERT_NE(result, nullptr);
+  const size_t texels = size_t(result->x) * size_t(result->y);
+  /* A Blur's reach is a neighbourhood, not #EffectReach::WholeMap, so its result may rest as RGBA
+   * FP16: four uint16 components per texel, half of the RGBA float texel it replaced. */
+  EXPECT_EQ(paint_layer_effect_cache_bytes(), texels * 4 * sizeof(uint16_t))
+      << "a Blur entry rests as RGBA FP16";
+  EXPECT_EQ(paint_layer_effect_cache_bytes() * 2, texels * 4 * sizeof(float))
+      << "the FP16 entry is exactly half of the float entry the stage replaced";
+  EXPECT_EQ(result->channels, 4) << "the caller still receives an RGBA float buffer";
+}
+
+TEST_F(PaintLayersEffectTest, a_miss_answers_the_kernels_float_buffer_not_a_half_round_trip)
+{
+  /* A half entry can only serve a float answer by materializing it. The compute that made the entry
+   * already holds the kernel's own float buffer, so the miss must answer with that buffer: the hit
+   * that follows is the only read that goes through FP16. */
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  MaterialPaintLayer *blur = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 1));
+
+  std::shared_ptr<ImBuf> miss = owned_effect_result(*row, *blur);
+  ASSERT_NE(miss, nullptr);
+  ASSERT_EQ(paint_layer_effect_cache_entry_count(), 1);
+
+  /* The stored entry is FP16: its bytes are half a float entry. */
+  EXPECT_EQ(paint_layer_effect_cache_bytes(),
+            size_t(miss->x) * miss->y * 4 * sizeof(uint16_t));
+
+  std::shared_ptr<ImBuf> hit = owned_effect_result(*row, *blur);
+  ASSERT_NE(hit, nullptr);
+  EXPECT_EQ(paint_layer_effect_cache_entry_count(), 1) << "the second ask is a hit";
+  EXPECT_NE(hit.get(), miss.get())
+      << "a hit materializes its own float buffer; the miss keeps the kernel's";
+
+  bool rounded = false;
+  for (const int64_t i : IndexRange(int64_t(miss->x) * miss->y * 4)) {
+    const float exact = miss->float_data()[i];
+    const float half_round_trip = math::half_to_float(math::float_to_half(exact));
+    EXPECT_EQ(hit->float_data()[i], half_round_trip)
+        << "the hit serves exactly what the stored FP16 holds, component " << i;
+    rounded = rounded || half_round_trip != exact;
+  }
+  EXPECT_TRUE(rounded)
+      << "the input carries a value FP16 cannot represent, so the miss's exact float differs "
+         "from the hit's round trip and the test proves the miss did not go through half";
+}
+
+TEST_F(PaintLayersEffectTest, a_whole_map_effect_keeps_its_float_entry)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *glow = add_effect(*row, MA_PAINT_LAYER_FILTER_GLOW);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*glow, PAINT_LAYER_GLOW_WIDTH, 2));
+
+  /* Glow's choke and screen tail read the whole canvas: the plan's reach is #EffectReach::WholeMap,
+   * the gate #paint_layer_effect_half_allowed leaves on the float storage. */
+  float params[PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM] = {};
+  paint_layer_effect_filter_params(*glow, params);
+  ASSERT_EQ(BKE_paint_layers_effect_reach(MA_PAINT_LAYER_FILTER_GLOW, params),
+            EffectReach::WholeMap);
+
+  std::shared_ptr<ImBuf> result = owned_effect_result(*row, *glow);
+  ASSERT_NE(result, nullptr);
+  const size_t texels = size_t(result->x) * size_t(result->y);
+  EXPECT_EQ(paint_layer_effect_cache_bytes(), texels * 4 * sizeof(float))
+      << "a whole-map effect keeps the full float entry";
+}
+
+TEST_F(PaintLayersEffectTest, half_storage_round_trips_within_the_documented_tolerance)
+{
+  /* The kernel boundary is float: this test packs a known float buffer, reads it back and checks the
+   * quantization the resting form adds. Values cover the scene-linear [0, 1] range the effect tests
+   * use, alpha included; near zero the allowed gap is the absolute half ulp the constant documents,
+   * elsewhere the relative 5% the stage's acceptance asks for. */
+  constexpr int size = 8;
+  std::shared_ptr<ImBuf> floats = paint_layer_effect_float_buffer_new(size, size);
+  ASSERT_NE(floats, nullptr);
+  float *pixels = floats->float_data_for_write();
+  for (const int y : IndexRange(size)) {
+    for (const int x : IndexRange(size)) {
+      const int64_t i = (int64_t(y) * size + x) * 4;
+      pixels[i] = float(x) / float(size - 1);
+      pixels[i + 1] = float(y) / float(size - 1);
+      pixels[i + 2] = (x == y) ? 0.0f : 0.6f;
+      pixels[i + 3] = (x + y) % 2 == 0 ? 1.0f : 0.25f;
+    }
+  }
+  const PaintLayerEffectBuffer half = paint_layer_effect_buffer_pack(floats, /*use_half=*/true);
+  ASSERT_TRUE(half.is_half());
+  EXPECT_EQ(paint_layer_effect_buffer_bytes(half), size_t(size) * size * 4 * sizeof(uint16_t));
+  EXPECT_EQ(paint_layer_effect_buffer_bytes(half) * 2, paint_layer_effect_buffer_bytes(floats));
+
+  std::shared_ptr<ImBuf> read = paint_layer_effect_buffer_read(half);
+  ASSERT_NE(read, nullptr);
+  for (const int64_t i : IndexRange(int64_t(size) * size * 4)) {
+    const float expected = floats->float_data()[i];
+    const float actual = read->float_data()[i];
+    const float allowed = std::max(kHalfEffectTolerance, 0.05f * std::abs(expected));
+    EXPECT_LE(std::abs(actual - expected), allowed) << "component " << i;
+  }
+}
+
+TEST_F(PaintLayersEffectTest, half_storage_saturates_hdr_and_drops_nan)
+{
+  /* FP16 tops out at 65504. The pack must saturate, not produce an infinity that would spread
+   * through the composite stack, and a NaN must rest as zero: the read-back is finite for every
+   * component. */
+  std::shared_ptr<ImBuf> floats = paint_layer_effect_float_buffer_new(1, 1);
+  ASSERT_NE(floats, nullptr);
+  float *pixels = floats->float_data_for_write();
+  pixels[0] = 70000.0f;
+  pixels[1] = -70000.0f;
+  pixels[2] = std::numeric_limits<float>::infinity();
+  pixels[3] = std::numeric_limits<float>::quiet_NaN();
+
+  const PaintLayerEffectBuffer half = paint_layer_effect_buffer_pack(floats, /*use_half=*/true);
+  ASSERT_TRUE(half.is_half());
+  std::shared_ptr<ImBuf> read = paint_layer_effect_buffer_read(half);
+  ASSERT_NE(read, nullptr);
+  const float *result = read->float_data();
+  EXPECT_EQ(result[0], 65504.0f);
+  EXPECT_EQ(result[1], -65504.0f);
+  EXPECT_EQ(result[2], 65504.0f);
+  EXPECT_EQ(result[3], 0.0f);
+  for (const int64_t i : IndexRange(4)) {
+    EXPECT_TRUE(std::isfinite(result[i])) << "component " << i;
+  }
+}
+
+/** \} */
 
 /* -------------------------------------------------------------------- */
 /** \name Regional CPU effect cache update
@@ -2801,14 +2958,18 @@ TEST_F(PaintLayersEffectTest, a_region_patch_matches_a_full_compute_and_names_it
   ASSERT_NE(patched, nullptr);
   EXPECT_NE(patched.get(), first.get()) << "a patch lands in a clone, not in the standing result";
   EXPECT_EQ(paint_layer_effect_cache_entry_count(), 1) << "the patch replaces the entry";
-  EXPECT_EQ(paint_layer_effect_cache_bytes(), size_t(first->x) * first->y * sizeof(float[4]))
-      << "the entry accounts one result, not the old one beside it";
+  /* A Blur's result rests as RGBA FP16 (stage 2.3a): the patched entry is accounted at half the
+   * float cost, one entry, not the old one beside it. The caller's buffer is still float. */
+  EXPECT_EQ(paint_layer_effect_cache_bytes(), size_t(first->x) * first->y * 4 * sizeof(uint16_t))
+      << "the patched entry rests as FP16 and accounts one result only";
 
-  /* The cache's answer must be the picture a fresh full render of the edited input gives. */
+  /* The cache's answer must be the picture a fresh full render of the edited input gives. Both
+   * sides rested as FP16 and were read back, so the comparison uses the half tolerance the stage
+   * documents: two independent roundings may differ by one half ulp on a texel. */
   paint_layer_owned_effect_cache_drop(*ma, *blur, int(kColor), PAINT_TILE_NUMBER_BASE);
   std::shared_ptr<ImBuf> full = owned_effect_result(*row, *blur);
   ASSERT_NE(full, nullptr);
-  expect_results_close(*patched, *full, 1e-5f);
+  expect_results_close(*patched, *full, kHalfEffectTolerance);
 
   /* The answer names the band a caller can write: at least the dirty rectangle grown by the
    * kernel's one-texel reach, inside the canvas. The cache may answer one halo wider -- the
@@ -2851,11 +3012,12 @@ TEST_F(PaintLayersEffectTest, a_region_patch_leaves_the_previous_readers_buffer_
   EXPECT_TRUE(results_differ(*patched, *first, 1e-5f))
       << "the patched result is the new picture, not the one the old reader holds";
 
-  /* And the clone is the current picture: the same answer a fresh full render gives. */
+  /* And the clone is the current picture: the same answer a fresh full render gives. Both rest as
+   * FP16 (a Blur), so the half tolerance applies. */
   paint_layer_owned_effect_cache_drop(*ma, *blur, int(kColor), PAINT_TILE_NUMBER_BASE);
   std::shared_ptr<ImBuf> full = owned_effect_result(*row, *blur);
   ASSERT_NE(full, nullptr);
-  expect_results_close(*patched, *full, 1e-5f);
+  expect_results_close(*patched, *full, kHalfEffectTolerance);
 }
 
 TEST_F(PaintLayersEffectTest, a_full_map_change_answers_the_whole_canvas)
@@ -2886,7 +3048,8 @@ TEST_F(PaintLayersEffectTest, a_full_map_change_answers_the_whole_canvas)
   paint_layer_owned_effect_cache_drop(*ma, *blur, int(kColor), PAINT_TILE_NUMBER_BASE);
   std::shared_ptr<ImBuf> full = owned_effect_result(*row, *blur);
   ASSERT_NE(full, nullptr);
-  expect_results_close(*answered, *full, 1e-5f);
+  /* A Blur rests as FP16; both answers were read back from their entries. */
+  expect_results_close(*answered, *full, kHalfEffectTolerance);
 }
 
 TEST_F(PaintLayersEffectTest, a_kind_without_region_exact_answers_the_whole_canvas)
@@ -2940,8 +3103,14 @@ TEST_F(PaintLayersEffectTest, a_stroke_pins_the_preview_effect_until_it_ends)
   edit_image_rect(*image, rcti{5, 7, 3, 5}, 200);
   std::shared_ptr<ImBuf> pinned = owned_effect_result(*row, *blur);
   ASSERT_NE(pinned, nullptr);
-  EXPECT_EQ(pinned.get(), first.get())
-      << "the preview keeps the last effect result while the stroke paints its input";
+  /* A Blur entry rests as FP16, so every hit materializes a fresh float buffer: the pinned answer
+   * is the standing result's half round trip, while `first` is the exact float buffer the miss
+   * produced (stage 2.3a: a miss no longer re-reads half). */
+  for (const int64_t i : IndexRange(int64_t(first->x) * first->y * 4)) {
+    EXPECT_EQ(pinned->float_data()[i],
+              math::half_to_float(math::float_to_half(first->float_data()[i])))
+        << "the pinned answer is the standing entry's FP16, component " << i;
+  }
 
   BKE_paint_layers_bake_stroke_active_set(false);
   std::shared_ptr<ImBuf> updated = owned_effect_result(*row, *blur);
@@ -3027,7 +3196,10 @@ TEST_F(PaintLayersEffectTest, a_noise_at_zero_intensity_changes_nothing)
   ASSERT_TRUE(render_channel(pixels, width, height));
   ASSERT_EQ(pixels.size(), before.size());
   for (const int64_t i : pixels.index_range()) {
-    EXPECT_NEAR(pixels[i], before[i], 1e-6f) << "no intensity lays no grain, texel " << i;
+    /* A Noise rests as FP16 (stage 2.3a): zero intensity lays the input back, quantized to the half
+     * grid, so the comparison uses the stage's half tolerance rather than exact float equality. */
+    EXPECT_NEAR(pixels[i], before[i], kHalfEffectTolerance)
+        << "no intensity lays no grain, texel " << i;
   }
 }
 
@@ -3042,12 +3214,14 @@ TEST_F(PaintLayersEffectTest, the_same_seed_lays_the_same_grain_and_the_cache_re
   int height = 0;
   ASSERT_TRUE(render_channel(first, width, height));
   EXPECT_EQ(paint_layer_effect_cache_entry_count(), 1);
-  /* The same seed computes the same grain: the second render serves the entry the first filled. */
+  /* The same seed computes the same grain: the second render serves the entry the first filled.
+   * `first` is the miss's exact float buffer; `again` is the hit's FP16 round trip. */
   Vector<float> again;
   ASSERT_TRUE(render_channel(again, width, height));
   ASSERT_EQ(again.size(), first.size());
   for (const int64_t i : again.index_range()) {
-    EXPECT_NEAR(again[i], first[i], 0.0f) << "the grain is stable for the seed, texel " << i;
+    EXPECT_EQ(again[i], math::half_to_float(math::float_to_half(first[i])))
+        << "the grain is stable for the seed, texel " << i;
   }
 
   /* Another seed is another pattern: the key moves, the entry is replaced, not added to. */
@@ -3086,7 +3260,9 @@ TEST_F(PaintLayersEffectTest, salt_and_pepper_moves_only_to_black_and_white)
   for (const int64_t i : pixels.index_range()) {
     const bool salt = std::abs(pixels[i]) <= 1e-6f;
     const bool pepper = std::abs(pixels[i] - 1.0f) <= 1e-6f;
-    const bool stayed = std::abs(pixels[i] - before[i]) <= 1e-6f;
+    /* Black and white are exact in FP16, but a texel the grain left alone is the input quantized to
+     * the half grid (a Noise rests as FP16), so it is allowed the stage's half tolerance. */
+    const bool stayed = std::abs(pixels[i] - before[i]) <= kHalfEffectTolerance;
     EXPECT_TRUE(salt || pepper || stayed)
         << "a salt and pepper grain only makes black or white, texel " << i;
     salted += salt;
@@ -8136,13 +8312,21 @@ TEST_F(PaintLayersEffectTest, the_node_group_filter_cache_keys_on_the_definition
   const uint64_t hash_before = BKE_paint_layers_node_group_definition_hash(*group);
   EXPECT_NE(hash_before, 0ull);
 
-  /* The second ask is the same entry: a hit, not a recompute -- the same buffer object, which is
-   * the key stability the GPU preview's upload relies on when it keys its own texture beside it. */
+  /* The second ask is the same entry: a hit, not a recompute. A Node Group has no pass plan, so
+   * its reach is #EffectReach::WholeMap and the entry stays f32 (stage 2.3a): the hit returns the
+   * stored float values exactly. */
   int again_width = 0;
   int again_height = 0;
   std::shared_ptr<ImBuf> second = BKE_paint_layers_effect_buffer_result(
       *ma, *group, int(kColor), PAINT_TILE_NUMBER_BASE, again_width, again_height);
-  EXPECT_EQ(second.get(), first.get()) << "the same key answers the same buffer";
+  ASSERT_NE(second, nullptr);
+  EXPECT_EQ(paint_layer_effect_cache_entry_count(), 1) << "the same key is a hit, not a recompute";
+  ASSERT_EQ(second->x, first->x);
+  ASSERT_EQ(second->y, first->y);
+  for (const int64_t i : IndexRange(int64_t(first->x) * first->y * 4)) {
+    EXPECT_EQ(second->float_data()[i], first->float_data()[i])
+        << "the same key answers the same values";
+  }
   EXPECT_EQ(again_width, width);
   EXPECT_EQ(again_height, height);
 

@@ -272,7 +272,8 @@ static bool mask_gpu_result_compute(const MaterialPaintLayer &effect,
         "combined_mask_reduce", gpu::TextureFormat::SFLOAT_32_32_32_32, reduce);
   }
   if (acquired && plan_floods) {
-    acquired = acquire_pair("combined_mask_field", gpu::TextureFormat::SFLOAT_32_32_32_32, field);
+    /* The label field is a 2D coordinate: RG32F, half the bytes of the reduction's RGBA32F pair. */
+    acquired = acquire_pair("combined_mask_field", effect_field_texture_format, field);
   }
   if (!acquired) {
     mask_bake_refuse("scratch");
@@ -301,10 +302,11 @@ static bool mask_gpu_result_compute(const MaterialPaintLayer &effect,
                                                return pass.alpha_from_kernel;
                                              });
   job.tracks_alpha = pass_writes_alpha;
-  /* The dispatch helper binds the field slot of every pass, not only the flooding's own
-   * destination: a pass that reads no field gets this placeholder, the way the preview's own job
-   * scratch does (#GpuEffectJob::field_placeholder), so a null binding never reaches the image
-   * slot of the effect shader. */
+  /* The dispatch helper binds the float32 slots of every pass, not only the flooding's own
+   * destination: a pass that reads no field gets these placeholders, the way the preview's own job
+   * scratch does (#GpuEffectJob::field_placeholder / #GpuEffectJob::flood_placeholder), so a null
+   * binding never reaches an image slot of the effect shader. The reduction slot is RGBA32F, the
+   * label-field slot RG32F (#effect_field_texture_format). */
   job.field_placeholder = pool.acquire_texture_2d(
       int2(1), 1, gpu::TextureFormat::SFLOAT_32_32_32_32, usage, "combined_mask_field_placeholder");
   if (job.field_placeholder == nullptr) {
@@ -312,6 +314,16 @@ static bool mask_gpu_result_compute(const MaterialPaintLayer &effect,
     return false;
   }
   scratch.append(job.field_placeholder);
+  job.flood_placeholder = pool.acquire_texture_2d(int2(1),
+                                                  1,
+                                                  effect_field_texture_format,
+                                                  usage,
+                                                  "combined_mask_flood_placeholder");
+  if (job.flood_placeholder == nullptr) {
+    mask_bake_refuse("scratch");
+    return false;
+  }
+  scratch.append(job.flood_placeholder);
 
   Vector<gpu::Texture *> filter_luts;
   Vector<GpuSliceSlot> slice_slots;

@@ -177,6 +177,9 @@ struct GpuProjection {
   /** A Decal frame's per-triangle axes (three texels each), read by the triangle id `position`
    * carries. Null for the other modes. */
   gpu::Texture *decal_frames = nullptr;
+  /** The canvas texel the projection `position` texture's (0, 0) stands for. Non-zero for a Decal,
+   * whose texture holds only the patch's crop; the pass translates a canvas texel by it. */
+  int2 texel_origin = int2(0);
   int2 canvas_size = int2(1);
   /** Object-space point to frame-space `q` (controller and aspect included), and normal to frame. */
   float4x4 p_to_q = float4x4::identity();
@@ -301,6 +304,17 @@ struct GpuEffectResult {
 };
 
 /**
+ * The Fill Area's label-field texel format: the label is a canvas texel (two coordinates), so the
+ * flood's field pair is RG32F -- 8 bytes a texel, half the 16 bytes of the Color Match's RGBA32F
+ * reduction pair. The border flag the field needs beyond the coordinate rides as the shader's label
+ * sentinel (#flood_label_is_border), not a third component. Kept here so the format and its byte
+ * accounting are one named thing both dispatchers and the format test read.
+ */
+inline constexpr gpu::TextureFormat effect_field_texture_format = gpu::TextureFormat::SFLOAT_32_32;
+/* One field texel is half the bytes of the reduction pair's RGBA32F (8 vs 16), so a 4K field pair
+ * is 2x128 MiB instead of the old 2x256 MiB; the format test pins the saving. */
+
+/**
  * One effect the preview has to have a GPU result for, with everything its pass needs. The stages
  * below fill the textures in: the cache's result first, then -- only when the cache had none or the
  * input moved -- the content the effect reads and the kernel's answer.
@@ -333,6 +347,10 @@ struct GpuEffectJob {
    * dispatches end, like #input. Full float, not half: a pyramid level sums the canvas up -- a 4K
    * one overflows a half float with -- and a field label carries coordinates the width of the
    * canvas, past what a half float numbers exactly.
+   *
+   * The reduction pair is RGBA32F (the colour sum and the weight sum); the field pair is
+   * #effect_field_texture_format (RG32F), the label being a 2D coordinate -- half the bytes of the
+   * old RGBA32F field (a 4K field pair is 2x128 MiB instead of 2x256 MiB).
    */
   gpu::Texture *reduce_pair[2] = {nullptr, nullptr};
   gpu::Texture *field_pair[2] = {nullptr, nullptr};
@@ -344,12 +362,14 @@ struct GpuEffectJob {
    */
   gpu::Texture *field_texture = nullptr;
   /**
-   * A one-texel float32 texture bound to the shader's `field_img` slot by every pass that does not
-   * write the field: the slot is declared for the whole effect shader, and a descriptor with
-   * nothing bound dereferences null in the Vulkan backend. Held from the pool for the job's
-   * dispatches only, like the pairs above.
+   * One-texel textures bound to the shader's float32 slots by every pass that does not write them:
+   * the slots are declared for the whole effect shader, and a descriptor with nothing bound
+   * dereferences null in the Vulkan backend. #field_placeholder is the reduction slot (RGBA32F);
+   * #flood_placeholder is the label-field slot (RG32F, #effect_field_texture_format). Held from the
+   * pool for the job's dispatches only, like the pairs above.
    */
   gpu::Texture *field_placeholder = nullptr;
+  gpu::Texture *flood_placeholder = nullptr;
   /** The maps the input renders from: their versions decide when the result goes stale. */
   Vector<Image *> images;
   /** Texels that moved since the cached result; carried for the GPU pass's region re-render. */
@@ -405,9 +425,9 @@ struct EffectDispatchArgs {
   gpu::Texture *src;
   gpu::Texture *aux;
   gpu::Texture *dst;
-  /** The float32 texture a reduction or flooding pass writes through the shader's `field_img`
-   * slot, where the 16F `dst` declaration cannot follow; null for every other pass, whose kernel
-   * never names the slot. */
+  /** The float32 texture a reduction or flooding pass writes through the shader's float32 slot
+   * (`field_img` for a reduction, `flood_img` for a flooding), where the 16F `dst` declaration
+   * cannot follow; null for every other pass, whose kernel never names either slot. */
   gpu::Texture *field_dst = nullptr;
   const rcti &rect;
   /**

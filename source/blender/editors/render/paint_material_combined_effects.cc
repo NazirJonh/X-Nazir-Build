@@ -395,14 +395,16 @@ static size_t gpu_surface_map_bytes(const PaintMaterialSurfaceMap &map, const in
 /* Decal map
  *
  * A Decal row's unfolded patch (#BKE_paint_material_decal_map_get) on the GPU, as two textures:
- * - a canvas-sized RGBA32F "position" `(q.x, q.y, triangle id, 1)`, with all zeros where the patch
- *   does not reach. It takes the place of the surface position texture in the shader's
- *   projection read, so `p_to_q` (a diagonal aspect matrix for a Decal) yields exactly the CPU's
- *   `q` and a texel outside the patch is the transparent one the surface map's `w = 0` already is.
- *   Full-float: `q` steps visibly in a half on a 4K canvas, and a triangle id is exact in a float
- *   up to 2^24 (the patch holds at most #PAINT_MATERIAL_DECAL_MAX_TRIS). One texture instead of an
- *   RG32F plus an R32I saves a sampler in every pass and the shader's integer-sampler path, for
- *   4 bytes a texel more (256 MiB against 192 MiB at 4K).
+ * - an RGBA32F "position" `(q.x, q.y, triangle id, 1)` over the patch's padded bounding box (the
+ *   map's crop), with all zeros where the patch does not reach. It takes the place of the surface
+ *   position texture in the shader's projection read, and the pass translates a canvas texel by the
+ *   crop's origin before the fetch, so `p_to_q` (a diagonal aspect matrix for a Decal) yields exactly
+ *   the CPU's `q` and a texel outside the patch is the transparent one the surface map's `w = 0`
+ *   already is. Cropping to the footprint keeps the VRAM cost proportional to the decal's reach:
+ *   a small decal on a 4K canvas no longer pays for 256 MiB. Full-float: `q` steps visibly in a half
+ *   on a 4K canvas, and a triangle id is exact in a float up to 2^24 (the patch holds at most
+ *   #PAINT_MATERIAL_DECAL_MAX_TRIS). One texture instead of an RG32F plus an R32I saves a sampler in
+ *   every pass and the shader's integer-sampler path, for 4 bytes a texel more.
  * - the frames table: three RGBA32F texels per patch triangle (its three axes), a few hundred KiB.
  *
  * The entries are keyed by the BKE map's key, so a rebuilt-but-identical map reuses its textures.
@@ -423,6 +425,11 @@ struct GpuDecalMapEntry {
   PaintMaterialDecalMapKey key;
   gpu::Texture *position = nullptr;
   gpu::Texture *frames = nullptr;
+  /** The canvas texel the position texture's (0, 0) stands for, and the texture's size: the
+   * patch's padded bounding box, so the texture is proportional to the decal's footprint rather
+   * than to the whole canvas. */
+  int2 crop_origin = int2(0);
+  int2 crop_size = int2(0);
   size_t bytes = 0;
 };
 
@@ -452,14 +459,22 @@ static void gpu_decal_cache_free()
   BKE_paint_material_decal_map_free();
 }
 
-/** Upload \a map into \a entry's textures; false when a texture could not be allocated. */
+/** Upload \a map into \a entry's textures; false when a texture could not be allocated.
+ *
+ * \param crop_origin, crop_size: the canvas texel box to upload (the map's padded patch box, or
+ * the whole canvas when #BKE_paint_material_decal_crop_get refused it).
+ */
 static bool gpu_decal_entry_upload(const PaintMaterialDecalMap &map,
                                    const int canvas,
+                                   const int2 crop_origin,
+                                   const int2 crop_size,
                                    GpuDecalMapEntry &entry)
 {
+  entry.crop_origin = crop_origin;
+  entry.crop_size = crop_size;
   entry.position = GPU_texture_create_2d("combined_decal_position",
-                                         canvas,
-                                         canvas,
+                                         crop_size.x,
+                                         crop_size.y,
                                          1,
                                          gpu::TextureFormat::SFLOAT_32_32_32_32,
                                          GPU_TEXTURE_USAGE_SHADER_READ,
@@ -485,33 +500,34 @@ static bool gpu_decal_entry_upload(const PaintMaterialDecalMap &map,
   if (entry.position == nullptr || entry.frames == nullptr) {
     return false;
   }
-  Array<float4> strip(int64_t(GPU_DECAL_UPLOAD_ROWS) * canvas);
-  for (int y0 = 0; y0 < canvas; y0 += GPU_DECAL_UPLOAD_ROWS) {
-    const int rows = std::min(GPU_DECAL_UPLOAD_ROWS, canvas - y0);
-    /* Every row of the strip is its own texels, so the fill runs in parallel: a 4K canvas is 16M
-     * texels on the draw thread. */
+  Array<float4> strip(int64_t(GPU_DECAL_UPLOAD_ROWS) * crop_size.x);
+  for (int y0 = 0; y0 < crop_size.y; y0 += GPU_DECAL_UPLOAD_ROWS) {
+    const int rows = std::min(GPU_DECAL_UPLOAD_ROWS, crop_size.y - y0);
+    /* Every row of the strip is its own texels, so the fill runs in parallel: a 4K decal used to
+     * be 16M texels on the draw thread; the crop keeps the cost with the footprint. */
     threading::parallel_for(IndexRange(rows), 8, [&](const IndexRange row_range) {
       for (const int row : row_range) {
-        for (const int x : IndexRange(canvas)) {
-          const int64_t index = int64_t(y0 + row) * canvas + x;
+        for (const int x : IndexRange(crop_size.x)) {
+          const int64_t index = int64_t(crop_origin.y + y0 + row) * canvas + crop_origin.x + x;
           const int tri = map.patch_tri[index];
-          strip[int64_t(row) * canvas + x] = tri >= 0 ? float4(map.q[index].x,
-                                                               map.q[index].y,
-                                                               float(tri),
-                                                               1.0f) :
-                                                         float4(0.0f);
+          strip[int64_t(row) * crop_size.x + x] = tri >= 0 ?
+                                                      float4(map.q[index].x,
+                                                             map.q[index].y,
+                                                             float(tri),
+                                                             1.0f) :
+                                                      float4(0.0f);
         }
       }
     });
     GPU_texture_update_sub(
-        entry.position, GPU_DATA_FLOAT, &strip[0].x, 0, y0, 0, canvas, rows, 0);
+        entry.position, GPU_DATA_FLOAT, &strip[0].x, 0, y0, 0, crop_size.x, rows, 0);
   }
   return true;
 }
 
-static size_t gpu_decal_map_bytes(const PaintMaterialDecalMap &map, const int canvas)
+static size_t gpu_decal_map_bytes(const PaintMaterialDecalMap &map, const int2 crop_size)
 {
-  return size_t(canvas) * size_t(canvas) * sizeof(float4) +
+  return size_t(crop_size.x) * size_t(crop_size.y) * sizeof(float4) +
          (size_t(map.frames.size()) * 3 + GPU_DECAL_FRAME_TABLE_WIDTH) * sizeof(float4);
 }
 
@@ -551,12 +567,30 @@ static const GpuDecalMapEntry *gpu_decal_entry_get(const PaintMaterialCompositeP
       return touch(i);
     }
   }
-  const size_t bytes = gpu_decal_map_bytes(*map, canvas);
+  int2 crop_origin(0);
+  int2 crop_size(canvas, canvas);
+  if (!BKE_paint_material_decal_crop_get(*map, crop_origin, crop_size)) {
+    if (map->crop_max.x < map->crop_min.x || map->crop_max.y < map->crop_min.y) {
+      /* The patch laid no texel at all: every position texel is zero, so a one-texel zero texture
+       * at the canvas origin reads as the zero whole-canvas one and saves the allocation. */
+      crop_origin = int2(0);
+      crop_size = int2(1);
+      perf_map.note("crop empty canvas=%d", canvas);
+    }
+    else {
+      /* The patch has no usable box (zero-sized, off the canvas or past its edge): the whole
+       * canvas stands in. The result is unchanged; only the VRAM saving is lost. */
+      crop_origin = int2(0);
+      crop_size = int2(canvas, canvas);
+      perf_map.note("crop fallback canvas=%d", canvas);
+    }
+  }
+  const size_t bytes = gpu_decal_map_bytes(*map, crop_size);
   gpu_decal_cache.evict_for(bytes, GPU_DECAL_CACHE_BYTES);
   GpuDecalMapEntry entry;
   entry.key = map->key;
   entry.bytes = bytes;
-  if (!gpu_decal_entry_upload(*map, canvas, entry)) {
+  if (!gpu_decal_entry_upload(*map, canvas, crop_origin, crop_size, entry)) {
     gpu_decal_entry_release(entry);
     gpu_refuse("the Decal map textures could not be allocated");
     return nullptr;
@@ -564,7 +598,13 @@ static const GpuDecalMapEntry *gpu_decal_entry_get(const PaintMaterialCompositeP
   /* The upload is read by the dispatch that follows. */
   GPU_memory_barrier(GPU_BARRIER_TEXTURE_UPDATE);
   gpu_decal_cache.append(std::move(entry));
-  perf_map.note("uploaded canvas=%d tris=%d", canvas, int(map->frames.size()));
+  perf_map.note("uploaded canvas=%d crop=%dx%d at %d,%d tris=%d",
+                canvas,
+                crop_size.x,
+                crop_size.y,
+                crop_origin.x,
+                crop_origin.y,
+                int(map->frames.size()));
   return &gpu_decal_cache.entries.last();
 }
 
@@ -792,6 +832,7 @@ bool combined_projection_gpu_make(const PaintMaterialCompositeProjection &projec
     r_projection.p_to_q[3][3] = 1.0f;
     r_projection.position = decal->position;
     r_projection.decal_frames = decal->frames;
+    r_projection.texel_origin = decal->crop_origin;
   }
 
   const float3x3 n_to_frame = rotation_3x3 * n_to_controller;
@@ -899,6 +940,7 @@ static void gpu_projection_uniforms_set(gpu::Shader *shader, const GpuProjection
   GPU_shader_uniform_4fv(shader, "proj_atlas_2", &frame.atlas_2.x);
   GPU_shader_uniform_2fv(shader, "proj_atlas_cell", &frame.atlas_cell.x);
   GPU_shader_uniform_2iv(shader, "proj_canvas_size", &frame.canvas_size.x);
+  GPU_shader_uniform_2iv(shader, "proj_texel_origin", &frame.texel_origin.x);
   GPU_shader_uniform_1i(shader, "proj_mode", frame.mode);
   GPU_shader_uniform_1i(shader, "proj_axis", frame.axis);
   GPU_shader_uniform_1i(shader, "proj_flags", frame.flags);
@@ -1053,6 +1095,7 @@ bool CombinedPasses::lay(CombinedTarget &t,
   GPU_shader_uniform_4fv(layer_shader, "proj_atlas_2", &frame.atlas_2.x);
   GPU_shader_uniform_2fv(layer_shader, "proj_atlas_cell", &frame.atlas_cell.x);
   GPU_shader_uniform_2iv(layer_shader, "proj_canvas_size", &frame.canvas_size.x);
+  GPU_shader_uniform_2iv(layer_shader, "proj_texel_origin", &frame.texel_origin.x);
   GPU_shader_uniform_1i(layer_shader, "proj_mode", frame.mode);
   GPU_shader_uniform_1i(layer_shader, "proj_axis", frame.axis);
   GPU_shader_uniform_1i(layer_shader, "proj_flags", frame.flags);
@@ -1946,18 +1989,34 @@ void CombinedPasses::effect_pass_dispatch(const EffectDispatchArgs &args,
                    GPU_shader_get_sampler_binding(effect_shader, "aux_tx"));
   GPU_texture_image_bind(args.dst,
                          GPU_shader_get_sampler_binding(effect_shader, "result_img"));
-  /* The reduction and the flooding write their float32 texture through the field slot, whose
+  /* The reduction and the flooding write their float32 texture through their own slot, whose
    * declaration names the 32F format the 16F result slot cannot take; the result slot still gets a
-   * valid 16F binding those kernels leave alone. */
-  /* A pass that writes no field still binds the placeholder: the slot belongs to the whole shader. */
-  gpu::Texture *field_bound = (args.field_dst != nullptr) ? args.field_dst : job.field_placeholder;
-  if (field_bound != nullptr) {
-    GPU_texture_image_bind(field_bound,
+   * valid 16F binding those kernels leave alone. The reduction's pyramid is RGBA32F and the
+   * flooding's label field RG32F, so each pass binds the slot its kind names and a one-texel
+   * placeholder of the matching format to the other: both slots belong to the whole shader, and a
+   * descriptor with nothing bound dereferences null in the Vulkan backend. */
+  const bool reduce_pass = ELEM(args.pass.kind,
+                                ePaintLayerEffectPass::ReduceStart,
+                                ePaintLayerEffectPass::ReduceStep);
+  const bool flood_pass = ELEM(args.pass.kind,
+                               ePaintLayerEffectPass::FloodInit,
+                               ePaintLayerEffectPass::FloodStep);
+  gpu::Texture *reduce_bound = reduce_pass ? args.field_dst : job.field_placeholder;
+  gpu::Texture *flood_bound = flood_pass ? args.field_dst : job.flood_placeholder;
+  if (reduce_bound != nullptr) {
+    GPU_texture_image_bind(reduce_bound,
                            GPU_shader_get_sampler_binding(effect_shader, "field_img"));
   }
+  if (flood_bound != nullptr) {
+    GPU_texture_image_bind(flood_bound,
+                           GPU_shader_get_sampler_binding(effect_shader, "flood_img"));
+  }
   GPU_compute_dispatch(effect_shader, uint(groups.x), uint(groups.y), 1);
-  if (field_bound != nullptr) {
-    GPU_texture_image_unbind(field_bound);
+  if (flood_bound != nullptr) {
+    GPU_texture_image_unbind(flood_bound);
+  }
+  if (reduce_bound != nullptr) {
+    GPU_texture_image_unbind(reduce_bound);
   }
   GPU_texture_image_unbind(args.dst);
   GPU_texture_unbind(args.src);

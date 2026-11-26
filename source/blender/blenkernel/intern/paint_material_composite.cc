@@ -836,7 +836,8 @@ static bool composite_ibuf_is_rgba(const ImBuf *ibuf, const int width, const int
 /**
  * A coverage buffer: the live slice's scalar plane (one float per texel) or an RGBA one from a map
  * or a bake. The tile decode reads the first channel for either and expands a one-channel buffer
- * as a grey, so both layouts are valid.
+ * as a grey, so both layouts are valid. A zero channel count is the unset ImBuf default, which the
+ * decode reads as four (#composite_decode_tile), and is accepted as an RGBA buffer here.
  */
 static bool composite_ibuf_is_coverage(const ImBuf *ibuf, const int width, const int height)
 {

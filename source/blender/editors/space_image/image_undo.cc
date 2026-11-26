@@ -389,13 +389,13 @@ static uint32_t index_from_xy(uint32_t tile_x, uint32_t tile_y, const uint32_t t
 
 struct UndoImageTile {
   /** Float or byte tile. Null when #half stores the pixels (a paint layer's own float map). */
-  ImBuf *ibuf;
+  ImBuf *ibuf = nullptr;
   /** FP16 storage, #channels per texel, row stride #ED_IMAGE_UNDO_TILE_SIZE. Half the memory of
    * the float tile for the stack's internal paint maps; null for every other tile. */
   uint16_t *half = nullptr;
   /** Channels the tile was allocated with (float/half tiles only). */
   int channels = 0;
-  int users;
+  int users = 0;
 };
 
 /** Whether \a image's float pixels can be kept as FP16 in undo: only the maps the Paint Layers
@@ -441,9 +441,11 @@ static void utile_init_from_imbuf(UndoImageTile *utile,
     for (int ty = 0; ty < tile_copy_size.y; ty++) {
       const int64_t src_offset = (int64_t(tile_pos.y + ty) * ibuf->x + tile_pos.x) * channels;
       const int64_t dst_offset = int64_t(ty) * ED_IMAGE_UNDO_TILE_SIZE * channels;
-      math::float_to_half_array(src + src_offset,
-                          utile->half + dst_offset,
-                          size_t(tile_copy_size.x) * channels);
+      /* Saturate to the finite FP16 range: an HDR pixel above 65504 would otherwise come back as
+       * an infinity and be written into the map by undo. NaN becomes zero. */
+      math::float_to_half_make_finite_array(src + src_offset,
+                                           utile->half + dst_offset,
+                                           size_t(tile_copy_size.x) * channels);
     }
   }
   else if (ibuf->float_data()) {
@@ -464,6 +466,30 @@ static void utile_init_from_imbuf(UndoImageTile *utile,
                   tile_pos,
                   int2(0, 0),
                   tile_copy_size);
+  }
+}
+
+/** Adopt a paint tile's own 64x64 float buffer into a half tile. The paint tile's pixels start at
+ * (0, 0) in \a tile_ibuf, while the valid extent and the canvas position of the tile follow
+ * \a image_ibuf: only that extent is converted, so the uninitialized tail of an edge tile's
+ * #ED_IMAGE_UNDO_TILE_SIZE buffer is never read. */
+static void utile_init_from_paint_tile(UndoImageTile *utile,
+                                       const int x_tile,
+                                       const int y_tile,
+                                       const ImBuf *tile_ibuf,
+                                       const ImBuf *image_ibuf)
+{
+  BLI_assert(utile->half != nullptr);
+  int2 tile_pos;
+  int2 tile_copy_size;
+  calc_tile_rect(*image_ibuf, x_tile, y_tile, tile_pos, tile_copy_size);
+  const int channels = utile->channels;
+  BLI_assert(channels == tile_ibuf->channels);
+  const float *src = tile_ibuf->float_data();
+  for (int ty = 0; ty < tile_copy_size.y; ty++) {
+    const int64_t offset = int64_t(ty) * ED_IMAGE_UNDO_TILE_SIZE * channels;
+    math::float_to_half_make_finite_array(
+        src + offset, utile->half + offset, size_t(tile_copy_size.x) * channels);
   }
 }
 
@@ -1132,13 +1158,16 @@ static bool image_undosys_step_encode(bContext *C, Main * /*bmain*/, UndoStep *u
         UndoImageBuf *ubuf_pre = uhandle_ensure_ubuf(uh, ptile->image, ptile->ibuf);
 
         UndoImageTile *utile = nullptr;
-        const bool half = utile_can_store_half(*ptile->image, *ptile->ptile_ibuf);
+        const bool half = utile_can_store_half(*ptile->image, *ptile->ibuf);
         if (half) {
           /* The paint tile is a float ImBuf; keep its pixels as FP16 like every other tile of this
-           * stack-owned map, instead of adopting the full float buffer. */
-          utile = utile_alloc(true, true, ptile->ptile_ibuf->channels);
+           * stack-owned map, instead of adopting the full float buffer. The paint tile's pixels
+           * are tile-local, so convert them through #utile_init_from_paint_tile rather than
+           * through canvas tile coordinates. */
+          utile = utile_alloc(true, true, ptile->ibuf->channels);
           utile->users = 1;
-          utile_init_from_imbuf(utile, ptile->x_tile, ptile->y_tile, ptile->ptile_ibuf);
+          utile_init_from_paint_tile(utile, ptile->x_tile, ptile->y_tile, ptile->ptile_ibuf,
+                                     ptile->ibuf);
           IMB_freeImBuf(ptile->ptile_ibuf);
           ptile->ptile_ibuf = nullptr;
         }
@@ -1298,6 +1327,10 @@ static bool image_undosys_step_encode(bContext *C, Main * /*bmain*/, UndoStep *u
       if (buf == nullptr) {
         return;
       }
+      /* The buffer struct, its tile-pointer table and the filepath string are part of the step's
+       * memory too, small next to the pixels but counted so the ceiling is not optimistic. */
+      bytes += sizeof(UndoImageBuf) + sizeof(UndoImageTile *) * size_t(buf->tiles_len) +
+               buf->ibuf_filepath.capacity();
       for (uint i = 0; i < buf->tiles_len; i++) {
         const UndoImageTile *tile = buf->tiles[i];
         if (tile != nullptr && counted.add(tile)) {

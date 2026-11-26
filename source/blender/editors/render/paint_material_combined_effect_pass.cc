@@ -35,6 +35,7 @@
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_rect.h"
+#include "BLI_string.h"
 #include "BLI_utildefines.h"
 #include "BLI_vector.hh"
 
@@ -52,11 +53,31 @@ namespace blender::ed::material_combined {
 /**
  * The regional effect input render: a pass plan whose region can be narrowed lays only the stage
  * the plan reads, instead of the whole canvas. On by default now that the guard, the shader's
- * stage mapping and the A/B pixel check are in place; `BLENDER_PBR_EFFECT_REGION=0` (or `false`)
- * turns it off for a comparison or a rollback, read once per process. With the region whole -- a
- * first render, a plan the guard refuses -- the arithmetic falls back to the canvas, so the switch
- * only changes what a narrowed dispatch costs.
+ * stage mapping and the A/B pixel check are in place; `BLENDER_PBR_EFFECT_REGION=0` (also `false`,
+ * `off` or `no`, case-insensitive) turns it off for a comparison or a rollback, read once per
+ * process. With the region whole -- a first render, a plan the guard refuses -- the arithmetic
+ * falls back to the canvas, so the switch only changes what a narrowed dispatch costs.
  */
+static bool combined_env_flag_is_off(const char *env)
+{
+  /* Case-insensitive and whitespace-tolerant so "FALSE", "off", "No" and "0 " all opt out. */
+  const char *begin = env;
+  while (*begin == ' ' || *begin == '\t') {
+    begin++;
+  }
+  const char *end = begin + std::strlen(begin);
+  while (end > begin && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r' || end[-1] == '\n'))
+  {
+    end--;
+  }
+  const size_t len = size_t(end - begin);
+  const auto equals = [&](const char *word) {
+    const size_t word_len = std::strlen(word);
+    return len == word_len && BLI_strncasecmp(begin, word, word_len) == 0;
+  };
+  return equals("0") || equals("false") || equals("off") || equals("no");
+}
+
 static bool combined_effect_input_region_enabled()
 {
   static const bool enabled = []() {
@@ -64,7 +85,7 @@ static bool combined_effect_input_region_enabled()
     if (env == nullptr) {
       return true;
     }
-    return std::strcmp(env, "0") != 0 && std::strcmp(env, "false") != 0;
+    return !combined_env_flag_is_off(env);
   }();
   return enabled;
 }
@@ -267,15 +288,20 @@ bool combined_effect_jobs_render(const Material &ma,
             MutableSpan<rcti>(pass_rects.data(), pass_rects.size()));
         /* The caller's rectangle widened this job's dirty band (it is part of the region printed
          * below, unioned into the cache's own). */
+        /* The caller refuses an empty plan before it reaches this loop (a no-plan effect is a
+         * gpu_refuse), so the final pass rect exists. */
+        BLI_assert(n > 0);
         const int provider_widened =
             (effects_region != nullptr && !BLI_rcti_is_empty(effects_region)) ? 1 : 0;
-        perf_region.note("kind=%d region=%dx%d full=%d halo=%d provider=%d",
-                         int(job.correction->filter),
-                         BLI_rcti_size_x(&pass_rects[n - 1]),
-                         BLI_rcti_size_y(&pass_rects[n - 1]),
-                         job.region_exact ? 0 : 1,
-                         job.halo,
-                         provider_widened);
+        if (n > 0) {
+          perf_region.note("kind=%d region=%dx%d full=%d halo=%d provider=%d",
+                           int(job.correction->filter),
+                           BLI_rcti_size_x(&pass_rects[n - 1]),
+                           BLI_rcti_size_y(&pass_rects[n - 1]),
+                           job.region_exact ? 0 : 1,
+                           job.halo,
+                           provider_widened);
+        }
       }
 
       /* The stage the effect's input is laid over. On by default for a plan the guard allows a
@@ -499,7 +525,9 @@ bool combined_effect_jobs_render(const Material &ma,
        * from the input -- sums a 4K canvas overflows a half float with -- and the Fill Area's
        * label field stamps coordinates the width of the canvas, past what a half float numbers
        * exactly. Both are canvas-sized, so every pyramid level and every field fits into one, and
-       * the job's scratch defer above hands them back to the pool with the rest. */
+       * the job's scratch defer above hands them back to the pool with the rest. The reduction is
+       * RGBA32F (a colour sum and a weight sum); the field is RG32F (#effect_field_texture_format),
+       * the label being a 2D coordinate, so its pair costs half the bytes. */
       bool plan_reduces = false;
       bool plan_floods = false;
       for (const PaintLayerEffectPass &pass : job.passes) {
@@ -508,13 +536,11 @@ bool combined_effect_jobs_render(const Material &ma,
         plan_floods |= pass.kind == ePaintLayerEffectPass::FloodInit ||
                        pass.kind == ePaintLayerEffectPass::FloodStep;
       }
-      const auto job_acquire_pair = [&](gpu::Texture *(&pair)[2], const char *name) -> bool {
+      const auto job_acquire_pair = [&](gpu::Texture *(&pair)[2],
+                                        const gpu::TextureFormat format,
+                                        const char *name) -> bool {
         for (gpu::Texture *&half : pair) {
-          half = passes.pool.acquire_texture_2d(canvas,
-                                                1,
-                                                gpu::TextureFormat::SFLOAT_32_32_32_32,
-                                                passes.accum_usage,
-                                                name);
+          half = passes.pool.acquire_texture_2d(canvas, 1, format, passes.accum_usage, name);
           if (half == nullptr) {
             return false;
           }
@@ -531,6 +557,7 @@ bool combined_effect_jobs_render(const Material &ma,
         job.field_pair[1] = nullptr;
         job.field_texture = nullptr;
         job.field_placeholder = nullptr;
+        job.flood_placeholder = nullptr;
       });
       job.field_placeholder = passes.pool.acquire_texture_2d(int2(1),
                                                              1,
@@ -541,10 +568,26 @@ bool combined_effect_jobs_render(const Material &ma,
         return gpu_refuse("an effect field placeholder could not be allocated");
       }
       job_scratch.append(job.field_placeholder);
-      if (plan_reduces && !job_acquire_pair(job.reduce_pair, "combined_effect_reduce")) {
+      job.flood_placeholder = passes.pool.acquire_texture_2d(int2(1),
+                                                             1,
+                                                             effect_field_texture_format,
+                                                             passes.accum_usage,
+                                                             "combined_effect_flood_placeholder");
+      if (job.flood_placeholder == nullptr) {
+        return gpu_refuse("an effect flood placeholder could not be allocated");
+      }
+      job_scratch.append(job.flood_placeholder);
+      if (plan_reduces &&
+          !job_acquire_pair(job.reduce_pair,
+                            gpu::TextureFormat::SFLOAT_32_32_32_32,
+                            "combined_effect_reduce"))
+      {
         return gpu_refuse("an effect reduction texture could not be allocated");
       }
-      if (plan_floods && !job_acquire_pair(job.field_pair, "combined_effect_field")) {
+      if (plan_floods && !job_acquire_pair(job.field_pair,
+                                           effect_field_texture_format,
+                                           "combined_effect_field"))
+      {
         return gpu_refuse("an effect field texture could not be allocated");
       }
 

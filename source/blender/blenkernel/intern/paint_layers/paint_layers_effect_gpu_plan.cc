@@ -1081,6 +1081,113 @@ void BKE_paint_layers_effect_region_clip(const rcti &dirty,
   effect_region_clip_axes(dirty, max_ii(halo, 0), max_ii(halo, 0), width, height, r_out);
 }
 
+/** Whether \a kind is one whose output at a texel is fed by the whole canvas. */
+static bool effect_pass_kind_is_whole_canvas(const ePaintLayerEffectPass kind)
+{
+  switch (kind) {
+    /* The walks and the tails that read what they left. */
+    case ePaintLayerEffectPass::ReduceStart:
+    case ePaintLayerEffectPass::ReduceStep:
+    case ePaintLayerEffectPass::FloodInit:
+    case ePaintLayerEffectPass::FloodStep:
+    case ePaintLayerEffectPass::DiffuseStep:
+    case ePaintLayerEffectPass::FillTail:
+    case ePaintLayerEffectPass::JfaInit:
+    case ePaintLayerEffectPass::JfaStep:
+    case ePaintLayerEffectPass::DistEval:
+    /* Kernels that address the canvas itself: a block cut, a shadow offset read past the canvas
+     * edge, the slope walk's taps and the reduction's grade. Their filters carry
+     * #EffectReach::WholeMap today; the steps are listed so a plan that named one anyway could not
+     * narrow the stage, whatever reach it was handed. */
+    case ePaintLayerEffectPass::Choke:
+    case ePaintLayerEffectPass::ScreenTail:
+    case ePaintLayerEffectPass::BlockAverage:
+    case ePaintLayerEffectPass::HeightToNormal3x3:
+    case ePaintLayerEffectPass::OffsetTintTail:
+    case ePaintLayerEffectPass::SlopeWalk:
+    case ePaintLayerEffectPass::MatchGrade:
+    /* The Drop Shadow's silhouette reads the source by UV over the whole map. */
+    case ePaintLayerEffectPass::Silhouette:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool BKE_paint_layers_effect_input_region_supported(Span<const PaintLayerEffectPass> passes,
+                                                    const EffectReach reach,
+                                                    const bool region_exact)
+{
+  /* The two rules the caller already answers, plus the plan's own: a whole-map kind carries the
+   * registry's flag (#EffectReach::WholeMap), and a plan whose walk reads the whole canvas can
+   * never be narrowed whatever the registry says. The steps, not the filter kinds, are the guard,
+   * so a future whole-canvas pass refuses the region the moment its plan names it. */
+  if (!region_exact || reach == EffectReach::WholeMap || passes.is_empty()) {
+    return false;
+  }
+  for (const PaintLayerEffectPass &pass : passes) {
+    if (effect_pass_kind_is_whole_canvas(pass.kind)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool BKE_paint_layers_effect_input_region(Span<const PaintLayerEffectPass> passes,
+                                          Span<const rcti> pass_rects,
+                                          const int width,
+                                          const int height,
+                                          rcti &r_out)
+{
+  BLI_rcti_init(&r_out, 0, 0, 0, 0);
+  if (passes.is_empty() || pass_rects.size() != passes.size() || width <= 0 || height <= 0) {
+    return false;
+  }
+  /* The union of what each pass reads, grown by that pass's own reach: an H pass grows the X side
+   * only, a V pass the Y one, so the two axes of a separable chain fold independently. */
+  bool any = false;
+  rcti stage;
+  BLI_rcti_init(&stage, 0, 0, 0, 0);
+  for (const int i : passes.index_range()) {
+    const rcti &rect = pass_rects[i];
+    if (BLI_rcti_is_empty(&rect)) {
+      /* Nothing of this pass has to be computed, so it reads nothing of the input. */
+      continue;
+    }
+    const PaintLayerEffectPass &pass = passes[i];
+    const int pad_x = (pass.axis_mask & PAINT_LAYER_EFFECT_AXIS_X) != 0 ?
+                          std::max(pass.reach, 0) :
+                          0;
+    const int pad_y = (pass.axis_mask & PAINT_LAYER_EFFECT_AXIS_Y) != 0 ?
+                          std::max(pass.reach, 0) :
+                          0;
+    rcti grown = rect;
+    BLI_rcti_pad(&grown, pad_x, pad_y);
+    if (!any) {
+      stage = grown;
+      any = true;
+    }
+    else {
+      BLI_rcti_union(&stage, &grown);
+    }
+  }
+  if (!any) {
+    return false;
+  }
+  /* One texel of margin: a bilinear sample on the stage's last row or column reaches half a texel
+   * outside it. */
+  BLI_rcti_pad(&stage, 1, 1);
+  stage.xmin = clamp_i(stage.xmin, 0, width);
+  stage.ymin = clamp_i(stage.ymin, 0, height);
+  stage.xmax = clamp_i(stage.xmax, 0, width);
+  stage.ymax = clamp_i(stage.ymax, 0, height);
+  if (BLI_rcti_is_empty(&stage)) {
+    return false;
+  }
+  r_out = stage;
+  return true;
+}
+
 /** Fold \a value into the running FNV-1a \a hash, with the blenlib constants. */
 static uint64_t effect_hash_u64(uint64_t hash, const uint64_t value)
 {

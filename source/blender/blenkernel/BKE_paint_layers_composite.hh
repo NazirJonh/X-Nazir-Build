@@ -898,6 +898,47 @@ void BKE_paint_layers_effect_region_clip(const rcti &dirty,
                                          rcti &r_out);
 
 /**
+ * Whether an effect's input may be rendered over a region at all: the guard a regional input's
+ * stage rectangle is only meaningful under. It holds when the described input is region exact
+ * (#BKE_paint_layers_effect_region_is_exact), the plan names at least one pass, \a reach is not
+ * #EffectReach::WholeMap, and no pass of the plan feeds a texel from the whole canvas.
+ *
+ * The whole-canvas passes are the walks and the tails that read what they left: the Color Match's
+ * reduction (#ePaintLayerEffectPass::ReduceStart / #ReduceStep) and grade (#MatchGrade), the Fill
+ * Area's flooding (#FloodInit / #FloodStep), its diffusion (#DiffuseStep) and write tail
+ * (#FillTail), the distance field the Bevel and the Mask Outline share (#JfaInit / #JfaStep /
+ * #DistEval), and the kernels that address the canvas itself -- the Glow's choke and screen tail
+ * (#Choke / #ScreenTail), the Pixelate's block average (#BlockAverage), the Height To Normal Sobel
+ * (#HeightToNormal3x3), the Drop Shadow's offset tail and silhouette (#OffsetTintTail /
+ * #Silhouette) and the Blur Slope's walk (#SlopeWalk). They are named as plan steps, not as filter
+ * kinds, so a kind whose plan grows one of them is refused by the plan it builds; a kind the
+ * registry already flags whole map through #EffectReach is refused by \a reach before the walk.
+ * Pure: it reads the plan and the coverage answer only, never a canvas.
+ */
+bool BKE_paint_layers_effect_input_region_supported(Span<const PaintLayerEffectPass> passes,
+                                                    EffectReach reach,
+                                                    bool region_exact);
+
+/**
+ * The input texels a regional effect has to have rendered: the union, over \a passes, of the
+ * pass's own \a pass_rects entry grown by its #PaintLayerEffectPass::reach along the axes its
+ * #PaintLayerEffectPass::axis_mask names, plus one texel of margin on both axes (a bilinear tap at
+ * the edge of the stage can reach half a texel outside it), clamped to `[0, width] x [0, height]`.
+ * An H pass grows the X side only, so a box blur's pair lands on the dispatch rectangle grown by
+ * twice its radius plus the margin on both axes.
+ *
+ * \return false, with \a r_out empty, when the plan or the rectangle list is empty, the two do not
+ *         pair up (one rectangle per pass is required), \a width or \a height is not positive, or
+ *         the union is empty -- there is nothing to render. Pure, so the arithmetic is testable
+ *         without a GPU.
+ */
+bool BKE_paint_layers_effect_input_region(Span<const PaintLayerEffectPass> passes,
+                                          Span<const rcti> pass_rects,
+                                          int width,
+                                          int height,
+                                          rcti &r_out);
+
+/**
  * The rectangle of an owned effect's \a width x \a height result that a map writer may lay from
  * it, the answer #paint_layer_owned_effect_result_compute gives its callers: \a changed_region
  * grown by the halo of \a effect's filter and clamped to the canvas, or the whole canvas when no

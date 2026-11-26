@@ -15,7 +15,9 @@
 #include "paint_material_combined_effects.hh"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <utility>
@@ -28,6 +30,7 @@
 #include "BKE_paint_material_composite.hh"
 
 #include "BLI_index_range.hh"
+#include "BLI_fileops.h"
 #include "BLI_math_base.h"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector_types.hh"
@@ -46,6 +49,91 @@
 
 namespace blender::ed::material_combined {
 
+/**
+ * `BLENDER_PBR_EFFECT_REGION=1` (or `true`) enables the regional effect input render: a pass plan
+ * whose region can be narrowed lays only the stage the plan reads, instead of the whole canvas. A
+ * developer switch read once per process, off by default, so the whole-canvas path is the one
+ * every ordinary run takes and the region arithmetic stays a comparison.
+ */
+static bool combined_effect_input_region_enabled()
+{
+  static const bool enabled = []() {
+    const char *env = std::getenv("BLENDER_PBR_EFFECT_REGION");
+    if (env == nullptr) {
+      return false;
+    }
+    return std::strcmp(env, "1") == 0 || std::strcmp(env, "true") == 0;
+  }();
+  return enabled;
+}
+
+/**
+ * A developer A/B of the regional input render: `BLENDER_PBR_EFFECT_REGION_TEST` names a rectangle
+ * `xmin,ymin,xmax,ymax` in canvas texels and `BLENDER_PBR_EFFECT_REGION_TEST_FILE` a control file.
+ * While that file exists every plan job is forced to re-render, with its dirty region replaced by
+ * the rectangle, so a first draw (file absent) is the whole canvas and a second (file present) is
+ * the narrowed stage -- the two must show the same pixels. Read once; off unless both are set.
+ */
+struct EffectRegionTest {
+  bool configured = false;
+  const char *file = nullptr;
+  rcti rect = {};
+
+  bool active() const
+  {
+    return configured && BLI_exists(file);
+  }
+};
+
+static const EffectRegionTest &effect_region_test()
+{
+  static const EffectRegionTest test = []() {
+    EffectRegionTest value;
+    const char *rect_env = std::getenv("BLENDER_PBR_EFFECT_REGION_TEST");
+    const char *file_env = std::getenv("BLENDER_PBR_EFFECT_REGION_TEST_FILE");
+    if (rect_env == nullptr || file_env == nullptr) {
+      return value;
+    }
+    int xmin = 0, ymin = 0, xmax = 0, ymax = 0;
+    if (std::sscanf(rect_env, "%d,%d,%d,%d", &xmin, &ymin, &xmax, &ymax) != 4) {
+      return value;
+    }
+    value.configured = true;
+    value.file = file_env;
+    BLI_rcti_init(&value.rect, xmin, xmax, ymin, ymax);
+    return value;
+  }();
+  return test;
+}
+
+/**
+ * Whether the described input lays a correction whose result is a field over the canvas rather
+ * than a function of its own texel: a Deband's grain is hashed from the canvas coordinates, so a
+ * stage-local texel would shift it and the narrowed render would differ from the whole one. The
+ * region guard cannot see the input description, only the pass plan, so the caller refuses the
+ * region here.
+ */
+static bool combined_effect_input_has_canvas_correction(
+    const PaintMaterialCompositeImageLayer &layer)
+{
+  /* The row's own adjustment filter runs through the same texel-keyed branch: a Deband/dither
+   * adjustment hashes its grain from the canvas texel, so a stage-local texel would shift it. */
+  if (layer.adjustment_filter == MA_PAINT_LAYER_FILTER_DEBAND) {
+    return true;
+  }
+  for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
+    if (correction.filter == MA_PAINT_LAYER_FILTER_DEBAND) {
+      return true;
+    }
+  }
+  for (const PaintMaterialCompositeImageLayer &child : layer.children) {
+    if (combined_effect_input_has_canvas_correction(child)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool combined_effect_jobs_render(const Material &ma,
                                  CombinedPasses &passes,
                                  Vector<GpuEffectJob> &r_jobs,
@@ -62,6 +150,31 @@ bool combined_effect_jobs_render(const Material &ma,
     float luma[3];
     IMB_colormanagement_get_luminance_coefficients(luma);
     const float4 luma_coefficients(luma[0], luma[1], luma[2], 0.0f);
+
+    /* The developer A/B of the regional stage: while its control file exists, every plan job
+     * re-renders with the test rectangle as its dirty region. The first draw (no file) is the
+     * whole canvas, the second one the narrowed stage; the project's pixel check compares them. */
+    const EffectRegionTest &region_test = effect_region_test();
+    const bool region_test_active = region_test.active();
+    if (region_test_active) {
+      for (GpuEffectJob &job : r_jobs) {
+        if (job.baked_result || job.input_size.x <= 0 || job.input_size.y <= 0) {
+          continue;
+        }
+        rcti rect = region_test.rect;
+        rcti canvas_rect;
+        BLI_rcti_init(&canvas_rect, 0, job.input_size.x, 0, job.input_size.y);
+        if (!BLI_rcti_isect(&rect, &canvas_rect, &rect) || BLI_rcti_is_empty(&rect)) {
+          continue;
+        }
+        job.region = rect;
+        /* The A/B is only meaningful on an input the scene can describe in the canvas' own texel
+         * grid; the probe turns the rows' identity mappings off, so the test says so in place of
+         * whatever predicate refused the band. */
+        job.region_exact = true;
+        job.needs_render = true;
+      }
+    }
 
     /* The textures one job's plan runs over, routed by the shared #EffectPassBuffers: the rendered
      * input, the luminance a grayscale High Pass keeps, the two ring slots the window passes
@@ -135,10 +248,78 @@ bool combined_effect_jobs_render(const Material &ma,
         break;
       }
 
-      /* The content the effect reads, laid into a canvas of the input's own resolution and texel
-       * space. The input is rendered whole (no region): a capture has no region of its own, and its
-       * cost is measured against the effect passes below -- if it dominates, a regional input is the
-       * next step. */
+      /* The dispatch rectangle of every pass: the dirty region grown by the reach the passes
+       * after it still read, per axis, and by the halo of the effects before this one in the
+       * row. The last pass writes the cache over the whole dirty + halo band. A render that is
+       * not region exact -- or a first render, whose dirty region is the whole canvas -- runs
+       * over the canvas instead. */
+      Vector<rcti> pass_rects(n);
+      {
+        bke::paint_perf::ScopedTimer perf_region("gpu_effect.region");
+        BKE_paint_layers_effect_pass_regions(
+            Span<const PaintLayerEffectPass>(job.passes.data(), job.passes.size()),
+            job.region,
+            job.predecessor_halo,
+            canvas.x,
+            canvas.y,
+            MutableSpan<rcti>(pass_rects.data(), pass_rects.size()));
+        /* The caller's rectangle widened this job's dirty band (it is part of the region printed
+         * below, unioned into the cache's own). */
+        const int provider_widened =
+            (effects_region != nullptr && !BLI_rcti_is_empty(effects_region)) ? 1 : 0;
+        perf_region.note("kind=%d region=%dx%d full=%d halo=%d provider=%d",
+                         int(job.correction->filter),
+                         BLI_rcti_size_x(&pass_rects[n - 1]),
+                         BLI_rcti_size_y(&pass_rects[n - 1]),
+                         job.region_exact ? 0 : 1,
+                         job.halo,
+                         provider_widened);
+      }
+
+      /* The stage the effect's input is laid over. Off by default (the whole canvas); the env
+       * switch turns the regional path on for a plan the guard allows a band, and the stage is the
+       * union of what its passes read (see #BKE_paint_layers_effect_input_region). Anything empty
+       * or as large as the canvas falls back to the whole canvas, so a regional run is never
+       * smaller than the plan needs and never larger than today. */
+      int2 stage_origin = int2(0);
+      int2 stage_size = canvas;
+      bool regional = false;
+      if (n > 0 && (combined_effect_input_region_enabled() || region_test_active) &&
+          job.region_exact && !combined_effect_input_has_canvas_correction(job.input_entry))
+      {
+        const float *params = job.correction->filter_params;
+        const EffectReach reach = BKE_paint_layers_effect_reach(
+            eMaterialPaintLayerFilter(job.correction->filter), params);
+        if (BKE_paint_layers_effect_input_region_supported(
+                Span<const PaintLayerEffectPass>(job.passes.data(), job.passes.size()),
+                reach,
+                job.region_exact))
+        {
+          rcti stage;
+          if (BKE_paint_layers_effect_input_region(
+                  Span<const PaintLayerEffectPass>(job.passes.data(), job.passes.size()),
+                  Span<const rcti>(pass_rects.data(), pass_rects.size()),
+                  canvas.x,
+                  canvas.y,
+                  stage))
+          {
+            const int64_t stage_area = int64_t(stage.xmax - stage.xmin) *
+                                       int64_t(stage.ymax - stage.ymin);
+            const int64_t canvas_area = int64_t(canvas.x) * int64_t(canvas.y);
+            if (stage_area > 0 && stage_area < canvas_area) {
+              stage_origin = int2(stage.xmin, stage.ymin);
+              stage_size = int2(stage.xmax - stage.xmin, stage.ymax - stage.ymin);
+              regional = true;
+            }
+          }
+        }
+      }
+
+      /* The content the effect reads, laid into a target of the stage's own resolution and texel
+       * space. A regional stage is a sub-rectangle of the canvas: its passes run over
+       * `[0, stage_size)` and sample the maps through `texel_to_uv`, whose scale stays the canvas
+       * grid and whose translation is the stage's origin in canvas UV. The whole-canvas path is
+       * the same code with `stage_origin` zero and `stage_size` the canvas. */
       {
         bke::paint_perf::ScopedTimer perf_input("gpu_effect.input");
         CombinedTarget effect_target;
@@ -157,16 +338,6 @@ bool combined_effect_jobs_render(const Material &ma,
             }
           }
         });
-        effect_target.size = canvas;
-        effect_target.groups = math::divide_ceil(canvas, int2(16));
-        effect_target.texel_to_uv = math::from_scale<float3x3, 2>(1.0f / float2(canvas));
-        effect_target.texel_to_uv_4x4 = float4x4::identity();
-        effect_target.texel_to_uv_4x4[0] = float4(
-            effect_target.texel_to_uv[0].x, effect_target.texel_to_uv[0].y, 0.0f, 0.0f);
-        effect_target.texel_to_uv_4x4[1] = float4(
-            effect_target.texel_to_uv[1].x, effect_target.texel_to_uv[1].y, 0.0f, 0.0f);
-        effect_target.texel_to_uv_4x4[3] = float4(
-            effect_target.texel_to_uv[2].x, effect_target.texel_to_uv[2].y, 0.0f, 1.0f);
         /* The four textures the input's row_emit reads, held only while it lays: the defer
          * returns them the moment this block ends, so the passes below run against the input and
          * the ping-pong alone. */
@@ -190,21 +361,79 @@ bool combined_effect_jobs_render(const Material &ma,
               break;
             }
           }
+          /* Four textures are acquired through this lambda and it has exactly four slots; a fifth
+           * would otherwise leak its texture until the context's pool is destroyed. */
+          BLI_assert(texture == nullptr || target_scratch[3] != nullptr);
           return texture;
         };
-        effect_target.row_color = target_acquire(canvas);
-        effect_target.row_factor = target_acquire(canvas);
-        effect_target.mask_accum = target_acquire(canvas);
-        /* The capture returns before anything blends onto the destination, but the layer pass binds it
-         * as an image all the same: a placeholder of its own keeps it from being the texture the same
-         * dispatch samples. */
-        effect_target.dest = target_acquire(int2(1));
-        job.input = job_acquire(canvas);
-        if (effect_target.row_color == nullptr || effect_target.row_factor == nullptr ||
-            effect_target.mask_accum == nullptr || effect_target.dest == nullptr ||
-            job.input == nullptr)
-        {
-          return gpu_refuse("an effect input texture could not be allocated");
+        /* The stage's geometry: its size, its dispatch groups, and the texel-to-UV map whose scale
+         * stays the canvas grid and whose translation is the stage origin in canvas UV. With the
+         * origin at zero this is the old whole-canvas matrix. */
+        const auto layout_target = [&](const int2 size, const int2 origin) {
+          effect_target.size = size;
+          effect_target.groups = math::divide_ceil(size, int2(16));
+          effect_target.texel_to_uv = math::from_scale<float3x3, 2>(1.0f / float2(canvas));
+          effect_target.texel_to_uv[2] = float3(
+              float(origin.x) / float(canvas.x), float(origin.y) / float(canvas.y), 1.0f);
+          effect_target.texel_to_uv_4x4 = float4x4::identity();
+          effect_target.texel_to_uv_4x4[0] = float4(
+              effect_target.texel_to_uv[0].x, effect_target.texel_to_uv[0].y, 0.0f, 0.0f);
+          effect_target.texel_to_uv_4x4[1] = float4(
+              effect_target.texel_to_uv[1].x, effect_target.texel_to_uv[1].y, 0.0f, 0.0f);
+          effect_target.texel_to_uv_4x4[3] = float4(
+              effect_target.texel_to_uv[2].x, effect_target.texel_to_uv[2].y, 0.0f, 1.0f);
+        };
+        const auto acquire_input = [&](const int2 size) -> bool {
+          effect_target.row_color = target_acquire(size);
+          effect_target.row_factor = target_acquire(size);
+          effect_target.mask_accum = target_acquire(size);
+          /* The capture returns before anything blends onto the destination, but the layer pass
+           * binds it as an image all the same: a placeholder of its own keeps it from being the
+           * texture the same dispatch samples. */
+          effect_target.dest = target_acquire(int2(1));
+          job.input = job_acquire(size);
+          return effect_target.row_color != nullptr && effect_target.row_factor != nullptr &&
+                 effect_target.mask_accum != nullptr && effect_target.dest != nullptr &&
+                 job.input != nullptr;
+        };
+        /* Hand a failed stage's textures back before the full-canvas retry: a partial set would
+         * otherwise sit in the job's scratch until its scope ends. */
+        const auto release_input = [&]() {
+          for (gpu::Texture *&texture : target_scratch) {
+            if (texture != nullptr) {
+              passes.pool.release_texture(texture);
+              texture = nullptr;
+            }
+          }
+          if (job.input != nullptr) {
+            gpu::Texture *input = job.input;
+            job.input = nullptr;
+            /* The input may sit anywhere in the job's scratch (a later resource could have been
+             * acquired before a fallback): drop it by value so the scope defer never releases it
+             * twice. The target textures live in their own array, not in this vector. */
+            if (job_scratch.contains(input)) {
+              job_scratch.remove_first_occurrence_and_reorder(input);
+            }
+            passes.pool.release_texture(input);
+          }
+        };
+        bool alloc_fallback = false;
+        layout_target(stage_size, stage_origin);
+        if (!acquire_input(stage_size)) {
+          if (!regional) {
+            return gpu_refuse("an effect input texture could not be allocated");
+          }
+          /* One retry at the full canvas: the regional stage is an optimisation and must never
+           * leave the job half laid. */
+          release_input();
+          regional = false;
+          stage_origin = int2(0);
+          stage_size = canvas;
+          alloc_fallback = true;
+          layout_target(stage_size, stage_origin);
+          if (!acquire_input(stage_size)) {
+            return gpu_refuse("an effect input texture could not be allocated");
+          }
         }
         /* An effect's input has no mask to build (the describe clears the row's): refuse rather than
          * rely on that, since the capture's store step would write a canvas into the one-texel
@@ -229,23 +458,35 @@ bool combined_effect_jobs_render(const Material &ma,
         job.tracks_alpha = job.input_entry.tracks_content_alpha ||
                            job.channel == PAINT_MATERIAL_CHANNEL_NORMAL || pass_writes_alpha;
         GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS | GPU_BARRIER_TEXTURE_FETCH);
-        perf_input.note("kind=%d size=%dx%d full=1", int(job.correction->filter), canvas.x, canvas.y);
+        perf_input.note("kind=%d size=%dx%d origin=%d,%d canvas=%dx%d regional=%d full=%d%s%s",
+                        int(job.correction->filter),
+                        stage_size.x,
+                        stage_size.y,
+                        stage_origin.x,
+                        stage_origin.y,
+                        canvas.x,
+                        canvas.y,
+                        regional ? 1 : 0,
+                        regional ? 0 : 1,
+                        alloc_fallback ? " fallback=alloc" : "",
+                        region_test_active ? " test=1" : "");
       }
 
       /* The luminance buffer a grayscale High Pass keeps, and the two ring slots the window
        * passes ping-pong through. Each is acquired only when the plan uses it: a box blur needs no
        * luminance buffer, a pointwise Noise needs neither, and the job's scratch defer above hands
-       * every one of them back to the pool when the job's scope ends. */
+       * every one of them back to the pool when the job's scope ends. A regional plan's window
+       * passes read the stage grid, so these follow `stage_size`, not the canvas. */
       gpu::Texture *scratch[3] = {nullptr, nullptr, nullptr};
       if (!job.passes.is_empty() && job.passes[0].kind == ePaintLayerEffectPass::Luminance) {
-        scratch[0] = job_acquire(canvas);
+        scratch[0] = job_acquire(stage_size);
         if (scratch[0] == nullptr) {
           return gpu_refuse("an effect scratch texture could not be allocated");
         }
       }
       if (n > 1) {
-        scratch[1] = job_acquire(canvas);
-        scratch[2] = job_acquire(canvas);
+        scratch[1] = job_acquire(stage_size);
+        scratch[2] = job_acquire(stage_size);
         if (scratch[1] == nullptr || scratch[2] == nullptr) {
           return gpu_refuse("an effect scratch texture could not be allocated");
         }
@@ -305,31 +546,6 @@ bool combined_effect_jobs_render(const Material &ma,
         return gpu_refuse("an effect field texture could not be allocated");
       }
 
-      /* The dispatch rectangle of every pass: the dirty region grown by the reach the passes
-       * after it still read, per axis, and by the halo of the effects before this one in the
-       * row. The last pass writes the cache over the whole dirty + halo band. A render that is
-       * not region exact -- or a first render, whose dirty region is the whole canvas -- runs
-       * over the canvas instead. */
-      Vector<rcti> pass_rects(n);
-      {
-        bke::paint_perf::ScopedTimer perf_region("gpu_effect.region");
-        BKE_paint_layers_effect_pass_regions(
-            Span<const PaintLayerEffectPass>(job.passes.data(), job.passes.size()),
-            job.region,
-            job.predecessor_halo,
-            canvas.x,
-            canvas.y,
-            MutableSpan<rcti>(pass_rects.data(), pass_rects.size()));
-        perf_region.note("kind=%d region=%dx%d full=%d halo=%d provider=%d",
-                         int(job.correction->filter),
-                         BLI_rcti_size_x(&pass_rects[n - 1]),
-                         BLI_rcti_size_y(&pass_rects[n - 1]),
-                         job.region_exact ? 0 : 1,
-                         job.halo,
-                         /* The caller's rectangle widened this job's dirty band (it is part of the
-                          * region printed above, unioned into the cache's own). */
-                         (effects_region != nullptr && !BLI_rcti_is_empty(effects_region)) ? 1 : 0);
-      }
       EffectPassBuffers buffers(canvas,
                                 job.input,
                                 scratch[0],
@@ -377,7 +593,13 @@ bool combined_effect_jobs_render(const Material &ma,
              aux,
              dst,
              field_dst,
-             buffers.rect_for(pass, job.region_exact, job.region, pass_rects)},
+             buffers.rect_for(pass, job.region_exact, job.region, pass_rects),
+             /* The stage the pass's textures live on: its reads and intermediate stores run at
+              * `texel - texture_origin`, and only the plan's last pass writes the full-canvas
+              * result at the canvas texel. The whole-canvas path keeps the origin zero and every
+              * pass writing at its texel, exactly as before the stage existed. */
+             stage_origin,
+             regional ? paint_layer_effect_pass_is_final(pass) : true},
             luma_coefficients);
         buffers.commit(pass, field_dst != nullptr ? field_dst : dst);
       }

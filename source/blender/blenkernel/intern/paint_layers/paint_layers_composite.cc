@@ -57,6 +57,8 @@
 #include "BKE_paint_layers_shader_bake.hh"
 #include "BKE_paint_layers_source_graph.hh"
 #include "BKE_paint_material_decal_map.hh"
+#include "BKE_paint_material_combined.hh"
+#include "BKE_paint_material_composite.hh"
 #include "BKE_paint_perf_debug.hh"
 #include "BKE_report.hh"
 
@@ -4810,12 +4812,14 @@ int64_t BKE_paint_layers_cache_budget_bytes(const int64_t default_bytes)
 void BKE_paint_layers_cache_budgets_sync_from_userdef()
 {
   const bool log_enabled = bke::paint_cache::paint_mem_log_enabled();
+  int64_t applied_total = 0;
   for (const bke::paint_cache::PaintCacheBudgetEntry &entry :
        bke::paint_cache::paint_cache_budget_entries())
   {
     if (entry.apply != nullptr) {
       const int64_t applied = BKE_paint_layers_cache_budget_bytes(entry.default_bytes);
       entry.apply(applied);
+      applied_total += applied;
       if (log_enabled) {
         fprintf(stderr,
                 "PAINT_MEM budget pref_mb=%d id=%s default_bytes=%lld applied_bytes=%lld\n",
@@ -4826,6 +4830,27 @@ void BKE_paint_layers_cache_budgets_sync_from_userdef()
       }
     }
   }
+  /* A smaller preference has to take effect now, not at each cache's next insert: a cache that
+   * receives nothing (the Anchor Point slices between two captures) would otherwise keep its
+   * oversized entries for ever. The caches are derived data, so dropping them is always safe;
+   * flushing is the simple common policy for the seven implementations, each of which would
+   * otherwise need its own evict-to-budget pass. */
+  static int64_t last_applied_total = -1;
+  if (last_applied_total >= 0 && applied_total < last_applied_total) {
+    BKE_paint_layers_slice_cache_free_all();
+    BKE_paint_layers_effect_cache_free_all();
+    BKE_paint_layers_mask_effect_cache_free_all();
+    BKE_paint_layers_effect_gpu_cache_free_all();
+    BKE_paint_material_combined_cache_free_all();
+    BKE_paint_material_composite_cache_free_all();
+    if (log_enabled) {
+      fprintf(stderr,
+              "PAINT_MEM budget_shrink from_bytes=%lld to_bytes=%lld caches=flushed\n",
+              (long long)last_applied_total,
+              (long long)applied_total);
+    }
+  }
+  last_applied_total = applied_total;
   if (log_enabled) {
     /* The stroke correction cache has no apply hook (it reads the preference when it evicts), but
      * its share belongs in the same report: the seven entries are what the denominator sums. */

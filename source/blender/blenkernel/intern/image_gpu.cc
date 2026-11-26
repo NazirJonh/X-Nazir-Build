@@ -650,9 +650,9 @@ static size_t image_gpu_textures_bytes(const Image &ima)
 }
 
 /** Keep the image GPU textures under the VRAM budget: the least recently used image with a
- * texture goes first, one image at a time, until the total fits. Runs on its own one-second
- * cadence, independent of the time-out collector and its collection rate, so the budget also
- * holds with `textimeout == 0` and without a 3D viewport. */
+ * texture goes first, one image at a time, until the total fits. Runs with the collector's pass,
+ * which the 3D viewport draw drives; unlike the time-out it does not depend on `textimeout` or
+ * `texcollectrate`, so it also holds with them disabled. */
 static void image_gpu_budget_enforce(Main *bmain)
 {
   static int64_t lasttime = 0;
@@ -663,6 +663,13 @@ static void image_gpu_budget_enforce(Main *bmain)
 
   const int64_t budget_bytes = int64_t(U.gpu_image_texture_budget_mb) * 1024 * 1024;
   if (budget_bytes <= 0) {
+    return;
+  }
+
+  /* The first pass has no earlier observation to compare against, so it only starts the clock:
+   * every image would otherwise look untouched and the working set could be evicted at once. */
+  if (lasttime == 0) {
+    lasttime = ctime;
     return;
   }
 
@@ -703,6 +710,10 @@ static void image_gpu_budget_enforce(Main *bmain)
       break;
     }
     BKE_image_free_gputextures(oldest->ima);
+    /* A budget eviction is still a texture the image may need again next draw: give it the same
+     * pass of grace the time-out collector gives, or the collector below would free the CPU
+     * buffers in the same call. */
+    oldest->ima->runtime->lastused = ctime;
     total_bytes -= oldest->bytes;
     oldest->bytes = 0;
     freed_images++;

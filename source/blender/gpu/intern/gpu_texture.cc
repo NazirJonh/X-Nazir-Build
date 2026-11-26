@@ -607,14 +607,25 @@ void GPU_texture_read_region(Texture *texture,
       "reads should be flagged, allowing the backend to make certain optimizations.");
   /* The region has to lie inside the mip: the whole-mip fallback copies rows out of a temporary
    * without any other bounds check, and the GL sub-image read turns an out-of-range region into a
-   * driver error rather than an answer. */
+   * driver error rather than an answer. Debug builds assert; a release build must not read or
+   * write out of bounds, so it answers the region with zeros (the caller's own clamp keeps this
+   * unreachable today). */
   int mip_extent[3] = {1, 1, 1};
   texture->mip_size_get(mip_level, mip_extent);
-  BLI_assert(offset[0] >= 0 && offset[1] >= 0 && offset[2] >= 0);
-  BLI_assert(extent[0] >= 1 && extent[1] >= 1 && extent[2] >= 1);
-  BLI_assert(offset[0] + extent[0] <= mip_extent[0]);
-  BLI_assert(offset[1] + extent[1] <= mip_extent[1]);
-  BLI_assert(offset[2] + extent[2] <= mip_extent[2]);
+  const bool in_bounds = offset[0] >= 0 && offset[1] >= 0 && offset[2] >= 0 &&
+                         extent[0] >= 1 && extent[1] >= 1 && extent[2] >= 1 &&
+                         offset[0] + extent[0] <= mip_extent[0] &&
+                         offset[1] + extent[1] <= mip_extent[1] &&
+                         offset[2] + extent[2] <= mip_extent[2];
+  if (!in_bounds) {
+    BLI_assert_msg(false, "GPU_texture_read_region: the region is outside the mip");
+    const size_t texel_bytes = to_bytesize(texture->format_get(), data_format);
+    if (extent[0] > 0 && extent[1] > 0) {
+      const size_t layers = size_t(std::max(extent[2], 1));
+      memset(dst, 0, size_t(extent[0]) * size_t(extent[1]) * layers * texel_bytes);
+    }
+    return;
+  }
   texture->read_region(mip_level, data_format, offset, extent, dst);
 }
 

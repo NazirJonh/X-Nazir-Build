@@ -80,11 +80,14 @@ static std::shared_ptr<ImBuf> mask_effect_buffer_new(const int width,
                                                      const int height,
                                                      const int channels = 1)
 {
-  ImBuf *ibuf = IMB_allocImBuf(width, height, ImBufFlags::FloatData);
+  /* Allocate the pixels once, with the channel count the buffer is for: `FloatData` would build
+   * and zero an RGBA buffer first, which `IMB_alloc_float_pixels` then frees and reallocates for
+   * the scalar cache. The four-channel work buffer keeps its zero initialization. */
+  ImBuf *ibuf = IMB_allocImBuf(width, height, ImBufFlags::Zero);
   if (ibuf == nullptr) {
     return {};
   }
-  if (channels != 4 && !IMB_alloc_float_pixels(ibuf, channels, /*initialize_pixels=*/false)) {
+  if (!IMB_alloc_float_pixels(ibuf, channels, /*initialize_pixels=*/channels == 4)) {
     IMB_freeImBuf(ibuf);
     return {};
   }

@@ -6220,6 +6220,309 @@ TEST_F(PaintLayersEffectTest,
   }
 }
 
+TEST_F(PaintLayersEffectTest,
+       the_input_region_stage_grows_each_pass_by_its_reach_and_clips)
+{
+  /* The plan's dispatch rectangles are the pass regions the gather already computes; the input's
+   * stage is those, each grown by the pass's own reach along its own axes, unioned, plus the one
+   * texel of margin the helper adds before the clip. */
+  const auto make_plan = [](const eMaterialPaintLayerFilter filter,
+                            const float *params,
+                            const int width,
+                            const int height,
+                            Vector<PaintLayerEffectPass> &r_passes) {
+    BKE_paint_layers_effect_pass_plan(filter, params, width, height, r_passes);
+  };
+  const auto make_rects = [](const Vector<PaintLayerEffectPass> &passes,
+                             const rcti &dirty,
+                             const int width,
+                             const int height,
+                             Vector<rcti> &r_rects) {
+    r_rects.reinitialize(passes.size());
+    BKE_paint_layers_effect_pass_regions(
+        Span<const PaintLayerEffectPass>(passes.data(), passes.size()),
+        dirty,
+        0,
+        width,
+        height,
+        r_rects.as_mutable_span());
+  };
+
+  rcti dirty;
+  BLI_rcti_init(&dirty, 40, 60, 40, 60);
+  Vector<PaintLayerEffectPass> passes;
+  Vector<rcti> rects;
+  rcti stage;
+
+  /* A box blur is an H pass and a V pass of the same radius: each grows its own axis, so the stage
+   * is the dirty region grown by twice the radius on both axes, plus the margin. */
+  const std::array<float, 2> box = {float(PAINT_LAYER_BLUR_BOX), 5.0f};
+  make_plan(MA_PAINT_LAYER_FILTER_BLUR, box.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 2);
+  make_rects(passes, dirty, 100, 100, rects);
+  ASSERT_TRUE(BKE_paint_layers_effect_input_region(
+      Span<const PaintLayerEffectPass>(passes.data(), passes.size()),
+      Span<const rcti>(rects.data(), rects.size()),
+      100,
+      100,
+      stage));
+  /* 40 - 2 * 5 - 1 .. 60 + 2 * 5 + 1: the reach of both passes and the margin. */
+  EXPECT_EQ(stage.xmin, 29);
+  EXPECT_EQ(stage.xmax, 71);
+  EXPECT_EQ(stage.ymin, 29);
+  EXPECT_EQ(stage.ymax, 71);
+
+  /* The stage clamps to the canvas: a dirty region near an edge never reads outside it, but the
+   * margin still applies on the side the reach does not cover. */
+  rcti corner;
+  BLI_rcti_init(&corner, 2, 10, 2, 10);
+  make_rects(passes, corner, 100, 100, rects);
+  ASSERT_TRUE(BKE_paint_layers_effect_input_region(
+      Span<const PaintLayerEffectPass>(passes.data(), passes.size()),
+      Span<const rcti>(rects.data(), rects.size()),
+      100,
+      100,
+      stage));
+  EXPECT_EQ(stage.xmin, 0);
+  EXPECT_EQ(stage.ymin, 0);
+  EXPECT_EQ(stage.xmax, 21);
+  EXPECT_EQ(stage.ymax, 21);
+
+  /* One 3x3 pass: a texel of reach on both axes, grown once more by the margin. */
+  make_plan(MA_PAINT_LAYER_FILTER_EDGE_DETECT, nullptr, 100, 100, passes);
+  ASSERT_EQ(passes.size(), 1);
+  make_rects(passes, dirty, 100, 100, rects);
+  ASSERT_TRUE(BKE_paint_layers_effect_input_region(
+      Span<const PaintLayerEffectPass>(passes.data(), passes.size()),
+      Span<const rcti>(rects.data(), rects.size()),
+      100,
+      100,
+      stage));
+  EXPECT_EQ(stage.xmin, 37);
+  EXPECT_EQ(stage.xmax, 63);
+  EXPECT_EQ(stage.ymin, 37);
+  EXPECT_EQ(stage.ymax, 63);
+
+  /* A dirty region that touches the right edge: the last pass rectangle stops at the canvas edge,
+   * so the stage has no texels past it. The window kernels clamp to the texture they read, which
+   * is why the host may narrow the stage without leaving a gap at the edge. */
+  rcti right_edge;
+  BLI_rcti_init(&right_edge, 90, 100, 40, 60);
+  make_plan(MA_PAINT_LAYER_FILTER_BLUR, box.data(), 100, 100, passes);
+  make_rects(passes, right_edge, 100, 100, rects);
+  ASSERT_EQ(rects.last().xmax, 100);
+  ASSERT_TRUE(BKE_paint_layers_effect_input_region(
+      Span<const PaintLayerEffectPass>(passes.data(), passes.size()),
+      Span<const rcti>(rects.data(), rects.size()),
+      100,
+      100,
+      stage));
+  EXPECT_EQ(stage.xmax, 100);
+  EXPECT_LE(stage.xmin, rects.first().xmin);
+  EXPECT_LE(stage.ymin, rects.first().ymin);
+  EXPECT_GE(stage.ymax, rects.last().ymax);
+
+  /* A non-positive canvas has no stage. */
+  EXPECT_FALSE(BKE_paint_layers_effect_input_region(
+      Span<const PaintLayerEffectPass>(passes.data(), passes.size()),
+      Span<const rcti>(rects.data(), rects.size()),
+      0,
+      100,
+      stage));
+  EXPECT_TRUE(BLI_rcti_is_empty(&stage));
+
+  /* Nothing moved: every pass rectangle is empty, so there is no stage at all. */
+  rcti moved_not;
+  BLI_rcti_init(&moved_not, 0, 0, 0, 0);
+  make_rects(passes, moved_not, 100, 100, rects);
+  EXPECT_FALSE(BKE_paint_layers_effect_input_region(
+      Span<const PaintLayerEffectPass>(passes.data(), passes.size()),
+      Span<const rcti>(rects.data(), rects.size()),
+      100,
+      100,
+      stage));
+  EXPECT_TRUE(BLI_rcti_is_empty(&stage));
+
+  /* A plan and a rectangle list that do not pair up, or an empty plan, has no stage either. */
+  EXPECT_FALSE(BKE_paint_layers_effect_input_region(
+      Span<const PaintLayerEffectPass>(passes.data(), passes.size()),
+      Span<const rcti>(),
+      100,
+      100,
+      stage));
+  EXPECT_TRUE(BLI_rcti_is_empty(&stage));
+  EXPECT_FALSE(BKE_paint_layers_effect_input_region(
+      Span<const PaintLayerEffectPass>(), Span<const rcti>(), 100, 100, stage));
+  EXPECT_TRUE(BLI_rcti_is_empty(&stage));
+}
+
+TEST_F(PaintLayersEffectTest, the_input_region_guard_refuses_whole_map_kinds_and_steps)
+{
+  const auto make_plan = [](const eMaterialPaintLayerFilter filter,
+                            const float *params,
+                            const int width,
+                            const int height,
+                            Vector<PaintLayerEffectPass> &r_passes) {
+    BKE_paint_layers_effect_pass_plan(filter, params, width, height, r_passes);
+  };
+
+  Vector<PaintLayerEffectPass> passes;
+
+  /* The local kinds: a neighbourhood plan with no whole-canvas pass. Both a pointwise one (a
+   * Noise, which reads its own texel) and a two-pass one (a box blur) are supported. */
+  const std::array<float, 2> blur = {float(PAINT_LAYER_BLUR_BOX), 5.0f};
+  make_plan(MA_PAINT_LAYER_FILTER_BLUR, blur.data(), 64, 64, passes);
+  EXPECT_TRUE(BKE_paint_layers_effect_input_region_supported(
+      Span<const PaintLayerEffectPass>(passes.data(), passes.size()),
+      BKE_paint_layers_effect_reach(MA_PAINT_LAYER_FILTER_BLUR, blur.data()),
+      true));
+
+  const std::array<float, 2> sharpen = {3.0f, 0.5f};
+  make_plan(MA_PAINT_LAYER_FILTER_SHARPEN, sharpen.data(), 64, 64, passes);
+  EXPECT_TRUE(BKE_paint_layers_effect_input_region_supported(
+      Span<const PaintLayerEffectPass>(passes.data(), passes.size()),
+      BKE_paint_layers_effect_reach(MA_PAINT_LAYER_FILTER_SHARPEN, sharpen.data()),
+      true));
+
+  const std::array<float, 3> high_pass = {
+      4.0f, 1.0f, float(PAINT_LAYER_HIGH_PASS_OUTPUT_GRAYSCALE)};
+  make_plan(MA_PAINT_LAYER_FILTER_HIGH_PASS, high_pass.data(), 64, 64, passes);
+  EXPECT_TRUE(BKE_paint_layers_effect_input_region_supported(
+      Span<const PaintLayerEffectPass>(passes.data(), passes.size()),
+      BKE_paint_layers_effect_reach(MA_PAINT_LAYER_FILTER_HIGH_PASS, high_pass.data()),
+      true));
+
+  make_plan(MA_PAINT_LAYER_FILTER_NOISE, nullptr, 64, 64, passes);
+  EXPECT_TRUE(BKE_paint_layers_effect_input_region_supported(
+      Span<const PaintLayerEffectPass>(passes.data(), passes.size()),
+      BKE_paint_layers_effect_reach(MA_PAINT_LAYER_FILTER_NOISE, nullptr),
+      true));
+
+  make_plan(MA_PAINT_LAYER_FILTER_EDGE_DETECT, nullptr, 64, 64, passes);
+  EXPECT_TRUE(BKE_paint_layers_effect_input_region_supported(
+      Span<const PaintLayerEffectPass>(passes.data(), passes.size()),
+      BKE_paint_layers_effect_reach(MA_PAINT_LAYER_FILTER_EDGE_DETECT, nullptr),
+      true));
+
+  /* The whole-map kinds the registry flags: a Color Match, a Fill Area, a Bevel and a Deband.
+   * Their reach alone refuses them, before the plan walk -- the last two have no pass plan at all
+   * (the Deband is not GPU-computed), which is the same answer. */
+  const std::array<float, 11> color_match = {
+      0.0f, 0.5f, 0.5f, 0.5f, 0.25f, 0.5f, 0.75f, 0.0f, 0.1f, 0.2f, 0.3f};
+  const EffectReach match_reach = BKE_paint_layers_effect_reach(
+      MA_PAINT_LAYER_FILTER_COLOR_MATCH, color_match.data());
+  ASSERT_EQ(match_reach, EffectReach::WholeMap);
+  make_plan(MA_PAINT_LAYER_FILTER_COLOR_MATCH, color_match.data(), 64, 64, passes);
+  EXPECT_FALSE(BKE_paint_layers_effect_input_region_supported(
+      Span<const PaintLayerEffectPass>(passes.data(), passes.size()), match_reach, true));
+
+  const std::array<float, 10> fill_area = {float(PAINT_LAYER_FILL_AREA_SOURCE_ALPHA),
+                                           0.5f,
+                                           0.0f,
+                                           float(PAINT_LAYER_FILL_AREA_UV_BORDER_IGNORE),
+                                           float(PAINT_LAYER_FILL_AREA_COLOR_MODE_SOURCE),
+                                           1.0f,
+                                           0.5f,
+                                           0.25f,
+                                           2.0f,
+                                           4.0f};
+  const EffectReach fill_reach = BKE_paint_layers_effect_reach(
+      MA_PAINT_LAYER_FILTER_FILL_AREA, fill_area.data());
+  ASSERT_EQ(fill_reach, EffectReach::WholeMap);
+  make_plan(MA_PAINT_LAYER_FILTER_FILL_AREA, fill_area.data(), 64, 64, passes);
+  EXPECT_FALSE(BKE_paint_layers_effect_input_region_supported(
+      Span<const PaintLayerEffectPass>(passes.data(), passes.size()), fill_reach, true));
+  /* The plan's own steps are a second, independent guard: a flooding plan is refused even when a
+   * caller hands a reach that would allow a band. */
+  EXPECT_FALSE(BKE_paint_layers_effect_input_region_supported(
+      Span<const PaintLayerEffectPass>(passes.data(), passes.size()),
+      EffectReach::Neighbourhood,
+      true));
+
+  const std::array<float, 4> bevel = {
+      float(PAINT_LAYER_BEVEL_SOURCE_ALPHA), 2.0f, 0.0f, 3.0f};
+  const EffectReach bevel_reach = BKE_paint_layers_effect_reach(
+      MA_PAINT_LAYER_FILTER_BEVEL, bevel.data());
+  ASSERT_EQ(bevel_reach, EffectReach::WholeMap);
+  make_plan(MA_PAINT_LAYER_FILTER_BEVEL, bevel.data(), 64, 64, passes);
+  EXPECT_FALSE(BKE_paint_layers_effect_input_region_supported(
+      Span<const PaintLayerEffectPass>(passes.data(), passes.size()), bevel_reach, true));
+  /* The distance-field walk is the plan's own refusal, whatever reach is claimed. */
+  EXPECT_FALSE(BKE_paint_layers_effect_input_region_supported(
+      Span<const PaintLayerEffectPass>(passes.data(), passes.size()),
+      EffectReach::Neighbourhood,
+      true));
+
+  /* A Deband is whole map with no plan at all. */
+  EXPECT_EQ(BKE_paint_layers_effect_reach(MA_PAINT_LAYER_FILTER_DEBAND, nullptr),
+            EffectReach::WholeMap);
+  make_plan(MA_PAINT_LAYER_FILTER_DEBAND, nullptr, 64, 64, passes);
+  EXPECT_TRUE(passes.is_empty());
+  EXPECT_FALSE(BKE_paint_layers_effect_input_region_supported(
+      Span<const PaintLayerEffectPass>(passes.data(), passes.size()),
+      BKE_paint_layers_effect_reach(MA_PAINT_LAYER_FILTER_DEBAND, nullptr),
+      true));
+
+  /* Steps that address the canvas itself are refused by the plan whatever reach a caller claims:
+   * the block cut, the shadow's offset read, the slope walk, the reduction's grade, the glow's
+   * tail and the height Sobel. Their filters carry WholeMap today, so this is the second lock. */
+  const ePaintLayerEffectPass canvas_steps[] = {
+      ePaintLayerEffectPass::BlockAverage,
+      ePaintLayerEffectPass::OffsetTintTail,
+      ePaintLayerEffectPass::Silhouette,
+      ePaintLayerEffectPass::SlopeWalk,
+      ePaintLayerEffectPass::MatchGrade,
+      ePaintLayerEffectPass::Choke,
+      ePaintLayerEffectPass::ScreenTail,
+      ePaintLayerEffectPass::HeightToNormal3x3,
+  };
+  for (const ePaintLayerEffectPass kind : canvas_steps) {
+    Vector<PaintLayerEffectPass> step_plan;
+    PaintLayerEffectPass pass;
+    pass.kind = kind;
+    pass.pass_count = 1;
+    step_plan.append(pass);
+    EXPECT_FALSE(BKE_paint_layers_effect_input_region_supported(
+        Span<const PaintLayerEffectPass>(step_plan.data(), step_plan.size()),
+        EffectReach::Neighbourhood,
+        true))
+        << int(kind);
+  }
+
+  /* The two caller rules: an inexact description refuses a region even for a local kind, and an
+   * empty plan names nothing to render regionally. */
+  make_plan(MA_PAINT_LAYER_FILTER_EDGE_DETECT, nullptr, 64, 64, passes);
+  EXPECT_FALSE(BKE_paint_layers_effect_input_region_supported(
+      Span<const PaintLayerEffectPass>(passes.data(), passes.size()),
+      EffectReach::Neighbourhood,
+      false));
+  EXPECT_FALSE(BKE_paint_layers_effect_input_region_supported(
+      Span<const PaintLayerEffectPass>(), EffectReach::Pointwise, true));
+}
+
+TEST_F(PaintLayersEffectTest, the_input_region_guard_answers_the_same_for_every_canvas_size)
+{
+  /* The pass plan's radii clamp against the canvas, but the reach the guard reads folds per axis
+   * and clamps upwards to one, so a kind is classified the same on any size. */
+  const std::array<float, 2> blur = {float(PAINT_LAYER_BLUR_BOX), 3.0f};
+  Vector<PaintLayerEffectPass> small_passes;
+  Vector<PaintLayerEffectPass> large_passes;
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_BLUR, blur.data(), 8, 8, small_passes);
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_BLUR, blur.data(), 4096, 4096, large_passes);
+  /* The reach itself takes no canvas: it folds the plan built at a one-texel bound, so the same
+   * parameters answer the same whatever size the dispatch will run at. */
+  const EffectReach reach = BKE_paint_layers_effect_reach(MA_PAINT_LAYER_FILTER_BLUR, blur.data());
+  ASSERT_EQ(reach, EffectReach::Neighbourhood);
+  const bool small_supported = BKE_paint_layers_effect_input_region_supported(
+      Span<const PaintLayerEffectPass>(small_passes.data(), small_passes.size()), reach, true);
+  const bool large_supported = BKE_paint_layers_effect_input_region_supported(
+      Span<const PaintLayerEffectPass>(large_passes.data(), large_passes.size()), reach, true);
+  EXPECT_EQ(small_supported, large_supported);
+  EXPECT_TRUE(small_supported);
+}
+
 TEST_F(PaintLayersEffectTest, the_chain_hash_tracks_the_effects_before_this_one_in_order)
 {
   Vector<PaintMaterialCompositeCorrection> corrections;

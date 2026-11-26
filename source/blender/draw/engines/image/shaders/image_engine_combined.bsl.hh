@@ -2778,6 +2778,19 @@ struct EffectResources {
    * write the cache.
    */
   [[push_constant]] const int2 dispatch_end;
+  /**
+   * The canvas texel the stage textures' origin sits at: #input_tx, #aux_tx and an intermediate
+   * #result_img are read and written at `texel - texture_origin`, while the canvas arithmetic of
+   * the kernel (the noise grid, the block cut, the distance fields, every clamp) stays in canvas
+   * texels. Zero while the stage is the whole canvas (the ordinary path); the stage's origin when
+   * the regional input render is enabled and the guard allowed a band.
+   */
+  [[push_constant]] const int2 texture_origin;
+  /**
+   * Whether this pass writes the final result, whose texture is the full canvas: its store lands
+   * at the canvas texel, not at the stage-local one an intermediate pass writes.
+   */
+  [[push_constant]] const int last_pass;
   /** A `COMBINED_PASS_*` value: which kernel this dispatch runs. */
   [[push_constant]] const int pass_kind;
   /** The window half-reach in texels, already clamped the way the CPU kernel clamps it. */
@@ -2814,7 +2827,21 @@ void effect_comp([[resource_table]] EffectResources &srt,
   {
     return;
   }
-  const float4 source = texelFetch(srt.input_tx, texel, 0);
+  /* The stage-local texel: `input_tx`, `aux_tx` and an intermediate `result_img` live on the
+   * stage's own grid, so their reads and stores subtract its origin. `texel` stays the canvas
+   * texel every kernel's arithmetic uses -- the Noise's hash, the Pixelate's block cut, the
+   * distance-field labels and distances, every clamp -- and the final result is written back at it
+   * when this is the last pass. With the origin at zero (the whole canvas, the ordinary path) the
+   * two are the same texel. The float32 field a reduction or a flooding walks, and the pyramid
+   * levels it folds, stay canvas-addressed: those kinds are outside the regional guard
+   * (#BKE_paint_layers_effect_input_region_supported) and never see a non-zero origin. */
+  const int2 local = texel - srt.texture_origin;
+  /* The grid `input_tx` really is: the canvas whole, the stage when the input is narrow. The
+   * window kernels clamp their taps to the edge of the texture they read, which is the canvas
+   * edge where the stage is clipped and the stage edge elsewhere -- never the canvas edge inside
+   * the stage. */
+  const int2 stage_size = textureSize(srt.input_tx, 0);
+  const float4 source = texelFetch(srt.input_tx, local, 0);
   float3 rgb = source.xyz;
   /* The alpha the store keeps: the standard rule, kept or dropped to one. A pass that lays a layer
    * of its own (the Channel Split, which the CPU writes with alpha one) overrides it in its case,
@@ -2837,45 +2864,45 @@ void effect_comp([[resource_table]] EffectResources &srt,
       /* Both axes write the blurred alpha too, so the vertical half reads the horizontal one's
        * spread the way the CPU's pair does. */
       const float4 b = box_blur_axis(
-          srt.input_tx, texel, (srt.pass_kind == COMBINED_PASS_BLUR_H) ? 0 : 1, srt.radius,
-          srt.texture_size);
+          srt.input_tx, local, (srt.pass_kind == COMBINED_PASS_BLUR_H) ? 0 : 1, srt.radius,
+          stage_size);
       rgb = b.xyz;
       computed_alpha = b.w;
       break;
     }
     case COMBINED_PASS_BLUR_DIRECTIONAL: {
       const float4 b = blur_directional(srt.input_tx,
-                                        texel,
+                                        local,
                                         srt.radius,
                                         srt.filter_params_0.x,
                                         srt.filter_params_0.z,
-                                        srt.texture_size);
+                                        stage_size);
       rgb = b.xyz;
       computed_alpha = b.w;
       break;
     }
     case COMBINED_PASS_FXAA:
-      rgb = fxaa(srt.input_tx, texel, srt.texture_size, srt.luma_coefficients.xyz);
+      rgb = fxaa(srt.input_tx, local, stage_size, srt.luma_coefficients.xyz);
       break;
     case COMBINED_PASS_EXTREMUM_H:
-      rgb = extremum_axis(srt.input_tx, texel, 0, srt.radius, srt.maximum != 0, srt.texture_size);
+      rgb = extremum_axis(srt.input_tx, local, 0, srt.radius, srt.maximum != 0, stage_size);
       break;
     case COMBINED_PASS_EXTREMUM_V:
-      rgb = extremum_axis(srt.input_tx, texel, 1, srt.radius, srt.maximum != 0, srt.texture_size);
+      rgb = extremum_axis(srt.input_tx, local, 1, srt.radius, srt.maximum != 0, stage_size);
       break;
     case COMBINED_PASS_EDGE_3X3:
     case COMBINED_PASS_EMBOSS_3X3: {
       /* Both 3x3 kernels read the same clamped ring of taps, so one fetch block serves both; the
        * centre tap drops out of the Sobel gradients and the two far corners out of the Emboss. */
-      const float3 t00 = fetch_clamped(srt.input_tx, texel + int2(-1, -1), srt.texture_size);
-      const float3 t01 = fetch_clamped(srt.input_tx, texel + int2(0, -1), srt.texture_size);
-      const float3 t02 = fetch_clamped(srt.input_tx, texel + int2(1, -1), srt.texture_size);
-      const float3 t10 = fetch_clamped(srt.input_tx, texel + int2(-1, 0), srt.texture_size);
-      const float3 t11 = fetch_clamped(srt.input_tx, texel + int2(0, 0), srt.texture_size);
-      const float3 t12 = fetch_clamped(srt.input_tx, texel + int2(1, 0), srt.texture_size);
-      const float3 t20 = fetch_clamped(srt.input_tx, texel + int2(-1, 1), srt.texture_size);
-      const float3 t21 = fetch_clamped(srt.input_tx, texel + int2(0, 1), srt.texture_size);
-      const float3 t22 = fetch_clamped(srt.input_tx, texel + int2(1, 1), srt.texture_size);
+      const float3 t00 = fetch_clamped(srt.input_tx, local + int2(-1, -1), stage_size);
+      const float3 t01 = fetch_clamped(srt.input_tx, local + int2(0, -1), stage_size);
+      const float3 t02 = fetch_clamped(srt.input_tx, local + int2(1, -1), stage_size);
+      const float3 t10 = fetch_clamped(srt.input_tx, local + int2(-1, 0), stage_size);
+      const float3 t11 = fetch_clamped(srt.input_tx, local + int2(0, 0), stage_size);
+      const float3 t12 = fetch_clamped(srt.input_tx, local + int2(1, 0), stage_size);
+      const float3 t20 = fetch_clamped(srt.input_tx, local + int2(-1, 1), stage_size);
+      const float3 t21 = fetch_clamped(srt.input_tx, local + int2(0, 1), stage_size);
+      const float3 t22 = fetch_clamped(srt.input_tx, local + int2(1, 1), stage_size);
       if (srt.pass_kind == COMBINED_PASS_EMBOSS_3X3) {
         rgb = emboss(t00, t01, t10, t11, t12, t21, t22);
       }
@@ -2886,7 +2913,7 @@ void effect_comp([[resource_table]] EffectResources &srt,
     }
     case COMBINED_PASS_UNSHARP_TAIL:
     case COMBINED_PASS_HIGH_PASS_TAIL: {
-      const float3 blurred = texelFetch(srt.aux_tx, texel, 0).xyz;
+      const float3 blurred = texelFetch(srt.aux_tx, local, 0).xyz;
       if (srt.pass_kind == COMBINED_PASS_HIGH_PASS_TAIL) {
         /* A High Pass: the detail against the mid grey, taken in the display encoding. A negative
          * linear colour would break the blends, so the result is clipped below zero only. */
@@ -2925,7 +2952,7 @@ void effect_comp([[resource_table]] EffectResources &srt,
        * screen is a straight-colour formula: the source is premultiplied, so each channel is
        * straightened before it and the result stays premultiplied by the new alpha
        * `max(source.a, m)`, the way the composite decodes the buffer. */
-      const float m = texelFetch(srt.aux_tx, texel, 0).x * srt.aux0;
+      const float m = texelFetch(srt.aux_tx, local, 0).x * srt.aux0;
       const float src_alpha = clamp(source.w, 0.0f, 1.0f);
       const float inv_alpha = (src_alpha > 0.0f) ? 1.0f / src_alpha : 0.0f;
       rgb = source.xyz + srt.pass_params.xyz * m * (1.0f - source.xyz * inv_alpha);
@@ -2954,7 +2981,8 @@ void effect_comp([[resource_table]] EffectResources &srt,
         float alpha_sum = 0.0f;
         for (int sy = by; sy < by_end; sy++) {
           for (int sx = bx; sx < bx_end; sx++) {
-            const float4 p = texelFetch(srt.input_tx, int2(sx, sy), 0);
+            const int2 at = int2(sx, sy) - srt.texture_origin;
+            const float4 p = texelFetch(srt.input_tx, at, 0);
             weighted += p.xyz * p.w;
             plain += p.xyz;
             alpha_sum += p.w;
@@ -2972,14 +3000,14 @@ void effect_comp([[resource_table]] EffectResources &srt,
        * folds in. The normal leans against the slope; the DirectX encoding flips the green, and
        * `pass_params.x` names the convention (+1 the OpenGL one, -1 the DirectX one), negated here
        * to the CPU's own `green_sign`. The encode is `0.5 + 0.5 n`. */
-      const float h00 = height_fetch(srt.input_tx, texel + int2(-1, -1), srt.texture_size);
-      const float h01 = height_fetch(srt.input_tx, texel + int2(0, -1), srt.texture_size);
-      const float h02 = height_fetch(srt.input_tx, texel + int2(1, -1), srt.texture_size);
-      const float h10 = height_fetch(srt.input_tx, texel + int2(-1, 0), srt.texture_size);
-      const float h12 = height_fetch(srt.input_tx, texel + int2(1, 0), srt.texture_size);
-      const float h20 = height_fetch(srt.input_tx, texel + int2(-1, 1), srt.texture_size);
-      const float h21 = height_fetch(srt.input_tx, texel + int2(0, 1), srt.texture_size);
-      const float h22 = height_fetch(srt.input_tx, texel + int2(1, 1), srt.texture_size);
+      const float h00 = height_fetch(srt.input_tx, local + int2(-1, -1), stage_size);
+      const float h01 = height_fetch(srt.input_tx, local + int2(0, -1), stage_size);
+      const float h02 = height_fetch(srt.input_tx, local + int2(1, -1), stage_size);
+      const float h10 = height_fetch(srt.input_tx, local + int2(-1, 0), stage_size);
+      const float h12 = height_fetch(srt.input_tx, local + int2(1, 0), stage_size);
+      const float h20 = height_fetch(srt.input_tx, local + int2(-1, 1), stage_size);
+      const float h21 = height_fetch(srt.input_tx, local + int2(0, 1), stage_size);
+      const float h22 = height_fetch(srt.input_tx, local + int2(1, 1), stage_size);
       const float dh_du = ((h02 + 2.0f * h12 + h22) - (h00 + 2.0f * h10 + h20)) * 0.25f;
       const float dh_dv = ((h20 + 2.0f * h21 + h22) - (h00 + 2.0f * h01 + h02)) * 0.25f;
       const float nx = -dh_du * srt.aux0;
@@ -2996,6 +3024,8 @@ void effect_comp([[resource_table]] EffectResources &srt,
        * CPU leaves the buffer unchanged while no image is assigned, and there is no texture to
        * bind. */
       const int2 map_size = textureSize(srt.aux_tx, 0);
+      /* The slot image is no stage texture -- it is resampled in canvas UV, whatever grid the
+       * effect runs on -- so this fetch keeps the canvas `texel`, not the stage-local one. */
       const float su = ((float(texel.x) + 0.5f) / float(srt.texture_size.x)) * float(map_size.x) -
                        0.5f;
       const float sv = ((float(texel.y) + 0.5f) / float(srt.texture_size.y)) * float(map_size.y) -
@@ -3115,7 +3145,11 @@ void effect_comp([[resource_table]] EffectResources &srt,
        * weighs it, and the tint in `params2.rgb` goes out premultiplied by the weight -- the layer
        * of its own the effect leaves. */
       const int2 offset = int2(floor(srt.pass_params.xy * srt.pass_params.z + 0.5f));
-      const float shadow = fetch_zero_outside(srt.aux_tx, texel - offset, srt.texture_size).x;
+      /* Canvas-space on purpose: the silhouette of the whole shadow is a whole-canvas kernel, so a
+       * narrow stage would have to test the canvas edge rather than the texture edge. The guard
+       * refuses a region for this pass (#ePaintLayerEffectPass::OffsetTintTail), which is why the
+       * canvas size is the right bound here. */
+      const float shadow = fetch_zero_outside(srt.aux_tx, local - offset, srt.texture_size).x;
       const float under = (srt.pass_params2.w != 0.0f) ? 1.0f - clamp(source.w, 0.0f, 1.0f) : 1.0f;
       const float weight = shadow * srt.pass_params.w * under;
       const float alpha = clamp(weight, 0.0f, 1.0f);
@@ -3164,20 +3198,20 @@ void effect_comp([[resource_table]] EffectResources &srt,
        * under a transparent island never darkens a border. A flat slope, a zero span, a walk
        * without coverage or a single sample keep the texel as it is -- the original's own, not the
        * driver's. */
-      const float4 original = texelFetch(srt.aux_tx, texel, 0);
+      const float4 original = texelFetch(srt.aux_tx, local, 0);
       rgb = original.xyz;
       const float intensity = srt.pass_params.y;
       const int samples = srt.radius;
       if (intensity > 0.0f && samples > 1) {
-        const int xl = max(texel.x - 1, 0);
-        const int xr = min(texel.x + 1, srt.texture_size.x - 1);
-        const int yu = max(texel.y - 1, 0);
-        const int yd = min(texel.y + 1, srt.texture_size.y - 1);
-        const float gx = (texelFetch(srt.input_tx, int2(xr, texel.y), 0).x -
-                          texelFetch(srt.input_tx, int2(xl, texel.y), 0).x) *
+        const int xl = max(local.x - 1, 0);
+        const int xr = min(local.x + 1, stage_size.x - 1);
+        const int yu = max(local.y - 1, 0);
+        const int yd = min(local.y + 1, stage_size.y - 1);
+        const float gx = (texelFetch(srt.input_tx, int2(xr, local.y), 0).x -
+                          texelFetch(srt.input_tx, int2(xl, local.y), 0).x) *
                          0.5f;
-        const float gy = (texelFetch(srt.input_tx, int2(texel.x, yd), 0).x -
-                          texelFetch(srt.input_tx, int2(texel.x, yu), 0).x) *
+        const float gy = (texelFetch(srt.input_tx, int2(local.x, yd), 0).x -
+                          texelFetch(srt.input_tx, int2(local.x, yu), 0).x) *
                          0.5f;
         const float slope = sqrt(gx * gx + gy * gy);
         if (slope >= 1e-4f) {
@@ -3197,7 +3231,7 @@ void effect_comp([[resource_table]] EffectResources &srt,
             const int sy = clamp(int(floor(float(texel.y) + dir_y * t + 0.5f)),
                                  0,
                                  srt.texture_size.y - 1);
-            const float4 tap = texelFetch(srt.aux_tx, int2(sx, sy), 0);
+            const float4 tap = texelFetch(srt.aux_tx, int2(sx, sy) - srt.texture_origin, 0);
             const float alpha = tap.w;
             if (alpha <= 0.0f) {
               continue;
@@ -3231,7 +3265,7 @@ void effect_comp([[resource_table]] EffectResources &srt,
        * into the premultiplied colour, the band itself as the alpha, so the ring lays over the
        * empty map around the islands and the islands themselves are untouched. The tint rides in
        * `params2.rgb`; the CPU's forced white under an alpha source is the plan's to fold in. */
-      const float band = clamp(texelFetch(srt.input_tx, texel, 0).x, 0.0f, 1.0f);
+      const float band = clamp(texelFetch(srt.input_tx, local, 0).x, 0.0f, 1.0f);
       rgb = srt.pass_params2.xyz * band;
       computed_alpha = band;
       break;
@@ -3560,7 +3594,10 @@ void effect_comp([[resource_table]] EffectResources &srt,
    * CPU's buffer is written. A pass whose plan set #alpha_from_kernel keeps the alpha its kernel
    * computed instead. */
   const float alpha = (srt.alpha_from_kernel != 0) ? computed_alpha : pass_alpha;
-  imageStore(srt.result_img, texel, float4(rgb, alpha));
+  /* The last pass writes the cache texture, which is the full canvas whatever stage the pass ran
+   * on; every pass before it writes a stage-local intermediate by the same rule its reads use. */
+  const int2 store_at = (srt.last_pass != 0) ? texel : local;
+  imageStore(srt.result_img, store_at, float4(rgb, alpha));
 }
 
 /** \} */

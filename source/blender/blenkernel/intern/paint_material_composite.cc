@@ -734,7 +734,15 @@ static bool composite_mask_ibuf_is_valid(const ImBuf *ibuf, const int width, con
   if (ibuf->x != width || ibuf->y != height) {
     return false;
   }
-  return ibuf->byte_buffer.data != nullptr || ibuf->float_buffer.data != nullptr;
+  if (ibuf->byte_buffer.data != nullptr) {
+    return true;
+  }
+  if (ibuf->float_buffer.data != nullptr) {
+    /* #composite_decode_tile reads a float mask as a grey (one channel) or RGBA; two and three
+     * channels have no branch and would read past the texel. */
+    return ELEM(ibuf->channels, 0, 1, 4);
+  }
+  return false;
 }
 
 float BKE_paint_material_coverage_match(const int16_t map_coverage,

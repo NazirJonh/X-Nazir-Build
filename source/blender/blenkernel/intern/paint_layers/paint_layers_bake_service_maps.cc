@@ -477,6 +477,13 @@ bool bake_write_stored_image(Image &image,
     BKE_image_release_ibuf(&image, ibuf, lock);
     return true;
   }
+  if (stored == nullptr) {
+    /* A non-empty rectangle with no pixels behind it is a caller bug: refuse the write instead of
+     * reading through a null buffer (the empty-band path returns above). */
+    BLI_assert_msg(false, "bake_write_stored_image: no stored pixels for a non-empty band");
+    BKE_image_release_ibuf(&image, ibuf, lock);
+    return true;
+  }
   /* The index of the stored texel for the image texel (x, y): the cropped buffer's rows start at
    * the rectangle's first column, every other buffer is the image's own. */
   const auto stored_index = [&](const int x, const int y) {

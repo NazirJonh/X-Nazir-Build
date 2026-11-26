@@ -410,6 +410,22 @@ struct EffectDispatchArgs {
    * never names the slot. */
   gpu::Texture *field_dst = nullptr;
   const rcti &rect;
+  /**
+   * The canvas texel the stage textures' origin sits at: an `input_tx`/`aux_tx`/intermediate
+   * `result_img` texel is read or written at `texel - texture_origin` in `effect_comp`, while the
+   * canvas arithmetic of the kernel (the noise grid, the block cut, the distance fields, every
+   * clamp) stays in canvas texels. Zero when the stage is the whole canvas -- the path every
+   * ordinary run takes, the regional input render being off unless `BLENDER_PBR_EFFECT_REGION`
+   * asks for it. A whole-canvas kind is never dispatched with a non-zero origin
+   * (#BKE_paint_layers_effect_input_region_supported refuses one).
+   */
+  int2 texture_origin = int2(0);
+  /**
+   * Whether this pass writes the final result, whose texture is the full canvas: its store lands
+   * at the canvas `texel`, not at the stage-local one. True for every pass but the intermediate
+   * ones of a multi-pass plan.
+   */
+  bool last_pass = true;
 };
 
 /**
@@ -681,6 +697,16 @@ struct CombinedGpuFrame {
 };
 
 /**
+ * Whether \a pass is the plan's final pass: its store lands in the full-canvas result instead of
+ * the stage-local intermediate. The one predicate both the dispatch (which pass writes the canvas
+ * texel) and #EffectPassBuffers::destination (which buffer is the result) must agree on.
+ */
+inline bool paint_layer_effect_pass_is_final(const PaintLayerEffectPass &pass)
+{
+  return pass.pass_index == pass.pass_count - 1;
+}
+
+/**
  * The textures one pass plan ping-pongs through and the rectangle each of its passes dispatches
  * over: the routing both dispatchers of the GPU effect path walk -- the preview's effect stage
  * (#combined_preview_gpu_effects_run) and the mask-effect provider
@@ -830,7 +856,7 @@ inline gpu::Texture *EffectPassBuffers::aux(const ePaintLayerEffectPassAux role)
 
 inline gpu::Texture *EffectPassBuffers::destination(const PaintLayerEffectPass &pass) const
 {
-  if (pass.pass_index == pass.pass_count - 1) {
+  if (paint_layer_effect_pass_is_final(pass)) {
     return result_;
   }
   if (pass.kind == ePaintLayerEffectPass::Luminance) {

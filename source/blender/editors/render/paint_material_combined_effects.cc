@@ -1925,6 +1925,11 @@ void CombinedPasses::effect_pass_dispatch(const EffectDispatchArgs &args,
   GPU_shader_uniform_2iv(effect_shader, "dispatch_origin", &origin.x);
   const int2 end(rect.xmax, rect.ymax);
   GPU_shader_uniform_2iv(effect_shader, "dispatch_end", &end.x);
+  /* The stage origin and whether this pass writes the full-canvas result: zero and true on the
+   * whole-canvas path, the stage's origin and the plan's final pass only when the regional input
+   * render is enabled and the guard allowed a band. */
+  GPU_shader_uniform_2iv(effect_shader, "texture_origin", &args.texture_origin.x);
+  GPU_shader_uniform_1i(effect_shader, "last_pass", args.last_pass ? 1 : 0);
   GPU_shader_uniform_1i(effect_shader, "pass_kind", int(args.pass.kind));
   GPU_shader_uniform_1i(effect_shader, "radius", args.pass.radius);
   GPU_shader_uniform_1i(effect_shader, "maximum", args.pass.maximum ? 1 : 0);

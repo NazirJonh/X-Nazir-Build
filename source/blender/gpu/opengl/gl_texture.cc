@@ -523,6 +523,13 @@ void GLTexture::read_region(int mip,
   GLenum gl_type = to_gl(type);
   const size_t region_size = size_t(extent[0]) * size_t(std::max(1, extent[1])) *
                              size_t(std::max(1, extent[2])) * to_bytesize(format_, type);
+  if (region_size > size_t(INT32_MAX)) {
+    /* `glGetTextureSubImage` takes the buffer size as a `GLsizei`; a band past 2 GiB would wrap
+     * negative and the driver would leave the buffer untouched. The whole-mip fallback copies rows
+     * out itself, with no size argument to overflow. */
+    Texture::read_region(mip, type, offset, extent, data);
+    return;
+  }
   glGetTextureSubImage(tex_id_,
                        mip,
                        UNPACK3(offset),

@@ -3157,6 +3157,32 @@ PaintLayersMaskSampler::PaintLayersMaskSampler(const Material &ma,
   }
 }
 
+/**
+ * An RGBA copy of the one-channel grey \a grey, alpha opaque: the sampler's item arrays are read as
+ * RGBA (`pixel_index * 4` floats, #BKE_paint_material_mask_factor_eval), while the mask effect
+ * cache keeps one scalar per texel. Alpha one is the cached grey's own coverage (a mask grey is
+ * opaque; the old RGBA buffer carried one), so the sample's weight stays the item's opacity.
+ * Returns null when the copy cannot be allocated; the tile then leaves the item unsampled.
+ */
+static ImBuf *mask_grey_sample_buffer_new(const ImBuf &grey)
+{
+  ImBuf *rgba = IMB_allocImBuf(grey.x, grey.y, ImBufFlags::FloatData);
+  if (rgba == nullptr) {
+    return nullptr;
+  }
+  const float *src = grey.float_data();
+  float *dst = rgba->float_data_for_write();
+  const int64_t texels = int64_t(grey.x) * grey.y;
+  for (const int64_t i : IndexRange(texels)) {
+    const float value = src[i];
+    dst[i * 4 + 0] = value;
+    dst[i * 4 + 1] = value;
+    dst[i * 4 + 2] = value;
+    dst[i * 4 + 3] = 1.0f;
+  }
+  return rgba;
+}
+
 PaintLayersMaskSampler::~PaintLayersMaskSampler()
 {
   for (Tile &tile : tiles_) {
@@ -3202,11 +3228,21 @@ void PaintLayersMaskSampler::tile_acquire(const int tile_number,
     if (item.grey_buffer != nullptr) {
       /* A slice is already in canvas space and the description keeps its buffer alive: take an
        * ImBuf reference so the tile's destructor can release it like any other acquired map. A
-       * slice of another size than the tile is not sampled, as for a painted map below. */
+       * slice of another size than the tile is not sampled, as for a painted map below. A mask
+       * effect's grey is one scalar channel, so it is expanded into an owned RGBA sample buffer
+       * (alpha one) that the shared mask arithmetic reads. */
       if (item.grey_buffer->x == ref_width && item.grey_buffer->y == ref_height) {
-        IMB_refImBuf(item.grey_buffer.get());
-        tile.items[i] = item.grey_buffer.get();
-        tile.item_samples[i] = item.grey_buffer->float_data();
+        if (item.grey_buffer->channels == 1) {
+          if (ImBuf *expanded = mask_grey_sample_buffer_new(*item.grey_buffer)) {
+            tile.items[i] = expanded;
+            tile.item_samples[i] = expanded->float_data();
+          }
+        }
+        else {
+          IMB_refImBuf(item.grey_buffer.get());
+          tile.items[i] = item.grey_buffer.get();
+          tile.item_samples[i] = item.grey_buffer->float_data();
+        }
       }
     }
     else if (item.image != nullptr) {

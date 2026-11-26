@@ -6476,6 +6476,35 @@ std::shared_ptr<ImBuf> mask_effect_input_grey(Material &ma,
   return std::shared_ptr<ImBuf>(grey, [](ImBuf *buffer) { IMB_freeImBuf(buffer); });
 }
 
+/** The grey value \a grey holds at texel \a i: the one channel of the scalar cache, or the red of
+ * an RGBA work buffer (the channels a kernel keeps equal). */
+float mask_grey_texel(const ImBuf &grey, const int64_t i)
+{
+  const int channels = grey.channels == 0 ? 4 : grey.channels;
+  return grey.float_data()[i * channels];
+}
+
+/** The RGBA work form of a grey buffer with an opaque alpha: the shape a CPU kernel reads. A scalar
+ * cache grey is expanded the same way the compute fills its own work buffer. */
+std::shared_ptr<ImBuf> mask_grey_to_rgba(const ImBuf &grey)
+{
+  ImBuf *rgba = IMB_allocImBuf(grey.x, grey.y, ImBufFlags::FloatData);
+  if (rgba == nullptr) {
+    return {};
+  }
+  const int channels = grey.channels == 0 ? 4 : grey.channels;
+  float *dst = rgba->float_data_for_write();
+  const int64_t texels = int64_t(grey.x) * grey.y;
+  for (const int64_t i : IndexRange(texels)) {
+    const float value = grey.float_data()[i * channels];
+    dst[i * 4 + 0] = value;
+    dst[i * 4 + 1] = value;
+    dst[i * 4 + 2] = value;
+    dst[i * 4 + 3] = 1.0f;
+  }
+  return std::shared_ptr<ImBuf>(rgba, [](ImBuf *buffer) { IMB_freeImBuf(buffer); });
+}
+
 /** One clamped box pass of \a radius over the grey plane \a values, along \a x or \a y. */
 void mask_blur_hand_pass(Vector<float> &values,
                          const int width,
@@ -6512,7 +6541,7 @@ bool mask_grey_differs(const ImBuf &a, const ImBuf &b, const float tolerance)
     return true;
   }
   for (const int64_t i : IndexRange(int64_t(a.x) * a.y)) {
-    if (std::abs(a.float_data()[i * 4] - b.float_data()[i * 4]) > tolerance) {
+    if (std::abs(mask_grey_texel(a, i) - mask_grey_texel(b, i)) > tolerance) {
       return true;
     }
   }
@@ -6533,13 +6562,10 @@ TEST_F(PaintLayersEffectTest, a_mask_drop_shadow_reads_the_luminance_whatever_th
 
   std::shared_ptr<ImBuf> laid = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_DROP_SHADOW);
   ASSERT_NE(laid, nullptr);
+  ASSERT_EQ(laid->channels, 1) << "the cache holds one scalar grey per texel";
   std::shared_ptr<ImBuf> input = mask_effect_input_grey(*ma, *row, *shadow);
   ASSERT_NE(input, nullptr);
   EXPECT_TRUE(mask_grey_differs(*laid, *input, 1e-6f));
-  for (const int64_t i : IndexRange(int64_t(laid->x) * laid->y)) {
-    EXPECT_NEAR(laid->float_data()[i * 4 + 3], 1.0f, 1e-6f)
-        << "a mask's alpha stays one, texel " << i;
-  }
 }
 
 TEST_F(PaintLayersEffectTest, a_mask_outline_lays_a_grey_band_from_the_luminance)
@@ -6554,17 +6580,12 @@ TEST_F(PaintLayersEffectTest, a_mask_outline_lays_a_grey_band_from_the_luminance
 
   std::shared_ptr<ImBuf> laid = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_MASK_OUTLINE);
   ASSERT_NE(laid, nullptr);
+  ASSERT_EQ(laid->channels, 1) << "the cache holds one scalar grey per texel";
   std::shared_ptr<ImBuf> input = mask_effect_input_grey(*ma, *row, *outline);
   ASSERT_NE(input, nullptr);
   EXPECT_TRUE(mask_grey_differs(*laid, *input, 1e-6f));
-  const float *px = laid->float_data();
-  for (const int64_t i : IndexRange(int64_t(laid->x) * laid->y)) {
-    EXPECT_NEAR(px[i * 4 + 0], px[i * 4 + 1], 1e-6f) << "texel " << i;
-    EXPECT_NEAR(px[i * 4 + 1], px[i * 4 + 2], 1e-6f) << "texel " << i;
-    EXPECT_NEAR(px[i * 4 + 3], 1.0f, 1e-6f) << "a mask's alpha stays one, texel " << i;
-  }
   /* The white end of the ramp is the inside, which an outside band leaves empty. */
-  EXPECT_NEAR(px[(int64_t(4) * laid->x + laid->x - 1) * 4], 0.0f, 1e-6f);
+  EXPECT_NEAR(mask_grey_texel(*laid, int64_t(4) * laid->x + laid->x - 1), 0.0f, 1e-6f);
 }
 
 TEST_F(PaintLayersEffectTest, a_mask_channel_split_lays_the_slot_channel_as_the_coverage)
@@ -6580,11 +6601,10 @@ TEST_F(PaintLayersEffectTest, a_mask_channel_split_lays_the_slot_channel_as_the_
 
   std::shared_ptr<ImBuf> laid = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT);
   ASSERT_NE(laid, nullptr);
-  const float *px = laid->float_data();
+  ASSERT_EQ(laid->channels, 1) << "the cache holds one scalar grey per texel";
   for (const int64_t i : IndexRange(int64_t(laid->x) * laid->y)) {
-    EXPECT_NEAR(px[i * 4 + 0], 25.0f / 255.0f, 5e-3f) << "the red of the map, texel " << i;
-    EXPECT_NEAR(px[i * 4 + 1], px[i * 4 + 0], 1e-6f) << "texel " << i;
-    EXPECT_NEAR(px[i * 4 + 3], 1.0f, 1e-6f) << "a mask's alpha stays one, texel " << i;
+    EXPECT_NEAR(mask_grey_texel(*laid, i), 25.0f / 255.0f, 5e-3f)
+        << "the red of the map, texel " << i;
   }
 }
 
@@ -6601,7 +6621,7 @@ TEST_F(PaintLayersEffectTest, a_mask_bevel_reads_the_luminance_whatever_the_sour
   std::shared_ptr<ImBuf> laid = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_BEVEL);
   ASSERT_NE(laid, nullptr);
   /* The dark end of the ramp is outside the shape, which is no distance from a border. */
-  EXPECT_LT(laid->float_data()[(int64_t(4) * laid->x) * 4], 0.5f);
+  EXPECT_LT(mask_grey_texel(*laid, int64_t(4) * laid->x), 0.5f);
 }
 
 TEST_F(PaintLayersEffectTest, a_mask_blur_is_the_box_blur_of_the_mask_built_up_to_it)
@@ -6616,24 +6636,20 @@ TEST_F(PaintLayersEffectTest, a_mask_blur_is_the_box_blur_of_the_mask_built_up_t
   ASSERT_NE(laid, nullptr);
   ASSERT_EQ(laid->x, 8);
   ASSERT_EQ(laid->y, 8);
+  ASSERT_EQ(laid->channels, 1) << "the cache holds one scalar grey per texel";
 
   /* The hand box blur of the input, one clamped pass per axis: the maths the kernel runs. */
   std::shared_ptr<ImBuf> input = mask_effect_input_grey(*ma, *row, *blur);
   ASSERT_NE(input, nullptr);
   Vector<float> hand(64);
   for (const int i : IndexRange(64)) {
-    hand[i] = input->float_data()[i * 4];
+    hand[i] = mask_grey_texel(*input, i);
   }
   mask_blur_hand_pass(hand, 8, 8, 1, true);
   mask_blur_hand_pass(hand, 8, 8, 1, false);
 
-  const float *laid_px = laid->float_data();
   for (const int i : IndexRange(64)) {
-    EXPECT_NEAR(laid_px[i * 4], hand[i], 1e-5f) << "texel " << i;
-    /* A grey in, a grey out: the item lays one scalar, and an opaque one. */
-    EXPECT_NEAR(laid_px[i * 4 + 0], laid_px[i * 4 + 1], 1e-6f) << "texel " << i;
-    EXPECT_NEAR(laid_px[i * 4 + 1], laid_px[i * 4 + 2], 1e-6f) << "texel " << i;
-    EXPECT_NEAR(laid_px[i * 4 + 3], 1.0f, 1e-6f) << "texel " << i;
+    EXPECT_NEAR(mask_grey_texel(*laid, i), hand[i], 1e-5f) << "texel " << i;
   }
   /* The ramp's left edge is a real edge: the blur moved it. */
   EXPECT_TRUE(mask_grey_differs(*laid, *input, 1e-6f)) << "a blur of a ramp is not the ramp";
@@ -6650,6 +6666,7 @@ TEST_F(PaintLayersEffectTest, a_monochrome_mask_noise_lays_the_kernel_over_the_g
 
   std::shared_ptr<ImBuf> laid = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_NOISE);
   ASSERT_NE(laid, nullptr);
+  ASSERT_EQ(laid->channels, 1);
   std::shared_ptr<ImBuf> input = mask_effect_input_grey(*ma, *row, *noise);
   ASSERT_NE(input, nullptr);
 
@@ -6659,16 +6676,9 @@ TEST_F(PaintLayersEffectTest, a_monochrome_mask_noise_lays_the_kernel_over_the_g
   ASSERT_NE(expected, nullptr);
   paint_layer_effect_kernel_apply(*expected, *noise, false, PAINT_TILE_NUMBER_BASE);
 
-  const float *laid_px = laid->float_data();
   const float *expected_px = expected->float_data();
   for (const int i : IndexRange(64)) {
-    for (const int k : IndexRange(4)) {
-      EXPECT_NEAR(laid_px[i * 4 + k], expected_px[i * 4 + k], 1e-6f)
-          << "texel " << i << " ch " << k;
-    }
-    /* A monochrome grain is one delta on all three channels: the result stays grey. */
-    EXPECT_NEAR(laid_px[i * 4 + 0], laid_px[i * 4 + 1], 1e-6f) << "texel " << i;
-    EXPECT_NEAR(laid_px[i * 4 + 1], laid_px[i * 4 + 2], 1e-6f) << "texel " << i;
+    EXPECT_NEAR(mask_grey_texel(*laid, i), expected_px[i * 4], 1e-6f) << "texel " << i;
   }
 }
 
@@ -6689,17 +6699,14 @@ TEST_F(PaintLayersEffectTest, a_mask_effect_reads_the_grey_the_effects_before_it
   ASSERT_NE(laid_noise, nullptr);
 
   /* The noise's input is the blur's laid grey, at full strength and un-inverted by default, so the
-   * kernel over a copy of it is the whole difference. */
-  std::shared_ptr<ImBuf> expected = paint_layer_anchor_slice_buffer_clone(*laid_blur);
+   * kernel over a copy of it is the whole difference. The scalar cache's grey expands to the RGBA
+   * the kernel reads, alpha opaque. */
+  std::shared_ptr<ImBuf> expected = mask_grey_to_rgba(*laid_blur);
   ASSERT_NE(expected, nullptr);
   paint_layer_effect_kernel_apply(*expected, *noise, false, PAINT_TILE_NUMBER_BASE);
-  const float *laid_px = laid_noise->float_data();
   const float *expected_px = expected->float_data();
   for (const int i : IndexRange(64)) {
-    for (const int k : IndexRange(4)) {
-      EXPECT_NEAR(laid_px[i * 4 + k], expected_px[i * 4 + k], 1e-6f)
-          << "texel " << i << " ch " << k;
-    }
+    EXPECT_NEAR(mask_grey_texel(*laid_noise, i), expected_px[i * 4], 1e-6f) << "texel " << i;
   }
 
   /* A parameter of the blur moves the grey the noise reads: the chain fingerprint moves the noise's
@@ -6810,12 +6817,68 @@ TEST_F(PaintLayersEffectTest, every_mask_effect_kind_lays_one_grey)
 
     std::shared_ptr<ImBuf> grey = mask_effect_grey(*ma, filter);
     ASSERT_NE(grey, nullptr) << "the kind lays a grey, filter " << filter;
+    EXPECT_EQ(grey->channels, 1) << "the cache keeps one scalar grey, filter " << filter;
     for (const int64_t i : IndexRange(int64_t(grey->x) * grey->y)) {
-      EXPECT_NEAR(grey->float_data()[i * 4 + 0], grey->float_data()[i * 4 + 1], 1e-6f)
-          << "the red and the green agree, filter " << filter << " texel " << i;
-      EXPECT_NEAR(grey->float_data()[i * 4 + 1], grey->float_data()[i * 4 + 2], 1e-6f)
-          << "the green and the blue agree, filter " << filter << " texel " << i;
+      EXPECT_TRUE(std::isfinite(grey->float_data()[i]))
+          << "the grey has a value, filter " << filter << " texel " << i;
     }
+  }
+}
+
+TEST_F(PaintLayersEffectTest, a_mask_effect_cache_keeps_one_scalar_float_per_texel)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *row, *add_ramp_image("Mask")), nullptr);
+  MaterialPaintLayer *blur = add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 1));
+
+  std::shared_ptr<ImBuf> laid = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_NE(laid, nullptr);
+  ASSERT_EQ(laid->channels, 1) << "the cache keeps one scalar float per texel, not RGBA";
+  EXPECT_EQ(paint_layer_mask_effect_cache_bytes(),
+            size_t(laid->x) * size_t(laid->y) * sizeof(float))
+      << "the cache accounts one float per texel; the RGBA form would be 4x that";
+  EXPECT_EQ(paint_layer_mask_effect_cache_entry_count(), 1);
+
+  /* The scalar is the same value the RGBA work buffer carried in its red channel: the kernel on the
+   * expanded input is the compute the cache compressed. */
+  std::shared_ptr<ImBuf> input = mask_effect_input_grey(*ma, *row, *blur);
+  ASSERT_NE(input, nullptr);
+  std::shared_ptr<ImBuf> expected = mask_grey_to_rgba(*input);
+  ASSERT_NE(expected, nullptr);
+  paint_layer_effect_kernel_apply(*expected, *blur, false, PAINT_TILE_NUMBER_BASE);
+  for (const int64_t i : IndexRange(int64_t(laid->x) * laid->y)) {
+    EXPECT_NEAR(mask_grey_texel(*laid, i), expected->float_data()[i * 4], 1e-6f)
+        << "texel " << i;
+  }
+}
+
+TEST_F(PaintLayersEffectTest, a_colourising_mask_kind_stores_the_normalized_luminance_as_one_scalar)
+{
+  /* The kinds the kind table flags #PAINT_LAYER_KIND_MASK_NEEDS_LUMA fold their colour back to one
+   * grey before the cache: the scalar stores that luminance, not whichever channel a kernel
+   * happened to write first. */
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *row, *add_ramp_image("Mask")), nullptr);
+  MaterialPaintLayer *glow = add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_GLOW);
+  ASSERT_TRUE(paint_layer_kind_has_flag(*glow, PAINT_LAYER_KIND_MASK_NEEDS_LUMA));
+
+  std::shared_ptr<ImBuf> laid = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_GLOW);
+  ASSERT_NE(laid, nullptr);
+  ASSERT_EQ(laid->channels, 1);
+
+  std::shared_ptr<ImBuf> expected = mask_effect_input_grey(*ma, *row, *glow);
+  ASSERT_NE(expected, nullptr);
+  paint_layer_effect_kernel_apply(*expected, *glow, false, PAINT_TILE_NUMBER_BASE);
+  paint_layer_effect_to_luminance(*expected);
+  for (const int64_t i : IndexRange(int64_t(laid->x) * laid->y)) {
+    EXPECT_NEAR(mask_grey_texel(*laid, i), expected->float_data()[i * 4], 1e-6f)
+        << "texel " << i;
+    EXPECT_NEAR(expected->float_data()[i * 4],
+                expected->float_data()[i * 4 + 1],
+                1e-6f)
+        << "the reference is one grey, texel " << i;
   }
 }
 
@@ -6886,16 +6949,17 @@ TEST_F(PaintLayersEffectTest, a_mask_mirror_folds_the_mask_built_up_to_it)
 
   std::shared_ptr<ImBuf> laid = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_MIRROR);
   ASSERT_NE(laid, nullptr);
+  ASSERT_EQ(laid->channels, 1) << "the cache holds one scalar grey per texel";
   std::shared_ptr<ImBuf> input = mask_effect_input_grey(*ma, *row, *mirror);
   ASSERT_NE(input, nullptr);
 
   /* A fold about the middle of the canvas shows both sides alike, and the ramp is not symmetric. */
-  const float *laid_px = laid->float_data();
   for (const int y : IndexRange(8)) {
     for (const int x : IndexRange(8)) {
-      EXPECT_NEAR(laid_px[(y * 8 + x) * 4], laid_px[(y * 8 + (7 - x)) * 4], 1e-5f)
+      EXPECT_NEAR(mask_grey_texel(*laid, y * 8 + x),
+                  mask_grey_texel(*laid, y * 8 + (7 - x)),
+                  1e-5f)
           << "texel " << x << "," << y;
-      EXPECT_NEAR(laid_px[(y * 8 + x) * 4 + 3], 1.0f, 1e-6f) << "an opaque grey";
     }
   }
   EXPECT_TRUE(mask_grey_differs(*laid, *input, 1e-4f)) << "a fold of a ramp is not the ramp";
@@ -6914,6 +6978,7 @@ TEST_F(PaintLayersEffectTest, a_mask_transform_moves_the_mask_and_acts_in_uv_onl
   ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(*ma, transform, offset));
   std::shared_ptr<ImBuf> laid = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_TRANSFORM);
   ASSERT_NE(laid, nullptr);
+  ASSERT_EQ(laid->channels, 1);
   std::shared_ptr<ImBuf> input = mask_effect_input_grey(*ma, *row, *transform);
   ASSERT_NE(input, nullptr);
 
@@ -6923,8 +6988,8 @@ TEST_F(PaintLayersEffectTest, a_mask_transform_moves_the_mask_and_acts_in_uv_onl
     for (const int y : IndexRange(8)) {
       for (const int x : IndexRange(8)) {
         const int source_x = ((x + shift) % 8 + 8) % 8;
-        if (std::abs(laid->float_data()[(y * 8 + x) * 4] -
-                     input->float_data()[(y * 8 + source_x) * 4]) > 1e-4f)
+        if (std::abs(mask_grey_texel(*laid, y * 8 + x) -
+                     mask_grey_texel(*input, y * 8 + source_x)) > 1e-4f)
         {
           return false;
         }
@@ -6957,8 +7022,9 @@ TEST_F(PaintLayersEffectTest, a_shifted_constant_mask_does_not_vanish)
   /* Repeat: a constant shifted around the canvas is the same constant everywhere. */
   std::shared_ptr<ImBuf> laid = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_TRANSFORM);
   ASSERT_NE(laid, nullptr);
+  ASSERT_EQ(laid->channels, 1);
   for (const int64_t i : IndexRange(int64_t(laid->x) * laid->y)) {
-    EXPECT_NEAR(laid->float_data()[i * 4], 1.0f, 1e-5f) << "texel " << i;
+    EXPECT_NEAR(mask_grey_texel(*laid, i), 1.0f, 1e-5f) << "texel " << i;
   }
 
   /* Clip: only the strip the shift uncovers is lost, not the whole mask. */
@@ -6968,7 +7034,7 @@ TEST_F(PaintLayersEffectTest, a_shifted_constant_mask_does_not_vanish)
   int lit = 0;
   int dark = 0;
   for (const int64_t i : IndexRange(int64_t(laid->x) * laid->y)) {
-    (laid->float_data()[i * 4] > 0.5f ? lit : dark)++;
+    (mask_grey_texel(*laid, i) > 0.5f ? lit : dark)++;
   }
   EXPECT_GT(lit, 0) << "the mask survives a clipped shift";
   EXPECT_GT(dark, 0) << "the uncovered strip lays no coverage";

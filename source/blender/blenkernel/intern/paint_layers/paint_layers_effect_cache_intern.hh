@@ -301,6 +301,15 @@ template<typename Entry> struct PaintLayerEffectCacheStore {
 /** \name Effect cache get or compute
  * \{ */
 
+/** The bytes \a buffer costs: one float per texel per channel. The row effect cache keeps an RGBA
+ * buffer and the mask effect cache one scalar channel, so the count reads the buffer itself rather
+ * than assuming RGBA. */
+inline size_t paint_layer_effect_buffer_bytes(const ImBuf &buffer)
+{
+  const size_t channels = buffer.channels == 0 ? 4 : size_t(buffer.channels);
+  return size_t(buffer.x) * size_t(buffer.y) * channels * sizeof(float);
+}
+
 /* Declared first: the no-region wrapper below forwards to it, and the unqualified call must find
  * the name at the wrapper's definition, not only at instantiation. */
 template<typename Entry, typename Compute, typename RegionUpdate>
@@ -462,7 +471,7 @@ std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute_region(
     Vector<PaintLayerEffectSource> patched_synced;
     rcti patched_valid;
     if (region_update(cached, maps_region, patched, patched_synced, patched_valid)) {
-      const size_t bytes = size_t(patched->x) * size_t(patched->y) * sizeof(float[4]);
+      const size_t bytes = paint_layer_effect_buffer_bytes(*patched);
       std::lock_guard<std::mutex> lock(mutex);
       /* The same put-back the full compute ends with: an entry of the effect and tile is replaced
        * by the patch, the other tiles' entries stay, and a buffer still shared with a live
@@ -498,7 +507,7 @@ std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute_region(
     }
     return {};
   }
-  const size_t bytes = size_t(color->x) * size_t(color->y) * sizeof(float[4]);
+  const size_t bytes = paint_layer_effect_buffer_bytes(*color);
 
   std::lock_guard<std::mutex> lock(mutex);
   /* An entry of the same effect and tile with other parameters is stale -- the description can only

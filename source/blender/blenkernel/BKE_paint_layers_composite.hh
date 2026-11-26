@@ -209,9 +209,11 @@ void BKE_paint_layers_cache_debug_log(const char *where);
 
 /**
  * The grey the CPU-computed mask effect \a effect lays on its owner row \a row, on \a tile_number:
- * the mask effect cache's buffer, computed when no fresh one stands. A Normal to Mask item's grey
- * is the kernel's output over the Normal channel of the slice its Anchor Point references; the
- * item's own invert, blend and opacity are laid by the reader of the grey, not by it.
+ * the mask effect cache's buffer, computed when no fresh one stands. The buffer is a scalar grey --
+ * one float per texel, `channels = 1` -- which the readers take as the mask factor. A Normal to
+ * Mask item's grey is the kernel's output over the Normal channel of the slice its Anchor Point
+ * references; the item's own invert, blend and opacity are laid by the reader of the grey, not by
+ * it.
  *
  * \return null when \a effect is not a mask item of \a row, is no CPU-computed kind, or its input
  * cannot be rendered (a Normal to Mask with an Anchor Point that does not resolve).

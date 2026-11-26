@@ -206,18 +206,21 @@ static void bake_mask_effect_grey_write(Image &image,
 {
   const int width = grey.x;
   const int height = grey.y;
+  /* The cache keeps one scalar float per texel; a bake map is RGBA, so every channel of the row
+   * takes the grey and the map stays opaque. */
   const float *src = grey.float_data();
+  const int channels = grey.channels == 0 ? 4 : grey.channels;
   bake_write_image_rows(
       image, is_color, rect, tile_number,
       [&](const int y, const int map_width, float *r_row) {
         const int src_y = paint_layer_nearest_resample_texel(y, size, height);
-        const float *src_row = src + int64_t(src_y) * width * 4;
+        const float *src_row = src + int64_t(src_y) * width * channels;
         for (const int x : IndexRange(map_width)) {
           const int src_x = paint_layer_nearest_resample_texel(x, map_width, width);
-          const float *texel = src_row + int64_t(src_x) * 4;
-          r_row[x * 4 + 0] = texel[0];
-          r_row[x * 4 + 1] = texel[1];
-          r_row[x * 4 + 2] = texel[2];
+          const float value = src_row[int64_t(src_x) * channels];
+          r_row[x * 4 + 0] = value;
+          r_row[x * 4 + 1] = value;
+          r_row[x * 4 + 2] = value;
           r_row[x * 4 + 3] = 1.0f;
         }
       });

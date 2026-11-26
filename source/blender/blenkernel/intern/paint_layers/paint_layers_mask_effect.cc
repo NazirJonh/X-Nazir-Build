@@ -47,7 +47,9 @@ namespace blender {
  * \{ */
 
 /** One cached mask effect: the result buffer, the maps the input was rendered from, the size and
- * the byte cost, keyed by #EffectCacheKey. */
+ * the byte cost, keyed by #EffectCacheKey. The result is a scalar grey -- one float per texel, the
+ * `channels = 1` float #ImBuf the consumers read as a mask factor; the RGBA buffers a kernel or
+ * the GPU provider works on are short-lived and never reach the entry. */
 struct MaskEffectCacheEntry {
   EffectCacheKey key;
   int width = 0;
@@ -71,14 +73,42 @@ static PaintLayerEffectCacheStore<MaskEffectCacheEntry> g_paint_mask_effect_cach
  * input's own nested describes cannot deadlock on it. */
 static std::mutex g_paint_mask_effect_cache_mutex;
 
-/** An opaque RGBA float buffer of \a width x \a height, owned by the returned shared pointer. */
-static std::shared_ptr<ImBuf> mask_effect_buffer_new(const int width, const int height)
+/** A float buffer of \a width x \a height with \a channels channels, owned by the returned shared
+ * pointer. The cache keeps one channel -- a scalar grey, one float per texel -- while \a channels
+ * of four is the short-lived work buffer a CPU kernel or the GPU provider reads and writes. */
+static std::shared_ptr<ImBuf> mask_effect_buffer_new(const int width,
+                                                     const int height,
+                                                     const int channels = 1)
 {
   ImBuf *ibuf = IMB_allocImBuf(width, height, ImBufFlags::FloatData);
   if (ibuf == nullptr) {
     return {};
   }
+  if (channels != 4 && !IMB_alloc_float_pixels(ibuf, channels, /*initialize_pixels=*/false)) {
+    IMB_freeImBuf(ibuf);
+    return {};
+  }
   return std::shared_ptr<ImBuf>(ibuf, [](ImBuf *buffer) { IMB_freeImBuf(buffer); });
+}
+
+/** The scalar form of the RGBA work \a rgba: a fresh one-channel buffer holding the grey the
+ * kernels and the normalize left in the colour channels. The alpha is not part of a mask grey, and
+ * every kind's result is one grey by then (#mask_effect_grey_normalize folds the ones that can
+ * colorize), so the first channel carries it. */
+static std::shared_ptr<ImBuf> mask_effect_grey_compress(const ImBuf &rgba)
+{
+  BLI_assert(rgba.channels == 4 || rgba.channels == 0);
+  std::shared_ptr<ImBuf> grey = mask_effect_buffer_new(rgba.x, rgba.y, 1);
+  if (grey == nullptr) {
+    return {};
+  }
+  const float *src = rgba.float_buffer.data;
+  float *dst = grey->float_data_for_write();
+  const int64_t texels = int64_t(rgba.x) * rgba.y;
+  for (const int64_t i : IndexRange(texels)) {
+    dst[i] = src[i * 4];
+  }
+  return grey;
 }
 
 /**
@@ -358,10 +388,15 @@ static bool mask_effect_reads_anchor_slice(const Material &ma, const MaterialPai
          ref.target == PaintLayerAnchorPointTarget::Content;
 }
 
-/** Fill \a color, the item's canvas-sized grey buffer, with the input channel's color of the
+/** Fill \a color, the item's canvas-sized RGBA work buffer, with the input channel's color of the
  * slice the Anchor Point item \a effect references: the kernel's whole input. The slice renders
  * at the source row's own resolution, so the canvas samples it nearest when the two differ -- the
- * same stretch a bake map takes its grey by (see #bake_mask_effect_row_write). */
+ * same stretch a bake map takes its grey by (see #bake_mask_effect_row_write).
+ *
+ * The bytes land in a full RGBA work buffer, not in the scalar cache: a Normal to Mask kernel reads
+ * the slice's three components as a tangent-space vector, so the input cannot be folded to one
+ * channel before the kernel runs. The result is compressed to the cache's scalar grey afterwards
+ * (#mask_effect_grey_compress). */
 static bool mask_effect_anchor_slice_input(const Material &ma,
                                            const MaterialPaintLayer &effect,
                                            const int tile_number,
@@ -480,8 +515,11 @@ static bool paint_layer_mask_effect_compute(const Material &ma,
   if (!mask_effect_dimensions(ma, row, effect, tile_number, painted_object, width, height)) {
     return false;
   }
-  std::shared_ptr<ImBuf> color = mask_effect_buffer_new(width, height);
-  if (color == nullptr) {
+  /* The compute works in RGBA, the form every CPU kernel (and the GPU provider) reads: a Normal to
+   * Mask's slice is a tangent-space vector, and the kinds that keep a grey grey still read and
+   * write four channels. The scalar cache is compressed from this buffer at the end. */
+  std::shared_ptr<ImBuf> work = mask_effect_buffer_new(width, height, 4);
+  if (work == nullptr) {
     return false;
   }
   {
@@ -494,7 +532,7 @@ static bool paint_layer_mask_effect_compute(const Material &ma,
        * rather than running the kernel over the mask's own grey. */
       if (!mask_effect_reads_anchor_slice(ma, effect) ||
           !mask_effect_anchor_slice_input(
-              ma, effect, tile_number, painted_object, width, height, color))
+              ma, effect, tile_number, painted_object, width, height, work))
       {
         return false;
       }
@@ -507,7 +545,7 @@ static bool paint_layer_mask_effect_compute(const Material &ma,
        * it. */
       PaintLayersMaskSampler sampler(ma, row, &effect.marker, false, painted_object);
       sampler.tile_acquire(tile_number, width, height);
-      float *pixels = color->float_data_for_write();
+      float *pixels = work->float_data_for_write();
       /* #tile_acquire decodes those maps into the sampler and is not thread safe, so the one tile
        * runs here, on the calling thread, before the rows below sample it in parallel -- the order
        * the mask merge keeps (#paint_layers_target.cc), and the one the class documents.
@@ -535,17 +573,21 @@ static bool paint_layer_mask_effect_compute(const Material &ma,
   PaintMaterialCompositeMapping transform_step;
   if (paint_layer_mask_transform_step_get(effect, transform_step)) {
     /* A transform effect moves the grey instead of correcting it. */
-    mask_effect_transform_apply(*color, transform_step);
+    mask_effect_transform_apply(*work, transform_step);
   }
   else {
     /* The kernel reads the buffer the block above filled and leaves the alpha alone. A kernel
      * that answers false -- a node-group filter with no backend, or one asked off the main
      * thread -- leaves no answer to cache: the caller keeps the entry unrendered, so a bake
      * worker's ask never files the grey back as the item's output. */
-    compute_path = mask_effect_kernel_apply(*color, effect, tile_number, /*allow_gpu=*/true);
+    compute_path = mask_effect_kernel_apply(*work, effect, tile_number, /*allow_gpu=*/true);
     if (compute_path == nullptr) {
       return false;
     }
+  }
+  std::shared_ptr<ImBuf> color = mask_effect_grey_compress(*work);
+  if (color == nullptr) {
+    return false;
   }
   /* The versions are taken after the render: an edit that landed while it ran is read next time. */
   Vector<Image *> images;
@@ -623,7 +665,9 @@ static bool mask_effect_region_compute(
   if (region_width <= 0 || region_height <= 0) {
     return false;
   }
-  std::shared_ptr<ImBuf> small = mask_effect_buffer_new(region_width, region_height);
+  /* The patch runs the kernel in RGBA, like the full compute, then copies the grey into the scalar
+   * copy of the cache. */
+  std::shared_ptr<ImBuf> small = mask_effect_buffer_new(region_width, region_height, 4);
   if (small == nullptr) {
     return false;
   }
@@ -670,6 +714,7 @@ static bool mask_effect_region_compute(
   if (patched == nullptr) {
     return false;
   }
+  BLI_assert(patched->channels == 1);
   const float *src = small->float_buffer.data;
   float *dst = patched->float_data_for_write();
   for (const int y : IndexRange(valid.ymin, BLI_rcti_size_y(&valid))) {
@@ -677,8 +722,10 @@ static bool mask_effect_region_compute(
                            (int64_t(y - region_small.ymin) * region_width +
                             int64_t(valid.xmin - region_small.xmin)) *
                                4;
-    float *dst_row = dst + (int64_t(y) * width + valid.xmin) * 4;
-    memcpy(dst_row, src_row, size_t(BLI_rcti_size_x(&valid)) * sizeof(float[4]));
+    float *dst_row = dst + int64_t(y) * width + valid.xmin;
+    for (const int x : IndexRange(BLI_rcti_size_x(&valid))) {
+      dst_row[x] = src_row[int64_t(x) * 4];
+    }
   }
   /* The versions are taken after the render: an edit that landed while it ran is read next time. */
   r_patched_synced = map_sources_snapshot(images);

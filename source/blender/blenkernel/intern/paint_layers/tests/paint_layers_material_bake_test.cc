@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdlib>
 #include <mutex>
 #include <string>
@@ -4630,10 +4631,10 @@ TEST_F(PaintLayersOwnedEffectTest, a_mask_grey_patch_matches_the_full_compute)
 
   ASSERT_EQ(patched->x, recomputed->x);
   ASSERT_EQ(patched->y, recomputed->y);
+  EXPECT_EQ(patched->channels, 1) << "the patched result stays the cache's scalar form";
+  EXPECT_EQ(recomputed->channels, 1);
   for (const int64_t i : IndexRange(int64_t(patched->x) * patched->y)) {
-    EXPECT_NEAR(patched->float_data()[i * 4],
-                recomputed->float_data()[i * 4],
-                1e-5f)
+    EXPECT_NEAR(patched->float_data()[i], recomputed->float_data()[i], 1e-5f)
         << "the patch and the full compute disagree at texel " << i;
   }
 }
@@ -4672,6 +4673,11 @@ TEST_F(PaintLayersOwnedEffectTest, a_mask_grey_with_an_anchor_slice_refuses_the_
   std::shared_ptr<ImBuf> grey = paint_layer_mask_effect_buffer_get(
       *ma, *owner, *item, /*describe_only=*/false, nullptr, PAINT_TILE_NUMBER_BASE);
   ASSERT_NE(grey, nullptr);
+  EXPECT_EQ(grey->channels, 1) << "the grey is the cache's scalar form";
+  for (const int64_t i : IndexRange(int64_t(grey->x) * grey->y)) {
+    EXPECT_TRUE(std::isfinite(grey->float_data()[i]))
+        << "the anchor-slice grey has a value at texel " << i;
+  }
 
   /* An edit of the referenced normal is a rectangle in its own grid; the grey is this canvas's, and
    * no band of it can be named from that rectangle. */
@@ -4694,6 +4700,11 @@ TEST_F(PaintLayersOwnedEffectTest, a_mask_grey_with_an_anchor_slice_refuses_the_
   EXPECT_TRUE(valid.xmin == 0 && valid.ymin == 0 && valid.xmax >= answer->x &&
               valid.ymax >= answer->y)
       << "an anchor-slice grey cannot narrow the written band";
+  bool differs = false;
+  for (const int64_t i : IndexRange(int64_t(answer->x) * answer->y)) {
+    differs |= answer->float_data()[i] != grey->float_data()[i];
+  }
+  EXPECT_TRUE(differs) << "the edited slice recomputed the grey, it did not keep the old one";
 }
 
 TEST_F(PaintLayersOwnedEffectTest, a_regional_mask_write_leaves_the_rest_of_the_grey_map)

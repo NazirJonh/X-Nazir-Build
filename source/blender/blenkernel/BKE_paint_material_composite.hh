@@ -1005,10 +1005,11 @@ struct PaintMaterialCompositeMaskItem {
   /** The operator's UV mapping, applied to its map while the buffers are acquired. */
   PaintMaterialCompositeMapping coverage_mapping;
   /**
-   * An Anchor Point slice read as a mask item, or a CPU-computed mask effect's grey: the scalar as
-   * a grey RGBA buffer, owned by this description (see #PaintMaterialCompositeImageLayer::
-   * anchor_point_color). The evaluator lays both the same way, a canvas grey by the item's blend,
-   * invert and opacity. Null for every other item.
+   * An Anchor Point slice read as a mask item, or a CPU-computed mask effect's grey. A slice is a
+   * grey RGBA buffer; the mask effect cache keeps one scalar float per texel (`channels = 1`), and
+   * the evaluator reads both as a grey. Owned by this description (see
+   * #PaintMaterialCompositeImageLayer::anchor_point_color). The evaluator lays both the same way, a
+   * canvas grey by the item's blend, invert and opacity. Null for every other item.
    */
   std::shared_ptr<ImBuf> grey_buffer;
   /**

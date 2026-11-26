@@ -2767,7 +2767,7 @@ TEST_F(PaintLayersBakeTest, a_mask_effect_item_bakes_the_grey_the_composite_lays
     ASSERT_NE(laid, nullptr);
     ASSERT_NE(laid->grey_buffer, nullptr);
     for (const int i : IndexRange(64)) {
-      live[i] = laid->grey_buffer->float_data()[i * 4];
+      live[i] = laid->grey_buffer->float_data()[i];
     }
   }
 
@@ -2964,7 +2964,7 @@ TEST_F(PaintLayersBakeTest, a_mask_effect_over_a_rectangular_mask_stretches_into
     ASSERT_NE(laid, nullptr);
     ASSERT_NE(laid->grey_buffer, nullptr);
     for (const int64_t i : IndexRange(64 * 32)) {
-      live[i] = laid->grey_buffer->float_data()[i * 4];
+      live[i] = laid->grey_buffer->float_data()[i];
     }
   }
 

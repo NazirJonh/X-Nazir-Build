@@ -5244,8 +5244,10 @@ std::shared_ptr<ImBuf> paint_layer_owned_effect_result_compute(const Material &m
       BKE_paint_layers_effect_is_gpu_computed(effect) && BLI_thread_is_main())
   {
     bke::paint_perf::ScopedTimer perf_gpu("effect.own_bake.gpu");
+    /* The whole canvas is read back here: the sync writer lays the band out of a full-canvas
+     * buffer, and the caller that narrows the read is the bake's precompute. */
     std::shared_ptr<ImBuf> gpu_result = g_owned_effect_gpu_provider(
-        ma, row, effect, channel, tile_number, changed_region);
+        ma, row, effect, channel, tile_number, changed_region, nullptr);
     perf_gpu.note("kind=%d hit=%s",
                   int(effect.kind_subtype),
                   gpu_result != nullptr ? "yes" : "fallback");

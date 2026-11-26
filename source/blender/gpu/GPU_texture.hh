@@ -1036,6 +1036,22 @@ void *GPU_texture_read(gpu::Texture *texture, eGPUDataFormat data_format, int mi
 void GPU_texture_read(gpu::Texture *texture, eGPUDataFormat data_format, int mip_level, void *dst);
 
 /**
+ * Read a rectangular region of a \a mip_level from a \a texture into user-provided memory buffer
+ * \a dst, packed row by row (no full-mip stride). \a offset and \a extent are in texels; for an
+ * array texture \a offset[2] selects the first layer and \a extent[2] the layer count. \a dst must
+ * hold \a extent[0] * \a extent[1] * max(1, \a extent[2]) texels of \a data_format.
+ *
+ * \warning the texture must have been created using GPU_TEXTURE_USAGE_HOST_READ, like
+ * #GPU_texture_read.
+ */
+void GPU_texture_read_region(gpu::Texture *texture,
+                             eGPUDataFormat data_format,
+                             int mip_level,
+                             const int offset[3],
+                             const int extent[3],
+                             void *dst);
+
+/**
  * Calculate memory size in bytes needed to read a \a mip_level from a \a texture.
  */
 size_t GPU_texture_read_size_get(const gpu::Texture *texture,

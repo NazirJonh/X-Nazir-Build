@@ -2027,7 +2027,8 @@ static std::shared_ptr<ImBuf> owned_effect_gpu_provider_records(const Material &
                                                                 const MaterialPaintLayer & /*effect*/,
                                                                 const int /*channel*/,
                                                                 const int /*tile_number*/,
-                                                                const rcti *changed_region)
+                                                                const rcti *changed_region,
+                                                                PaintLayerOwnedEffectGpuCrop * /*r_crop*/)
 {
   /* Sticky: the inline effect compute asks the provider after the job's precompute did, without a
    * region of its own; the test wants to know whether the job offered one at all. */
@@ -2977,7 +2978,8 @@ static std::shared_ptr<ImBuf> owned_effect_gpu_provider_refuses(
     const MaterialPaintLayer & /*effect*/,
     const int /*channel*/,
     const int /*tile_number*/,
-    const rcti * /*changed_region*/)
+    const rcti * /*changed_region*/,
+    PaintLayerOwnedEffectGpuCrop * /*r_crop*/)
 {
   return nullptr;
 }
@@ -3018,7 +3020,8 @@ static std::shared_ptr<ImBuf> owned_effect_gpu_provider_flat(const Material & /*
                                                              const MaterialPaintLayer & /*effect*/,
                                                              const int /*channel*/,
                                                              const int /*tile_number*/,
-                                                             const rcti * /*changed_region*/)
+                                                             const rcti * /*changed_region*/,
+                                                             PaintLayerOwnedEffectGpuCrop * /*r_crop*/)
 {
   g_provider_calls++;
   ImBuf *buffer = IMB_allocImBuf(8, 8, ImBufFlags::FloatData);
@@ -3031,6 +3034,69 @@ static std::shared_ptr<ImBuf> owned_effect_gpu_provider_flat(const Material & /*
     pixels[i * 4 + 1] = 1.0f;
     pixels[i * 4 + 2] = 1.0f;
     pixels[i * 4 + 3] = 1.0f;
+  }
+  return std::shared_ptr<ImBuf>(buffer, [](ImBuf *ibuf) { IMB_freeImBuf(ibuf); });
+}
+
+/** A provider answering with a 16-square band of white at the canvas origin, and naming the
+ * 512-square canvas it sits in, the way the real owned-effect GPU provider answers a changed
+ * region. */
+static std::shared_ptr<ImBuf> owned_effect_gpu_provider_band(const Material & /*ma*/,
+                                                             const MaterialPaintLayer & /*row*/,
+                                                             const MaterialPaintLayer & /*effect*/,
+                                                             const int /*channel*/,
+                                                             const int /*tile_number*/,
+                                                             const rcti *changed_region,
+                                                             PaintLayerOwnedEffectGpuCrop *r_crop)
+{
+  g_provider_calls++;
+  g_provider_had_region = g_provider_had_region || changed_region != nullptr;
+  ImBuf *buffer = IMB_allocImBuf(16, 16, ImBufFlags::FloatData);
+  if (buffer == nullptr) {
+    return {};
+  }
+  float *pixels = buffer->float_data_for_write();
+  for (const int i : IndexRange(16 * 16)) {
+    pixels[i * 4 + 0] = 1.0f;
+    pixels[i * 4 + 1] = 1.0f;
+    pixels[i * 4 + 2] = 1.0f;
+    pixels[i * 4 + 3] = 1.0f;
+  }
+  if (r_crop != nullptr) {
+    r_crop->rect = rcti{0, 16, 0, 16};
+    r_crop->full_width = 512;
+    r_crop->full_height = 512;
+  }
+  return std::shared_ptr<ImBuf>(buffer, [](ImBuf *ibuf) { IMB_freeImBuf(ibuf); });
+}
+
+/** A one-texel band at (1, 1) of a non-square canvas twice the map's size along X and three
+ * times along Y: its map rectangle rounds to an empty band, the thin band
+ * #BKE_paint_layers_bake_job_commit must leave alone. */
+static std::shared_ptr<ImBuf> owned_effect_gpu_provider_thin_band(
+    const Material & /*ma*/,
+    const MaterialPaintLayer & /*row*/,
+    const MaterialPaintLayer & /*effect*/,
+    const int /*channel*/,
+    const int /*tile_number*/,
+    const rcti *changed_region,
+    PaintLayerOwnedEffectGpuCrop *r_crop)
+{
+  g_provider_calls++;
+  g_provider_had_region = g_provider_had_region || changed_region != nullptr;
+  ImBuf *buffer = IMB_allocImBuf(1, 1, ImBufFlags::FloatData);
+  if (buffer == nullptr) {
+    return {};
+  }
+  float *pixels = buffer->float_data_for_write();
+  pixels[0] = 1.0f;
+  pixels[1] = 1.0f;
+  pixels[2] = 1.0f;
+  pixels[3] = 1.0f;
+  if (r_crop != nullptr) {
+    r_crop->rect = rcti{1, 2, 1, 2};
+    r_crop->full_width = 1024;
+    r_crop->full_height = 1536;
   }
   return std::shared_ptr<ImBuf>(buffer, [](ImBuf *ibuf) { IMB_freeImBuf(ibuf); });
 }
@@ -3071,6 +3137,132 @@ TEST_F(PaintLayersOwnedEffectTest, the_creation_converts_the_gpu_result_before_t
   ASSERT_FALSE(pixels.is_empty());
   EXPECT_NEAR(map_byte_at(pixels, 512, 256, 256), 255, 1)
       << "the converted GPU answer is the map the commit lays";
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_banded_gpu_result_lays_only_its_band)
+{
+  /* First bake whole, so the effect map stands and the second job's band may patch it. */
+  BKE_paint_layers_owned_effect_gpu_provider_set(
+      &owned_effect_gpu_test::owned_effect_gpu_provider_flat);
+  MaterialPaintLayer *blur = nullptr;
+  MaterialPaintLayer *row = add_row_with_blur(&blur, 512, 512);
+  ASSERT_NE(blur, nullptr);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(run_bake_job());
+
+  Image *base_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  Image *effect_map = blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(base_map, nullptr);
+  ASSERT_NE(effect_map, nullptr);
+  const rcti whole{0, 512, 0, 512};
+  /* A known zero outside the coming band, and a canary far from it: the band's write must leave
+   * both alone. */
+  write_map_rect(*effect_map, whole, 0);
+  write_map_rect(*effect_map, rcti{511, 512, 511, 512}, 17);
+
+  edit_map_rect(*base_map, rcti{4, 5, 4, 5}, 200);
+  BKE_paint_layers_bake_notice_changes(*ma);
+
+  owned_effect_gpu_test::g_provider_calls = 0;
+  owned_effect_gpu_test::g_provider_had_region = false;
+  BKE_paint_layers_owned_effect_gpu_provider_set(
+      &owned_effect_gpu_test::owned_effect_gpu_provider_band);
+  ASSERT_TRUE(run_bake_job()) << "the banded job lands";
+  EXPECT_GT(owned_effect_gpu_test::g_provider_calls, 0);
+
+  Image *after = blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_EQ(after, effect_map) << "the banded write reuses the standing map";
+  const Vector<uchar> pixels = read_map(*after);
+  ASSERT_EQ(pixels.size(), int64_t(512) * 512 * 4);
+  EXPECT_NEAR(map_byte_at(pixels, 512, 8, 8), 255, 1)
+      << "the band's white landed inside its map rectangle";
+  EXPECT_EQ(map_byte_at(pixels, 512, 256, 256), 0)
+      << "outside the band the standing map kept its previous value";
+  EXPECT_EQ(map_byte_at(pixels, 512, 511, 511), 17)
+      << "the canary outside the band was not overwritten";
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_band_that_rounds_under_a_map_texel_writes_nothing)
+{
+  BKE_paint_layers_owned_effect_gpu_provider_set(
+      &owned_effect_gpu_test::owned_effect_gpu_provider_flat);
+  MaterialPaintLayer *blur = nullptr;
+  MaterialPaintLayer *row = add_row_with_blur(&blur, 512, 512);
+  ASSERT_NE(blur, nullptr);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(run_bake_job());
+
+  Image *base_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  Image *effect_map = blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(base_map, nullptr);
+  ASSERT_NE(effect_map, nullptr);
+  const rcti whole{0, 512, 0, 512};
+  write_map_rect(*effect_map, whole, 0);
+  write_map_rect(*effect_map, rcti{511, 512, 511, 512}, 17);
+
+  edit_map_rect(*base_map, rcti{4, 5, 4, 5}, 200);
+  BKE_paint_layers_bake_notice_changes(*ma);
+
+  owned_effect_gpu_test::g_provider_calls = 0;
+  BKE_paint_layers_owned_effect_gpu_provider_set(
+      &owned_effect_gpu_test::owned_effect_gpu_provider_thin_band);
+  run_bake_job();
+  EXPECT_GT(owned_effect_gpu_test::g_provider_calls, 0);
+
+  Image *after = blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_EQ(after, effect_map) << "an empty band does not replace the map";
+  const Vector<uchar> pixels = read_map(*after);
+  ASSERT_EQ(pixels.size(), int64_t(512) * 512 * 4);
+  EXPECT_EQ(map_byte_at(pixels, 512, 0, 0), 0)
+      << "a band that rounds under a map texel writes nothing";
+  EXPECT_EQ(map_byte_at(pixels, 512, 511, 511), 17)
+      << "the whole map, canary included, stays as it was";
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_replaced_map_under_a_banded_gpu_job_invalidates_the_effect)
+{
+  BKE_paint_layers_owned_effect_gpu_provider_set(
+      &owned_effect_gpu_test::owned_effect_gpu_provider_flat);
+  MaterialPaintLayer *blur = nullptr;
+  MaterialPaintLayer *row = add_row_with_blur(&blur, 512, 512);
+  ASSERT_NE(blur, nullptr);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(run_bake_job());
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+
+  Image *base_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(base_map, nullptr);
+  edit_map_rect(*base_map, rcti{4, 5, 4, 5}, 200);
+  BKE_paint_layers_bake_notice_changes(*ma);
+
+  BKE_paint_layers_owned_effect_gpu_provider_set(
+      &owned_effect_gpu_test::owned_effect_gpu_provider_band);
+  PaintLayersBakeJob *job = BKE_paint_layers_bake_job_create(*bmain, *ma);
+  ASSERT_NE(job, nullptr);
+  BKE_paint_layers_bake_job_compute(*job, {}, {});
+
+  /* The map the band was computed against is replaced under the job: the band cannot fill the
+   * blank map, so the commit must invalidate the effect instead of trusting the half-written
+   * result. */
+  Image *replaced = bake_service_image(
+      *bmain, *blur, int(PAINT_MATERIAL_CHANNEL_BASE_COLOR), 1024, true, false, 0);
+  ASSERT_NE(replaced, nullptr);
+  EXPECT_EQ(blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], replaced);
+
+  BKE_paint_layers_bake_job_commit(*job);
+  BKE_paint_layers_bake_job_free(*job);
+
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *blur))
+      << "a replaced map under a banded result cannot be valid";
+  EXPECT_TRUE(BKE_paint_layers_bake_heavy_pending(*ma))
+      << "the next plan must bake the whole effect again";
+
+  /* The next plan is a whole bake: the flat provider fills the replacement, and the effect is
+   * valid again. */
+  BKE_paint_layers_owned_effect_gpu_provider_set(
+      &owned_effect_gpu_test::owned_effect_gpu_provider_flat);
+  EXPECT_TRUE(run_bake_job());
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
 }
 
 TEST_F(PaintLayersOwnedEffectTest, a_precompute_over_the_budget_falls_back_to_the_cpu)

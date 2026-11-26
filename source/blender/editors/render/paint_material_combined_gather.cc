@@ -1167,6 +1167,32 @@ std::shared_ptr<ImBuf> CombinedGpuFrame::read_back(gpu::Texture *texture) const
   return std::shared_ptr<ImBuf>(ibuf, [](ImBuf *buffer) { IMB_freeImBuf(buffer); });
 }
 
+std::shared_ptr<ImBuf> CombinedGpuFrame::read_back_region(gpu::Texture *texture,
+                                                          const rcti &region) const
+{
+  const int width = BLI_rcti_size_x(&region);
+  const int height = BLI_rcti_size_y(&region);
+  if (width <= 0 || height <= 0) {
+    return nullptr;
+  }
+  ImBuf *ibuf = IMB_allocImBuf(uint(width), uint(height), ImBufFlags::FloatData);
+  if (ibuf == nullptr || ibuf->float_buffer.data == nullptr) {
+    if (ibuf != nullptr) {
+      IMB_freeImBuf(ibuf);
+    }
+    return nullptr;
+  }
+  /* The band is what the reader takes from the whole-canvas read-back; reading it alone skips the
+   * canvas-sized copy and, with a sub-region read of the backend, the canvas-sized staging too.
+   * No GPU_finish: as #read_back notes, both backends synchronise inside the read already, and the
+   * sub-image read blocks the same way. Contract: the texture is float RGBA, 16 bytes per texel, so
+   * the ImBuf's four-float band is exactly the read size. */
+  const int offset[3] = {region.xmin, region.ymin, 0};
+  const int extent[3] = {width, height, 1};
+  GPU_texture_read_region(texture, GPU_DATA_FLOAT, 0, offset, extent, ibuf->float_data_for_write());
+  return std::shared_ptr<ImBuf>(ibuf, [](ImBuf *buffer) { IMB_freeImBuf(buffer); });
+}
+
 void combined_preview_gpu_free()
 {
   GPU_SHADER_FREE_SAFE(gpu_shaders.layer);

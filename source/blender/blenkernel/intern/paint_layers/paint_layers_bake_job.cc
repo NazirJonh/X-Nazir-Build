@@ -185,8 +185,8 @@ struct PaintLayersBakeJob {
    * creation and folded into the map's own format right there
    * (#bake_job_owned_effects_gpu_precompute) -- the same shape as #ChannelResult, so the worker's
    * effect stage takes it instead of computing or resampling anything. The provider answers with a
-   * float RGBA of the whole canvas, which is 256 MiB at 4K per channel; the converted result is
-   * what the job keeps, never that read-back.
+   * float RGBA of the whole canvas (256 MiB at 4K per channel) or, when the map stood, of the band
+   * alone; the converted result is what the job keeps, never that read-back.
    */
   struct PrecomputedChannelResult {
     bUUID effect_marker = {};
@@ -376,6 +376,10 @@ static void bake_common_from_channel(Span<float> color,
  * united; a GPU answer leaves \a compute_valid empty and writes the region alone. The map rectangle
  * the resulting band lands in is #PaintLayersBakeJob::ChannelResult::rect, derived with the same
  * numbers the inline writer uses (#bake_effect_row_write). False when the buffer cannot be read.
+ *
+ * \a src_crop names the band a banded GPU read-back holds, in the full canvas' texel coordinates:
+ * the buffer is that band packed, \a src_full_width / \a src_full_height are the canvas it sits in,
+ * and the sampling below offsets by the band's minimum. An empty \a src_crop is the whole canvas.
  */
 static bool bake_effect_channel_result_build(const Material &ma,
                                              const MaterialPaintLayer &effect,
@@ -387,11 +391,14 @@ static bool bake_effect_channel_result_build(const Material &ma,
                                              const bool cpu_compute,
                                              const rcti &compute_valid,
                                              const float *src,
-                                             const int width,
-                                             const int height,
+                                             const int buffer_width,
+                                             const int buffer_height,
+                                             const rcti *src_crop,
+                                             const int src_full_width,
+                                             const int src_full_height,
                                              PaintLayersBakeJob::ChannelResult &r_result)
 {
-  if (src == nullptr || size <= 0 || width <= 0 || height <= 0) {
+  if (src == nullptr || size <= 0 || buffer_width <= 0 || buffer_height <= 0) {
     return false;
   }
   /* The crop state is set from this call alone, never inherited: a caller that reuses a
@@ -410,11 +417,36 @@ static bool bake_effect_channel_result_build(const Material &ma,
   const int channel = int(info.channel);
   const MaterialPaintLayer *row = BKE_paint_layers_correction_owner(ma, effect);
   const rcti *region = (compute_region != nullptr && had_map) ? compute_region : nullptr;
+  /* A banded read-back carries the band alone, with the canvas it sits in named beside it; a
+   * whole-canvas buffer is its own canvas. */
+  const bool banded = src_crop != nullptr && !BLI_rcti_is_empty(src_crop);
+  const int width = banded ? src_full_width : buffer_width;
+  const int height = banded ? src_full_height : buffer_height;
+  const int src_x0 = banded ? src_crop->xmin : 0;
+  const int src_y0 = banded ? src_crop->ymin : 0;
+  const int src_width = banded ? BLI_rcti_size_x(src_crop) : width;
+  const int src_height = banded ? BLI_rcti_size_y(src_crop) : height;
+  if (width <= 0 || height <= 0 || src_width <= 0 || src_height <= 0) {
+    return false;
+  }
+  if (banded) {
+    /* The packed band must fit the canvas it names and match the buffer the provider handed back:
+     * the sampling below strides by #src_width, so a mismatch would read past the read-back. */
+    if (src_x0 < 0 || src_y0 < 0 || src_crop->xmax > width || src_crop->ymax > height ||
+        buffer_width != src_width || buffer_height != src_height)
+    {
+      return false;
+    }
+  }
   /* The band of the result the compute answered for; the whole canvas when no region was offered
-   * or it cannot be narrowed. */
+   * or it cannot be narrowed. A banded source names its own rectangle: the provider derived the
+   * same #BKE_paint_layers_effect_valid_region on the main thread and read exactly it back. */
   rcti valid_region;
   BLI_rcti_init(&valid_region, 0, width, 0, height);
-  if (region != nullptr && row != nullptr) {
+  if (banded) {
+    valid_region = *src_crop;
+  }
+  else if (region != nullptr && row != nullptr) {
     BKE_paint_layers_effect_valid_region(ma,
                                          *row,
                                          effect,
@@ -440,7 +472,7 @@ static bool bake_effect_channel_result_build(const Material &ma,
    * texel min(x * width / size, width - 1), the loop below, so the result columns
    * [xmin, xmax) are read by the map columns [xmin * size / width, xmax * size / width) rounded
    * up -- the same numbers the inline writer derives (#bake_effect_row_write). */
-  const bool regional_band = region != nullptr && !BLI_rcti_is_empty(&valid_region);
+  const bool regional_band = (banded || region != nullptr) && !BLI_rcti_is_empty(&valid_region);
   if (regional_band) {
     r_result.regional = true;
     r_result.map_uid = map_uid;
@@ -455,12 +487,16 @@ static bool bake_effect_channel_result_build(const Material &ma,
   }
   const int band_width = r_result.rect[2] - r_result.rect[0];
   const int band_height = r_result.rect[3] - r_result.rect[1];
-  const bool cropped = regional_band && band_width > 0 && band_height > 0;
+  /* A banded source holds the band alone, so its map band -- however thin, even empty when it
+   * rounds under a map texel -- is all it can store; the commit skips an empty band. A
+   * whole-canvas source whose band is too thin to land on a map texel keeps the full canvas. */
+  const bool cropped = regional_band && (banded || (band_width > 0 && band_height > 0));
   r_result.stored_cropped = cropped;
   if (regional_band && !cropped) {
-    /* The band maps to no map texel: the map keeps every pixel it had. Store nothing rather than
-     * the whole canvas, which holds none of the compute's answer outside the band; the commit
-     * skips the write when both buffers are empty. */
+    /* A whole-canvas source whose band maps to no map texel: the map keeps every pixel it had.
+     * Store nothing rather than the whole canvas, which holds none of the compute's answer outside
+     * the band; the commit skips the write when both buffers are empty. (A banded source is never
+     * here -- it always stores its band, see above.) */
     return true;
   }
   if (cropped) {
@@ -490,12 +526,14 @@ static bool bake_effect_channel_result_build(const Material &ma,
      * without the regional band -- the two numbers the 4K memory work turns on. */
     const int64_t texel_bytes = r_result.stored_float ? int64_t(sizeof(float[4])) : 4;
     fprintf(stderr,
-            "PAINT_MEM effect_bake size=%d cropped=%d band=%dx%d stored_bytes=%lld "
-            "full_bytes=%lld\n",
+            "PAINT_MEM effect_bake size=%d cropped=%d band=%dx%d src_band=%dx%d "
+            "stored_bytes=%lld full_bytes=%lld\n",
             size,
             cropped ? 1 : 0,
             store_width,
             store_height,
+            src_width,
+            src_height,
             (long long)(pixel_num * texel_bytes),
             (long long)(int64_t(size) * size * texel_bytes));
   }
@@ -505,10 +543,12 @@ static bool bake_effect_channel_result_build(const Material &ma,
    * #bake_effect_row_write). */
   const bool keeps_alpha = paint_layer_kind_result_has_alpha(effect);
   for (int y = store_y0; y < store_y0 + store_height; y++) {
-    const int src_y = min_ii(int(int64_t(y) * height / size), height - 1);
-    const float *src_row = src + int64_t(src_y) * width * 4;
+    const int full_src_y = min_ii(int(int64_t(y) * height / size), height - 1);
+    const int src_y = clamp_i(full_src_y - src_y0, 0, src_height - 1);
+    const float *src_row = src + int64_t(src_y) * src_width * 4;
     for (int x = store_x0; x < store_x0 + store_width; x++) {
-      const int src_x = min_ii(int(int64_t(x) * width / size), width - 1);
+      const int full_src_x = min_ii(int(int64_t(x) * width / size), width - 1);
+      const int src_x = clamp_i(full_src_x - src_x0, 0, src_width - 1);
       const float *texel = src_row + int64_t(src_x) * 4;
       const float inv = texel[3] > 0.0f ? 1.0f / texel[3] : 1.0f;
       const float straight[4] = {
@@ -621,11 +661,11 @@ static void bake_job_owned_effects_gpu_precompute(Material &ma, PaintLayersBakeJ
        * build. The old whole-canvas estimate capped the job at ~2 channels at 4K even though a
        * regional band holds orders of magnitude less. Past the budget the rest of the queue is
        * skipped above. */
-      /* The region the effect's subscription named at creation, or null for the whole canvas: see
-       * the note above -- the read-back stays whole, the map write below is what the region pays
-       * for. A creation that resolved none is offered the content footprint as the fallback, in
-       * input texels; the chain's halo is not added here, the effect stage grows its own dispatch
-       * by it. */
+      /* The region the effect's subscription named at creation, or null for the whole canvas. A
+       * creation that resolved none is offered the content footprint as the fallback, in input
+       * texels; the chain's halo is not added here, the effect stage grows its own dispatch by
+       * it. The band read-back rides only on a map that stood: a fresh or replaced map holds no
+       * previous result outside the band, so it is written whole and needs the whole canvas. */
       const rcti *changed_region = queued.has_changed_region ? &queued.changed_region : nullptr;
       rcti footprint;
       if (changed_region == nullptr &&
@@ -639,18 +679,23 @@ static void bake_job_owned_effects_gpu_precompute(Material &ma, PaintLayersBakeJ
       {
         changed_region = &footprint;
       }
-      std::shared_ptr<ImBuf> result = provider(
-          ma, *row, *effect, channel, PAINT_TILE_NUMBER_BASE, changed_region);
+      PaintLayerOwnedEffectGpuCrop crop;
+      std::shared_ptr<ImBuf> result = provider(ma,
+                                               *row,
+                                               *effect,
+                                               channel,
+                                               PAINT_TILE_NUMBER_BASE,
+                                               changed_region,
+                                               wanted.had_map ? &crop : nullptr);
       if (result == nullptr) {
         /* No GPU answer for this channel: the worker computes it on the CPU as before. */
         continue;
       }
       /* Fold the read-back into the map's own format right here and let the float RGBA go: held
-       * until the effect stage it was one whole-canvas buffer per channel, 256 MiB each at 4K,
-       * through the whole rows stage above. What stays is the map-sized result, which the commit
-       * writes like any other #ChannelResult. The band is the subscription's rectangle only -- the
-       * footprint the provider was offered above is a dispatch hint, not a trust the commit may lay
-       * a map band from. */
+       * until the effect stage it was the read-back per channel -- 256 MiB at 4K whole, or the
+       * band the provider read alone -- through the whole rows stage above. What stays is the
+       * map-sized result, which the commit writes like any other #ChannelResult. */
+      const rcti *src_crop = !BLI_rcti_is_empty(&crop.rect) ? &crop.rect : nullptr;
       rcti empty_valid;
       BLI_rcti_init(&empty_valid, 0, 0, 0, 0);
       PaintLayersBakeJob::ChannelResult converted;
@@ -667,6 +712,9 @@ static void bake_job_owned_effects_gpu_precompute(Material &ma, PaintLayersBakeJ
               result->float_buffer.data,
               result->x,
               result->y,
+              src_crop,
+              crop.full_width,
+              crop.full_height,
               converted))
       {
         continue;
@@ -1114,6 +1162,9 @@ static bool bake_effect_channel_compute(const Material &ma,
                                           result->float_buffer.data,
                                           result->x,
                                           result->y,
+                                          nullptr,
+                                          0,
+                                          0,
                                           r_result);
 }
 
@@ -1710,14 +1761,24 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
        * replaced is fresh and blank outside the band. A regional result is the compute's answer for
        * the band alone (packed, or empty when the band covers no map texel), so a replaced map
        * cannot take it: the effect is invalid and the next plan queues it whole. A standing map
-       * takes the band, read packed when the buffer is the band and with the canvas stride when the
-       * whole canvas stands (the GPU read-back is still whole -- see
-       * #bake_job_owned_effects_gpu_precompute). */
+       * takes the band, read packed when the buffer is the band (the GPU read-back of a banded
+       * source) and with the canvas stride when the buffer is the whole canvas. */
       int rect[4] = {channel.rect[0], channel.rect[1], channel.rect[2], channel.rect[3]};
       const bool regional = channel.regional && color_image->id.session_uid == channel.map_uid;
       if (channel.regional && !regional) {
         effect_invalidated = true;
         break;
+      }
+      if (channel.stored_cropped &&
+          (channel.rect[2] <= channel.rect[0] || channel.rect[3] <= channel.rect[1]))
+      {
+        /* A banded read-back thin enough to round under a map texel stores nothing; writing it as
+         * a whole canvas would read past the empty buffer. The bake still owns the channel, so the
+         * commit can finalize the effect and clear its staleness. */
+        channel.color = Vector<float>();
+        channel.color_bytes = Vector<uchar>();
+        written_channels.append(channel.channel);
+        continue;
       }
       if (regional) {
         /* The band was computed in map pixels of #effect_result.size; the map the service handed

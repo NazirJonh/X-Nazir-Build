@@ -6,6 +6,7 @@
  * \ingroup gpu
  */
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 
@@ -498,6 +499,38 @@ void GLTexture::read(int mip, eGPUDataFormat type, void *data)
       glGetTexImage(target_, mip, gl_format, gl_type, data);
     }
   }
+}
+
+void GLTexture::read_region(int mip,
+                            eGPUDataFormat type,
+                            const int offset[3],
+                            const int extent[3],
+                            void *data)
+{
+  BLI_assert(!(format_flag_ & GPU_FORMAT_COMPRESSED));
+  BLI_assert(mip <= mipmaps_ || mip == 0);
+  BLI_assert(validate_data_format(format_, type));
+
+  if (!GLContext::direct_state_access_support) {
+    /* No sub-region read without DSA: the base implementation reads the whole mip and copies the
+     * region's rows out. */
+    Texture::read_region(mip, type, offset, extent, data);
+    return;
+  }
+
+  GLenum gl_format = to_gl_data_format(
+      format_ == TextureFormat::SFLOAT_32_DEPTH_UINT_8 ? TextureFormat::SFLOAT_32_DEPTH : format_);
+  GLenum gl_type = to_gl(type);
+  const size_t region_size = size_t(extent[0]) * size_t(std::max(1, extent[1])) *
+                             size_t(std::max(1, extent[2])) * to_bytesize(format_, type);
+  glGetTextureSubImage(tex_id_,
+                       mip,
+                       UNPACK3(offset),
+                       UNPACK3(extent),
+                       gl_format,
+                       gl_type,
+                       GLsizei(region_size),
+                       data);
 }
 
 /** \} */

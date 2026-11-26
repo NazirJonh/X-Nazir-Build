@@ -1188,6 +1188,12 @@ size_t BKE_paint_layers_effect_gpu_cache_budget();
  * the dispatch actually changed, grown by the halo -- is filled by the caller
  * (#paint_layer_owned_effect_result_compute) with the same arithmetic the CPU path answers with.
  *
+ * \param r_crop: when non-null, the provider may read back only the valid band instead of the whole
+ * canvas and fills \a r_crop with the band and the canvas it sits in; leaving it empty means the
+ * buffer is the whole canvas, as the \a nullptr caller always gets. The bake's precompute is the one
+ * caller that passes it, and only for a map that already stood -- see
+ * #bake_job_owned_effects_gpu_precompute.
+ *
  * The result lives in the combined preview's own GPU effect cache, keyed the way the preview keys
  * it -- the effect hash plus #PaintLayerEffectKeyExtras and the maps' versions -- so a bake and
  * the screen share one computed result. The provider is asked on the main thread with a current GPU
@@ -1199,12 +1205,22 @@ size_t BKE_paint_layers_effect_gpu_cache_budget();
  * does not guard; the provider is always called on the main thread with a GPU context it may have
  * to enable itself; a null answer -- or no provider at all -- is the CPU fallback, never an error.
  */
-using PaintLayerOwnedEffectGpuProvider = std::shared_ptr<ImBuf> (*)(const Material &ma,
-                                                                    const MaterialPaintLayer &row,
-                                                                    const MaterialPaintLayer &effect,
-                                                                    const int channel,
-                                                                    const int tile_number,
-                                                                    const rcti *changed_region);
+struct PaintLayerOwnedEffectGpuCrop {
+  /** The band the returned buffer holds, in the full canvas' texel coordinates. */
+  rcti rect = {};
+  /** The canvas the band sits in: the dims a whole-canvas read would have had. */
+  int full_width = 0;
+  int full_height = 0;
+};
+
+using PaintLayerOwnedEffectGpuProvider =
+    std::shared_ptr<ImBuf> (*)(const Material &ma,
+                               const MaterialPaintLayer &row,
+                               const MaterialPaintLayer &effect,
+                               const int channel,
+                               const int tile_number,
+                               const rcti *changed_region,
+                               PaintLayerOwnedEffectGpuCrop *r_crop);
 
 /**
  * Register \a provider as the GPU answer for owned effects. Every call replaces the previous one,

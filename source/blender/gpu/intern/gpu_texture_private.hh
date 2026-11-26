@@ -161,6 +161,16 @@ class Texture {
   virtual void mip_range_set(int min, int max) = 0;
   virtual void read(int mip, eGPUDataFormat format, void *dst) = 0;
 
+  /* Read a rectangular region of #mip into #dst, packed row by row. \a offset_z selects the first
+   * layer of an array texture and \a extent_z the layer count; a plain two-dimensional texture
+   * reads one layer. The base implementation reads the whole mip and copies the rows out; a
+   * backend with a sub-region read overrides this. */
+  virtual void read_region(int mip,
+                           eGPUDataFormat format,
+                           const int offset[3],
+                           const int extent[3],
+                           void *dst);
+
   void attach_to(FrameBuffer *fb, GPUAttachmentType type);
   void detach_from(FrameBuffer *fb);
   void update(eGPUDataFormat format, const void *data);

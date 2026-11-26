@@ -108,7 +108,8 @@ static std::shared_ptr<ImBuf> owned_gpu_result_compute(const Material &ma,
                                                        const MaterialPaintLayer &effect,
                                                        const int channel,
                                                        const int tile_number,
-                                                       const rcti *changed_region)
+                                                       const rcti *changed_region,
+                                                       PaintLayerOwnedEffectGpuCrop *r_crop)
 {
   /* The provider's own gates, each refusing with its stage named: the hook's gate ahead of it
    * repeats some of these, so the stages are what a future caller's refusal shows too. */
@@ -234,7 +235,31 @@ static std::shared_ptr<ImBuf> owned_gpu_result_compute(const Material &ma,
    * rule the stage computed from the description, a plan that writes its own alpha carried through),
    * so the pixels move over as they are. The texture is the effect cache's own, at the input's
    * resolution -- the grid the cache's acquire keyed -- so the frame's buffer answers the same
-   * float RGBA the CPU effect cache computes. */
+   * float RGBA the CPU effect cache computes. A caller that takes the band (a bake whose precompute
+   * knows the map stood, so the band is all the commit writes) gets the band read back alone, the
+   * whole canvas otherwise. */
+  if (r_crop != nullptr && changed_region != nullptr && !BLI_rcti_is_empty(changed_region)) {
+    rcti valid;
+    BKE_paint_layers_effect_valid_region(ma,
+                                         row,
+                                         effect,
+                                         channel,
+                                         tile_number,
+                                         changed_region,
+                                         GPU_texture_width(target->result),
+                                         GPU_texture_height(target->result),
+                                         valid);
+    if (!BLI_rcti_is_empty(&valid)) {
+      std::shared_ptr<ImBuf> banded = frame.read_back_region(target->result, valid);
+      if (banded != nullptr) {
+        r_crop->rect = valid;
+        r_crop->full_width = GPU_texture_width(target->result);
+        r_crop->full_height = GPU_texture_height(target->result);
+        return banded;
+      }
+      /* The band read refused; the whole canvas is still the answer it can give. */
+    }
+  }
   std::shared_ptr<ImBuf> result = frame.read_back(target->result);
   if (result == nullptr) {
     own_bake_refuse("readback");

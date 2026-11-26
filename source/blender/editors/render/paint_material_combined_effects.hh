@@ -666,6 +666,13 @@ struct CombinedGpuFrame {
    */
   std::shared_ptr<ImBuf> read_back(gpu::Texture *texture) const;
 
+  /**
+   * The same read-back, of \a region alone (image-space texels, ymin the texture's first row): the
+   * buffer holds the region packed, and the caller offsets its samples by the region's minimum.
+   * Null on a failure or an empty region, as #read_back is.
+   */
+  std::shared_ptr<ImBuf> read_back_region(gpu::Texture *texture, const rcti &region) const;
+
  private:
   /** Whether a GPU context was current before the constructor, so the destructor restores that. */
   bool context_was_enabled_ = false;

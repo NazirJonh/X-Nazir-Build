@@ -9,6 +9,7 @@
 #include "BLI_string.h"
 
 #include <algorithm>
+#include <cstring>
 
 #include "DNA_userdef_types.h"
 
@@ -555,6 +556,66 @@ void GPU_texture_read(Texture *texture, eGPUDataFormat data_format, int mip_leve
       "The host-read usage flag must be specified up-front. Only textures which require data "
       "reads should be flagged, allowing the backend to make certain optimizations.");
   texture->read(mip_level, data_format, dst);
+}
+
+void Texture::read_region(int mip,
+                          eGPUDataFormat format,
+                          const int offset[3],
+                          const int extent[3],
+                          void *dst)
+{
+  /* The whole mip into a temporary, then the region's rows out; a backend with a sub-region read
+   * overrides this and skips the temporary. Two-dimensional regions are what the callers read. */
+  BLI_assert(type_get() == GPU_TEXTURE_2D || type_get() == GPU_TEXTURE_2D_ARRAY);
+  BLI_assert(offset[0] >= 0 && offset[1] >= 0 && offset[2] >= 0);
+  BLI_assert(extent[0] >= 1 && extent[1] >= 1 && extent[2] >= 1);
+
+  const size_t texel_bytes = to_bytesize(format_get(), format);
+  int mip_extent[3] = {1, 1, 1};
+  mip_size_get(mip, mip_extent);
+  const size_t full_row_bytes = size_t(mip_extent[0]) * texel_bytes;
+  const size_t layer_stride = full_row_bytes * size_t(mip_extent[1]);
+  const size_t region_row_bytes = size_t(extent[0]) * texel_bytes;
+
+  void *full = MEM_new_uninitialized(read_size_get(mip, format), __func__);
+  this->read(mip, format, full);
+  const char *src = static_cast<const char *>(full);
+  char *dst_rows = static_cast<char *>(dst);
+  for (int layer = 0; layer < extent[2]; layer++) {
+    const size_t layer_base = layer_stride * size_t(offset[2] + layer);
+    for (int y = offset[1]; y < offset[1] + extent[1]; y++) {
+      memcpy(dst_rows,
+             src + layer_base + full_row_bytes * size_t(y) + size_t(offset[0]) * texel_bytes,
+             region_row_bytes);
+      dst_rows += region_row_bytes;
+    }
+  }
+  MEM_delete_void(full);
+}
+
+void GPU_texture_read_region(Texture *texture,
+                             eGPUDataFormat data_format,
+                             int mip_level,
+                             const int offset[3],
+                             const int extent[3],
+                             void *dst)
+{
+  BLI_assert(texture);
+  BLI_assert_msg(
+      GPU_texture_usage(texture) & GPU_TEXTURE_USAGE_HOST_READ,
+      "The host-read usage flag must be specified up-front. Only textures which require data "
+      "reads should be flagged, allowing the backend to make certain optimizations.");
+  /* The region has to lie inside the mip: the whole-mip fallback copies rows out of a temporary
+   * without any other bounds check, and the GL sub-image read turns an out-of-range region into a
+   * driver error rather than an answer. */
+  int mip_extent[3] = {1, 1, 1};
+  texture->mip_size_get(mip_level, mip_extent);
+  BLI_assert(offset[0] >= 0 && offset[1] >= 0 && offset[2] >= 0);
+  BLI_assert(extent[0] >= 1 && extent[1] >= 1 && extent[2] >= 1);
+  BLI_assert(offset[0] + extent[0] <= mip_extent[0]);
+  BLI_assert(offset[1] + extent[1] <= mip_extent[1]);
+  BLI_assert(offset[2] + extent[2] <= mip_extent[2]);
+  texture->read_region(mip_level, data_format, offset, extent, dst);
 }
 
 size_t Texture::read_size_get(int mip, eGPUDataFormat format) const

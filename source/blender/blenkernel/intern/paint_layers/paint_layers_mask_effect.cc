@@ -826,6 +826,7 @@ std::shared_ptr<ImBuf> paint_layer_mask_effect_buffer_get(
       height,
       images,
       g_paint_mask_effect_cache_budget,
+      "mask_effect.cpu.cache",
       [&](std::shared_ptr<ImBuf> &r_color,
           Vector<PaintLayerEffectSource> &r_synced,
           std::shared_ptr<ImBuf> &r_answer) {

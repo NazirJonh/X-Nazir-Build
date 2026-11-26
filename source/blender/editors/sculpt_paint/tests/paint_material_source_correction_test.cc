@@ -528,8 +528,10 @@ TEST_F(PaintMaterialSourceCorrectionTest, CorrectionCacheRegionRefreshStartsFrom
 
   /* Prime the journal's idea of the buffer size: the first mark on a fresh image counts as a
    * resize, and a resize always means "everything changed". */
+  ImageTile *tile = BKE_image_get_tile(image, 0);
+  ASSERT_NE(tile, nullptr);
   rcti empty_rect{0, 0, 0, 0};
-  BKE_image_partial_update_mark_region(image, nullptr, source, &empty_rect);
+  BKE_image_partial_update_mark_region(image, tile, source, &empty_rect);
 
   material::correction_cache_clear();
   const material::CorrectionCacheStats start = material::correction_cache_stats();
@@ -562,7 +564,7 @@ TEST_F(PaintMaterialSourceCorrectionTest, CorrectionCacheRegionRefreshStartsFrom
     }
   }
   rcti painted_rect{0, 2, 0, 2};
-  BKE_image_partial_update_mark_region(image, nullptr, source, &painted_rect);
+  BKE_image_partial_update_mark_region(image, tile, source, &painted_rect);
 
   const std::shared_ptr<const ImBuf> refreshed = material::correction_cache_get(request);
   ASSERT_NE(refreshed, nullptr);

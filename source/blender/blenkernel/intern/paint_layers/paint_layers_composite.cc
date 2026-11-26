@@ -5055,6 +5055,7 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
       height,
       images,
       g_paint_effect_cache_budget,
+      "effect.cpu.cache",
       [&](PaintLayerEffectBuffer &r_color,
           Vector<PaintLayerEffectSource> &r_synced,
           std::shared_ptr<ImBuf> &r_answer) {
@@ -5204,6 +5205,7 @@ static std::shared_ptr<ImBuf> paint_layer_chain_member_effect_buffer_get(
       height,
       images,
       g_paint_effect_cache_budget,
+      "effect.cpu.cache",
       [&](PaintLayerEffectBuffer &r_color,
           Vector<PaintLayerEffectSource> &r_synced,
           std::shared_ptr<ImBuf> &r_answer) {
@@ -5535,12 +5537,16 @@ bool BKE_paint_layers_slice_render(const Material &ma,
   if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
     return false;
   }
+  /* The one slice-cache probe: what a cache hit costs (O(1), the shared buffers handed back)
+   * against a regional refill or a whole-slice render. Off unless `BLENDER_PBR_PERF` is set. */
+  bke::paint_perf::ScopedTimer perf("anchor_slice.cache");
   /* One resolution of the unset tile here, so everything below keys on the concrete number. */
   const int tile_number = BKE_paint_layers_tile_resolve(
       context.tile_number, nullptr, context.painted_object);
   PaintLayerSurfaceRef painted_object = context.painted_object;
   const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, reader);
   if (ref.issue != PaintLayerAnchorPointIssue::None || ref.source_row == nullptr) {
+    perf.note("hit=0 issue=%d channel=%d", int(ref.issue), channel);
     return false;
   }
   if (dimensions_only) {
@@ -5548,8 +5554,10 @@ bool BKE_paint_layers_slice_render(const Material &ma,
      * needed. */
     int width = 0;
     int height = 0;
-    return anchor_slice_dimensions(
+    const bool resolved = anchor_slice_dimensions(
         ma, reader, channel, ref, width, height, painted_object, tile_number);
+    perf.note("hit=0 dimensions=1 size=%dx%d channel=%d", width, height, channel);
+    return resolved;
   }
   if (dst_rect != nullptr) {
     /* A partial render is not a complete slice and is never cached: it is only produced for a bake
@@ -5563,8 +5571,14 @@ bool BKE_paint_layers_slice_render(const Material &ma,
                                  *r_coverage,
                                  painted_object,
                                  tile_number)) {
+      perf.note("hit=0 partial=1 failed=1 target=%d channel=%d", int(ref.target), channel);
       return false;
     }
+    perf.note("hit=0 partial=1 size=%dx%d target=%d channel=%d",
+              (*r_color)->x,
+              (*r_color)->y,
+              int(ref.target),
+              channel);
     return true;
   }
 
@@ -5603,6 +5617,14 @@ bool BKE_paint_layers_slice_render(const Material &ma,
         *r_color = hit.color;
         *r_coverage = hit.coverage;
         anchor_slice_cache().entries.append(std::move(hit));
+        /* The note is filled under the lock but printed when the timer leaves scope, after it: the
+         * hit itself is just the shared pointers above. */
+        perf.note("hit=1 size=%dx%d target=%d channel=%d tile=%d",
+                  (*r_color)->x,
+                  (*r_color)->y,
+                  int(ref.target),
+                  channel,
+                  tile_number);
         return true;
       }
       held = std::move(anchor_slice_cache().entries[i]);
@@ -5660,6 +5682,7 @@ bool BKE_paint_layers_slice_render(const Material &ma,
                                            painted_object,
                                            tile_number))
   {
+    perf.note("hit=0 region=0 failed=1 target=%d channel=%d", int(ref.target), channel);
     return false;
   }
 
@@ -5698,6 +5721,12 @@ bool BKE_paint_layers_slice_render(const Material &ma,
   }
   *r_color = std::move(color);
   *r_coverage = std::move(coverage);
+  perf.note("hit=0 region=%d size=%dx%d target=%d channel=%d",
+            updated ? 1 : 0,
+            (*r_color)->x,
+            (*r_color)->y,
+            int(ref.target),
+            channel);
   return true;
 }
 

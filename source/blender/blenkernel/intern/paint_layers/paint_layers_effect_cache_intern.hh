@@ -32,6 +32,7 @@
 #include "BKE_image.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
+#include "BKE_paint_perf_debug.hh"
 
 #include "DNA_image_types.h"
 #include "IMB_imbuf_types.hh"
@@ -348,6 +349,7 @@ std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute_region(
     const int height,
     const Span<Image *> images,
     const size_t budget,
+    const char *label,
     Compute &&compute,
     const rcti *changed_region,
     rcti *r_valid_region,
@@ -365,6 +367,9 @@ std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute_region(
  * deadlock against it, and two threads that miss together may both run it -- a benign duplicate
  * compute, the second result replacing the first. The returned buffer goes out before the entry
  * goes back, so the caller keeps it alive through its own reference whatever the cache does next.
+ *
+ * \a label names the `BLENDER_PBR_PERF` scope the standing hit is timed under (the read of a half
+ * entry is a whole-canvas materialization), and is passed through to the regional form.
  */
 template<typename Entry, typename Compute>
 std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute(
@@ -375,6 +380,7 @@ std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute(
     const int height,
     const Span<Image *> images,
     const size_t budget,
+    const char *label,
     Compute &&compute)
 {
   /* No region is offered, so the cycle below never takes its regional branch: a hit still requires
@@ -387,6 +393,7 @@ std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute(
       height,
       images,
       budget,
+      label,
       std::forward<Compute>(compute),
       static_cast<const rcti *>(nullptr),
       static_cast<rcti *>(nullptr),
@@ -431,6 +438,7 @@ std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute_region(
     const int height,
     const Span<Image *> images,
     const size_t budget,
+    const char *label,
     Compute &&compute,
     const rcti *changed_region,
     rcti *r_valid_region,
@@ -511,6 +519,17 @@ std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute_region(
   }
 
   if (standing_hit) {
+    /* The standing result is materialized outside the mutex above; time that read, not the lock.
+     * The note names the resting form so a half hit's whole-canvas conversion is visible beside the
+     * mask cache's float one. */
+    int standing_width = 0;
+    int standing_height = 0;
+    paint_layer_effect_buffer_dimensions(standing, standing_width, standing_height);
+    bke::paint_perf::ScopedTimer perf(label);
+    perf.note("hit=1 size=%dx%d half=%d",
+              standing_width,
+              standing_height,
+              paint_layer_effect_buffer_is_half(standing) ? 1 : 0);
     return paint_layer_effect_buffer_read(standing);
   }
 

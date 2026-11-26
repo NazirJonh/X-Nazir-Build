@@ -29,6 +29,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <memory>
 
@@ -80,6 +81,7 @@
 #include "../paint_image_stroke_hook.hh"
 #include "../paint_intern.hh"
 #include "../selection/paint_image_select_intern.hh"
+#include "paint_material_correction_cache.hh"
 #include "paint_material_source.hh"
 
 namespace blender {
@@ -1914,6 +1916,23 @@ void ImagePaintStroke::done(const bool is_cancel, const bool stroke_started)
    * results, previews) are what the 4K budget turns on, and the bake commit may never run for a
    * plain stroke. */
   BKE_paint_layers_cache_debug_log("stroke_done");
+
+  /* The correction cache's hit/build counters, under the same `PAINT_MEM` switch: a hit is called
+   * once per brush sample, so a per-call timer would flood the log -- the counters show how much of
+   * the stroke's correction work the cache carried, and the bytes are what a half-at-rest form of
+   * that cache would halve. */
+  if (BKE_paint_mem_log_enabled()) {
+    const ed::sculpt_paint::material::CorrectionCacheStats stats =
+        ed::sculpt_paint::material::correction_cache_stats();
+    fprintf(stderr,
+            "PAINT_MEM correction_cache hits=%llu builds=%llu region_updates=%llu "
+            "entries=%zu bytes=%zu\n",
+            (unsigned long long)stats.hits,
+            (unsigned long long)stats.builds,
+            (unsigned long long)stats.region_updates,
+            stats.entries,
+            stats.bytes);
+  }
 
   /* Drop the dab trajectory so the next stroke starts empty regardless of brush changes. The
    * `PaintOperation` itself is destroyed right after this, but keeping `clear()` here matches

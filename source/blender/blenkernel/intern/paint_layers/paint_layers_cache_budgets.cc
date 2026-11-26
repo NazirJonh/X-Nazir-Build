@@ -109,6 +109,11 @@ struct PaintCacheDebugRow {
 
 }  // namespace
 
+bool BKE_paint_mem_log_enabled()
+{
+  return bke::paint_cache::paint_mem_log_enabled();
+}
+
 void BKE_paint_layers_cache_debug_log(const char *where)
 {
   if (!bke::paint_cache::paint_mem_log_enabled()) {

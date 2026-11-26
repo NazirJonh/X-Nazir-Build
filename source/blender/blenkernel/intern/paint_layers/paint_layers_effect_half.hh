@@ -106,6 +106,19 @@ inline std::shared_ptr<ImBuf> paint_layer_effect_buffer_read(const PaintLayerEff
   return floats;
 }
 
+/** Whether \a stored rests as FP16. The row effect cache keeps a #PaintLayerEffectBuffer, the mask
+ * effect cache a float #ImBuf -- never half -- so its overload always answers false. Exists for the
+ * perf diagnostics that report the resting form of a hit. */
+inline bool paint_layer_effect_buffer_is_half(const PaintLayerEffectBuffer &stored)
+{
+  return stored.is_half();
+}
+
+inline bool paint_layer_effect_buffer_is_half(const std::shared_ptr<ImBuf> & /*stored*/)
+{
+  return false;
+}
+
 inline void paint_layer_effect_buffer_dimensions(const std::shared_ptr<ImBuf> &stored,
                                                  int &r_width,
                                                  int &r_height)

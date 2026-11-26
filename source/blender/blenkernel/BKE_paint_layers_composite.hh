@@ -208,6 +208,13 @@ void BKE_paint_layers_cache_budgets_sync_from_userdef();
 void BKE_paint_layers_cache_debug_log(const char *where);
 
 /**
+ * Whether the `PAINT_MEM` diagnostics are on (`BLENDER_PAINT_MEM_LOG` set to a non-empty value),
+ * read once. The public mirror of the blenkernel's own switch, so an editor-side probe (the
+ * stroke's correction-cache statistics) gates on the very same variable.
+ */
+bool BKE_paint_mem_log_enabled();
+
+/**
  * The grey the CPU-computed mask effect \a effect lays on its owner row \a row, on \a tile_number:
  * the mask effect cache's buffer, computed when no fresh one stands. The buffer is a scalar grey --
  * one float per texel, `channels = 1` -- which the readers take as the mask factor. A Normal to

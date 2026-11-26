@@ -16,9 +16,13 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include "MEM_guardedalloc.h"
 
@@ -2924,6 +2928,117 @@ TEST_F(PaintLayersEffectTest, half_storage_saturates_hdr_and_drops_nan)
   EXPECT_EQ(result[3], 0.0f);
   for (const int64_t i : IndexRange(4)) {
     EXPECT_TRUE(std::isfinite(result[i])) << "component " << i;
+  }
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name FP16 conversion benchmark (env-gated)
+ *
+ * Not a correctness test: prints the cost of the resting-form boundary at the two canvas sizes the
+ * half-at-rest decision turns on. Off without `BLENDER_PBR_HALF_BENCH`, so CI never runs it.
+ * \{ */
+
+namespace {
+
+double half_bench_ms(const std::chrono::steady_clock::time_point start)
+{
+  return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
+      .count();
+}
+
+void half_bench_report(const char *key, const int size, const int iteration, const double ms)
+{
+  printf("HALF_BENCH key=%s size=%d it=%d ms=%.3f\n", key, size, iteration, ms);
+  fflush(stdout);
+}
+
+/** A filled RGBA float buffer of \a size x \a size, the effect kernel's result form. */
+std::shared_ptr<ImBuf> half_bench_float_buffer(const int size)
+{
+  std::shared_ptr<ImBuf> buffer = paint_layer_effect_float_buffer_new(size, size);
+  if (buffer == nullptr) {
+    return {};
+  }
+  const int64_t count = int64_t(size) * size * 4;
+  float *pixels = buffer->float_data_for_write();
+  for (int64_t i = 0; i < count; i++) {
+    pixels[i] = float((i * 37) % 1024) / 1023.0f;
+  }
+  return buffer;
+}
+
+}  // namespace
+
+/** The benchmark rides the effect fixture only for its process setup (a Main and the cache
+ * budgets); it renders nothing. */
+class PaintLayersEffectHalfBench : public PaintLayersEffectTest {};
+
+TEST_F(PaintLayersEffectHalfBench, conversion_costs)
+{
+  if (std::getenv("BLENDER_PBR_HALF_BENCH") == nullptr) {
+    GTEST_SKIP() << "set BLENDER_PBR_HALF_BENCH=1 to run the FP16 conversion benchmark";
+  }
+  constexpr int kIterations = 3;
+  for (const int size : {2048, 4096}) {
+    const int64_t rgba_count = int64_t(size) * size * 4;
+    const int64_t scalar_count = int64_t(size) * size;
+
+    /* Baseline: a float copy of the same buffer, the cost a float-at-rest entry pays per read. */
+    for (int iteration = 0; iteration < kIterations; iteration++) {
+      std::shared_ptr<ImBuf> source = half_bench_float_buffer(size);
+      ASSERT_NE(source, nullptr);
+      std::shared_ptr<ImBuf> destination = paint_layer_effect_float_buffer_new(
+          size, size, /*initialize_pixels=*/false);
+      ASSERT_NE(destination, nullptr);
+      const auto start = std::chrono::steady_clock::now();
+      std::memcpy(destination->float_data_for_write(),
+                  source->float_data(),
+                  size_t(rgba_count) * sizeof(float));
+      half_bench_report("copy_float_to_float", size, iteration, half_bench_ms(start));
+    }
+
+    /* float -> half, the pack a compute pays once when the result rests as FP16. */
+    for (int iteration = 0; iteration < kIterations; iteration++) {
+      std::shared_ptr<ImBuf> source = half_bench_float_buffer(size);
+      ASSERT_NE(source, nullptr);
+      const auto start = std::chrono::steady_clock::now();
+      const PaintLayerEffectBuffer packed = paint_layer_effect_buffer_pack(
+          source, /*use_half=*/true);
+      half_bench_report("pack_float_to_half", size, iteration, half_bench_ms(start));
+      ASSERT_TRUE(packed.is_half());
+    }
+
+    /* half -> float, the whole-canvas materialization every hit of a half entry pays. */
+    std::shared_ptr<ImBuf> source = half_bench_float_buffer(size);
+    ASSERT_NE(source, nullptr);
+    const PaintLayerEffectBuffer packed = paint_layer_effect_buffer_pack(source, /*use_half=*/true);
+    ASSERT_TRUE(packed.is_half());
+    for (int iteration = 0; iteration < kIterations; iteration++) {
+      const auto start = std::chrono::steady_clock::now();
+      std::shared_ptr<ImBuf> read = paint_layer_effect_buffer_read(packed);
+      half_bench_report("read_half_to_float", size, iteration, half_bench_ms(start));
+      ASSERT_NE(read, nullptr);
+    }
+
+    /* The scalar channel path: the mask cache's grey and the conversion beside it. */
+    Vector<float> scalar_floats(scalar_count);
+    Vector<uint16_t> scalar_halfs(scalar_count);
+    for (int64_t i = 0; i < scalar_count; i++) {
+      scalar_floats[i] = float((i * 37) % 1024) / 1023.0f;
+    }
+    for (int iteration = 0; iteration < kIterations; iteration++) {
+      const auto start = std::chrono::steady_clock::now();
+      math::float_to_half_make_finite_array(
+          scalar_floats.data(), scalar_halfs.data(), size_t(scalar_count));
+      half_bench_report("scalar_pack_float_to_half", size, iteration, half_bench_ms(start));
+    }
+    for (int iteration = 0; iteration < kIterations; iteration++) {
+      const auto start = std::chrono::steady_clock::now();
+      math::half_to_float_array(scalar_halfs.data(), scalar_floats.data(), size_t(scalar_count));
+      half_bench_report("scalar_read_half_to_float", size, iteration, half_bench_ms(start));
+    }
   }
 }
 

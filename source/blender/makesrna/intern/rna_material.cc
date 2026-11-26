@@ -343,6 +343,33 @@ static const EnumPropertyItem rna_enum_material_paint_layer_anchor_point_source_
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/* The authoring kinds of `MaterialPaintLayer.anchor_point_add`, kept outside #ifdef RNA_RUNTIME
+ * like the tables below because the parameter definition in the other branch reads them. */
+constexpr int rna_anchor_point_kind_marker = 0;
+constexpr int rna_anchor_point_kind_reader = 1;
+/* Its lists: a row's content effects, its mask, or the stack rows. */
+constexpr int rna_anchor_point_list_effects = 0;
+constexpr int rna_anchor_point_list_mask = 1;
+constexpr int rna_anchor_point_list_row = 2;
+
+/* The two authoring kinds of `MaterialPaintLayer.anchor_point_add`, kept outside #ifdef
+ * RNA_RUNTIME like the tables above because the runtime function reads them from the parameter
+ * definition in the other branch. */
+static const EnumPropertyItem rna_enum_material_paint_layer_anchor_point_kind_items[] = {
+    {0, "MARKER", 0, "Marker", "An Anchor Point that publishes a slice of its layer"},
+    {1, "READER", 0, "Reader", "A row that lays the slice an Anchor Point publishes"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* Where `MaterialPaintLayer.anchor_point_add` puts the point: a row's effects, its mask, or the
+ * stack itself. Values are the function's own, mapped onto #PaintLayerAnchorPointList there. */
+static const EnumPropertyItem rna_enum_material_paint_layer_anchor_point_list_items[] = {
+    {0, "EFFECTS", 0, "Effects", "The content effects of a layer"},
+    {1, "MASK", 0, "Mask", "The mask items of a layer"},
+    {2, "ROW", 0, "Row", "The rows of the stack"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 /* The pattern a generator row lays, the #eMaterialPaintLayerGenerator codes. The Gradient keeps
  * its line and ramp in its payload; every other kind reads the parameters of its kind schema, so
  * the list is what the row's Generator picker offers and what a script switches a row with. Kept
@@ -1690,6 +1717,19 @@ static bool rna_paint_layer_params_from_source(const int source,
         return false;
       }
       break;
+    case MA_PAINT_LAYER_SOURCE_ANCHOR_POINT:
+      if (as_correction) {
+        /* A reader correction names its own kind before it asks this mapper (effect_add and
+         * mask_item_add), so only the stack row -- a reader layer -- is made here. */
+        break;
+      }
+      if (reject_foreign_qualifiers(filter_given || generator_given)) {
+        return false;
+      }
+      /* The Anchor Point source adds a reader row; the marker lives in a row's effects or mask,
+       * which the caller places with #PaintLayerAddParams::insert_after. */
+      r_params.kind = PaintLayerAddKind::AnchorPointLayer;
+      return true;
     case MA_PAINT_LAYER_SOURCE_TEXT:
       if (!as_correction) {
         /* A Text Decal is only ever an effect of a layer, never a layer of its own. */
@@ -1766,6 +1806,12 @@ static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
   if (params.anchor != nullptr && !rna_paint_layer_in_stack(*ma, params.anchor)) {
     BKE_report(reports, RPT_ERROR, "The anchor is not a paint layer of this material");
     return nullptr;
+  }
+  if (eMaterialPaintLayerSource(source) == MA_PAINT_LAYER_SOURCE_ANCHOR_POINT) {
+    /* A reader row lands at the anchor's position, the way the Outliner's Add does: the new row
+     * takes the anchor's place and the anchor sits under it. The anchor itself stays named for the
+     * policy's owner lookup; an add with no anchor makes the reader at the top of the stack. */
+    params.insert_after = params.anchor;
   }
   params.place = PaintLayerPlace(place);
   MaterialPaintLayer *layer = BKE_paint_layers_add_with_policy(*ma, params);
@@ -5614,6 +5660,36 @@ static void rna_MaterialPaintLayer_effects_begin(CollectionPropertyIterator *ite
   rna_iterator_listbase_begin(iter, ptr, &layer->effects, nullptr);
 }
 
+/**
+ * The shared half of `effect_add` and `mask_item_add` for an Anchor Point marker: the inert point
+ * that publishes a slice of \a ptr's layer, placed at the end of \a list (the layer's effects or
+ * mask stack). The BKE policy canonicalizes the row and, for a mask item, makes the white base
+ * mask first.
+ */
+static MaterialPaintLayer *rna_anchor_point_marker_add(PointerRNA ptr,
+                                                       ReportList *reports,
+                                                       const char *name,
+                                                       const PaintLayerAnchorPointList list)
+{
+  const bool mask = list == PaintLayerAnchorPointList::MaskStack;
+  MaterialPaintLayer *layer = nullptr;
+  if (Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer)) {
+    PaintLayerAddParams params;
+    params.kind = PaintLayerAddKind::AnchorPoint;
+    params.anchor = layer;
+    params.anchor_point_list = list;
+    params.name = (name != nullptr && name[0] != '\0') ? name : nullptr;
+    if (MaterialPaintLayer *marker = BKE_paint_layers_add_with_policy(*ma, params)) {
+      return marker;
+    }
+  }
+  BKE_report(reports,
+             RPT_ERROR,
+             mask ? "Only a layer of the stack takes a mask item" :
+                    "Only a layer of the stack takes a content effect");
+  return nullptr;
+}
+
 static MaterialPaintLayer *rna_MaterialPaintLayer_effect_add(PointerRNA ptr,
                                                              ReportList *reports,
                                                              const char *name,
@@ -5638,6 +5714,18 @@ static MaterialPaintLayer *rna_MaterialPaintLayer_effect_add(PointerRNA ptr,
           "That layer is a saved member of a Smart Filter definition and takes no corrections");
       return nullptr;
     }
+    if (source == MA_PAINT_LAYER_SOURCE_ANCHOR_POINT) {
+      /* A marker is not a correction: it takes the shared map (the layer's effects) and the
+       * layer's own name numbering through the same policy, but not the correction kinds. The
+       * mapper below owns the filter/generator rejection, so this branch repeats it. */
+      if (filter != rna_paint_layer_filter_unset ||
+          generator != MA_PAINT_LAYER_GENERATOR_GRADIENT)
+      {
+        BKE_report(reports, RPT_ERROR, rna_paint_layer_foreign_qualifiers_error);
+        return nullptr;
+      }
+      return rna_anchor_point_marker_add(ptr, reports, name, PaintLayerAnchorPointList::Effects);
+    }
     PaintLayerAddParams params;
     params.anchor = layer;
     params.name = (name != nullptr && name[0] != '\0') ? name : nullptr;
@@ -5657,10 +5745,15 @@ static MaterialPaintLayer *rna_MaterialPaintLayer_mask_item_add(PointerRNA ptr,
                                                                 const char *name,
                                                                 const int source)
 {
-  if (!ELEM(source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT)) {
+  if (!ELEM(source,
+            MA_PAINT_LAYER_SOURCE_IMAGE,
+            MA_PAINT_LAYER_SOURCE_CONSTANT,
+            MA_PAINT_LAYER_SOURCE_ANCHOR_POINT))
+  {
     BKE_report(reports,
                RPT_ERROR,
-               "A mask correction is a painted map (Image) or a flat grey (Constant)");
+               "A mask correction is a painted map (Image), a flat grey (Constant) or an Anchor "
+               "Point marker");
     return nullptr;
   }
   MaterialPaintLayer *layer = nullptr;
@@ -5676,6 +5769,11 @@ static MaterialPaintLayer *rna_MaterialPaintLayer_mask_item_add(PointerRNA ptr,
                  "corrections");
       return nullptr;
     }
+    if (source == MA_PAINT_LAYER_SOURCE_ANCHOR_POINT) {
+      /* The marker takes the policy's base mask (made white first) and name numbering, like any
+       * other mask item, but not a correction kind. */
+      return rna_anchor_point_marker_add(ptr, reports, name, PaintLayerAnchorPointList::MaskStack);
+    }
     /* The policy makes the base mask first when the layer has none, and numbers an empty name among
      * this layer's own mask items. */
     PaintLayerAddParams params;
@@ -5690,6 +5788,125 @@ static MaterialPaintLayer *rna_MaterialPaintLayer_mask_item_add(PointerRNA ptr,
   }
   BKE_report(reports, RPT_ERROR, "Only a layer of the stack takes a mask correction");
   return nullptr;
+}
+
+/* The authoring kinds and lists of #rna_MaterialPaintLayer_anchor_point_add live with the enum
+ * tables above, outside the #RNA_RUNTIME split, because the parameter definition reads them. */
+
+/**
+ * Add an Anchor Point marker or reader with the placement the Outliner's Add uses: a marker in a
+ * row's effects or mask, and a reader as a stack row above the row it was aimed at, a content
+ * correction or a mask item. \a insert_after names the item the new one follows (null for the end,
+ * except a reader row, which defaults to the row aimed at); a stale item of another list is ignored
+ * and the point appended, which is the BKE policy's rule.
+ */
+static MaterialPaintLayer *rna_MaterialPaintLayer_anchor_point_add(PointerRNA ptr,
+                                                                   ReportList *reports,
+                                                                   const char *name,
+                                                                   const int kind,
+                                                                   const int list,
+                                                                   const char *source,
+                                                                   PointerRNA *insert_after_ptr)
+{
+  const bool reader = kind == rna_anchor_point_kind_reader;
+  if (!ELEM(kind, rna_anchor_point_kind_marker, rna_anchor_point_kind_reader)) {
+    BKE_report(reports, RPT_ERROR, "Unknown Anchor Point kind");
+    return nullptr;
+  }
+  /* A reader names the point it reads, a marker publishes one and reads nothing: naming a source
+   * on a marker is a mistake worth reporting rather than ignoring. An empty source leaves a
+   * reader unwired until `anchor_point_source` is set. */
+  bUUID marker_source = BLI_uuid_nil();
+  if (reader) {
+    if (source != nullptr && source[0] != '\0' &&
+        !BLI_uuid_parse_string(&marker_source, source))
+    {
+      BKE_report(reports, RPT_ERROR, "The Anchor Point source is not a marker UUID");
+      return nullptr;
+    }
+  }
+  else if (source != nullptr && source[0] != '\0') {
+    BKE_report(reports, RPT_ERROR, "Only an Anchor Point Reader takes a source");
+    return nullptr;
+  }
+  PaintLayerAddKind add_kind = PaintLayerAddKind::AnchorPoint;
+  PaintLayerAnchorPointList target_list = PaintLayerAnchorPointList::Effects;
+  if (!reader) {
+    if (list == rna_anchor_point_list_row) {
+      BKE_report(reports,
+                 RPT_ERROR,
+                 "An Anchor Point marker belongs in a layer's effects or mask");
+      return nullptr;
+    }
+    target_list = (list == rna_anchor_point_list_mask) ? PaintLayerAnchorPointList::MaskStack :
+                                                         PaintLayerAnchorPointList::Effects;
+  }
+  else if (list == rna_anchor_point_list_effects) {
+    add_kind = PaintLayerAddKind::AnchorPointCorrection;
+    target_list = PaintLayerAnchorPointList::Effects;
+  }
+  else if (list == rna_anchor_point_list_mask) {
+    add_kind = PaintLayerAddKind::AnchorPointMaskCorrection;
+    target_list = PaintLayerAnchorPointList::MaskStack;
+  }
+  else if (list == rna_anchor_point_list_row) {
+    add_kind = PaintLayerAddKind::AnchorPointLayer;
+    target_list = PaintLayerAnchorPointList::Row;
+  }
+  else {
+    BKE_report(reports, RPT_ERROR, "Unknown Anchor Point list");
+    return nullptr;
+  }
+
+  MaterialPaintLayer *layer = nullptr;
+  Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer);
+  if (ma == nullptr) {
+    BKE_report(reports, RPT_ERROR, "Paint layer is not part of this material");
+    return nullptr;
+  }
+  /* The layer or item aimed at decides where the point lands, the way the Outliner canonicalizes
+   * its active item: a correction or a mask item means the row it hangs on. */
+  MaterialPaintLayer *owner = layer;
+  if (layer->role == MA_PAINT_LAYER_ROLE_EFFECT) {
+    owner = BKE_paint_layers_correction_owner(*ma, *layer);
+  }
+  else if (layer->role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+    owner = BKE_paint_layers_mask_item_owner(*ma, *layer);
+  }
+  if (owner == nullptr && target_list != PaintLayerAnchorPointList::Row) {
+    BKE_report(reports, RPT_ERROR, "Select a layer to add an Anchor Point to");
+    return nullptr;
+  }
+  MaterialPaintLayer *insert_after = (insert_after_ptr != nullptr) ?
+                                         static_cast<MaterialPaintLayer *>(
+                                             insert_after_ptr->data) :
+                                         nullptr;
+  if (target_list == PaintLayerAnchorPointList::Row) {
+    /* A reader row takes the place of the row aimed at when no other position was named, the way
+     * the Outliner inserts it above. A stale pointer is dropped for the append. */
+    if (insert_after == nullptr) {
+      insert_after = owner;
+    }
+    else if (!rna_paint_layer_in_stack(*ma, insert_after)) {
+      insert_after = nullptr;
+    }
+  }
+  PaintLayerAddParams params;
+  params.kind = add_kind;
+  params.anchor = owner;
+  params.anchor_point_list = target_list;
+  params.insert_after = insert_after;
+  params.anchor_point_source = marker_source;
+  params.name = (name != nullptr && name[0] != '\0') ? name : nullptr;
+  MaterialPaintLayer *created = BKE_paint_layers_add_with_policy(*ma, params);
+  if (created == nullptr) {
+    BKE_report(reports,
+               RPT_ERROR,
+               reader ? "Could not add the Anchor Point Reader to this layer" :
+                        "Could not add the Anchor Point to this layer");
+    return nullptr;
+  }
+  return created;
 }
 
 static void rna_MaterialPaintLayer_children_begin(CollectionPropertyIterator *iter,
@@ -8817,8 +9034,9 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
       func,
       "Add a content correction over the layer's colour: a map painted into like a layer (Image), "
       "one flat colour at the correction's opacity (Constant), a filter (Filter, naming "
-      "\"filter\"), or a procedural generator (Generator, naming \"generator\"). The other sources "
-      "report the filter and generator as an error when given");
+      "\"filter\"), a procedural generator (Generator, naming \"generator\"), or an Anchor Point "
+      "marker that publishes a slice of the layer (Anchor Point, see anchor_point_add). The other "
+      "sources report the filter and generator as an error when given");
   RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_REPORTS);
   RNA_def_string(func,
                  "name",
@@ -8833,7 +9051,7 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
                MA_PAINT_LAYER_SOURCE_IMAGE,
                "Source",
                "Image for a painted map, Constant for a flat colour, Filter or Generator for the "
-               "kinds that name their own subtype below");
+               "kinds that name their own subtype below, Anchor Point for a marker");
   /* The qualifiers of the Filter and Generator sources; the other sources report them as an error
    * instead of ignoring them. */
   RNA_def_enum(func,
@@ -8856,7 +9074,8 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
       func,
       "Add a mask correction over the layer's mask (made white first when there is none): a grey "
       "map painted in Mask mode, or with the Constant source a flat grey (see mask_value), laid by "
-      "the correction's own blend and opacity");
+      "the correction's own blend and opacity; the Anchor Point source adds a marker that "
+      "publishes a slice of the mask (see anchor_point_add)");
   RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_REPORTS);
   RNA_def_string(func,
                  "name",
@@ -8869,8 +9088,50 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
                rna_enum_material_paint_layer_source_items,
                MA_PAINT_LAYER_SOURCE_IMAGE,
                "Source",
-               "Image for a painted map, Constant for a flat grey");
+               "Image for a painted map, Constant for a flat grey, Anchor Point for a marker");
   parm = RNA_def_pointer(func, "item", "MaterialPaintLayer", "", "The new mask correction");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "anchor_point_add", "rna_MaterialPaintLayer_anchor_point_add");
+  RNA_def_function_ui_description(
+      func,
+      "Add an Anchor Point marker to a layer's effects or mask, or a reader that lays the slice "
+      "one publishes: a stack row above the row aimed at, a content correction or a mask item, "
+      "placed the way the Outliner's Add places them. Name the point a reader lays with "
+      "\"source\", or set anchor_point_source afterwards; an empty source leaves it unwired");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_REPORTS);
+  RNA_def_string(func,
+                 "name",
+                 nullptr,
+                 MAX_NAME,
+                 "Name",
+                 "Name of the new point, empty for the unique default");
+  RNA_def_enum(func,
+               "kind",
+               rna_enum_material_paint_layer_anchor_point_kind_items,
+               rna_anchor_point_kind_marker,
+               "Kind",
+               "Marker publishes a slice; Reader lays one");
+  RNA_def_enum(func,
+               "list",
+               rna_enum_material_paint_layer_anchor_point_list_items,
+               rna_anchor_point_list_effects,
+               "List",
+               "Where the point lands: a layer's content effects, its mask, or the stack rows");
+  RNA_def_string(func,
+                 "source",
+                 nullptr,
+                 MAX_NAME,
+                 "Source",
+                 "Marker of the Anchor Point a reader lays; empty for none (readers only)");
+  parm = RNA_def_pointer(func,
+                         "insert_after",
+                         "MaterialPaintLayer",
+                         "",
+                         "Item the new point follows, or None for the end");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  parm = RNA_def_pointer(func, "point", "MaterialPaintLayer", "", "The new point");
   RNA_def_function_return(func, parm);
 
   func = RNA_def_function(srna, "mask_remove", "rna_MaterialPaintLayer_mask_remove");

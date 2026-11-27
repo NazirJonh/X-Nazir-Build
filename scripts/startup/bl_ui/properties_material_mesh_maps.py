@@ -98,6 +98,7 @@ class LAYER_MATERIAL_PT_mesh_maps(LayerMaterialButtonsPanel, Panel):
             col.prop(settings, "samples")
             col.prop(settings, "use_denoise")
             col.prop(settings, "margin")
+            col.prop(settings, "margin_type")
             col.prop(settings, "ao_distance")
             col.prop(settings, "edge_radius")
             col.prop(settings, "thickness_rays")
@@ -107,6 +108,15 @@ class LAYER_MATERIAL_PT_mesh_maps(LayerMaterialButtonsPanel, Panel):
             if settings.curvature_method == 'NORMAL_FILTER':
                 col.prop(settings, "curvature_radius")
                 col.prop(settings, "curvature_scale")
+            col.prop(settings, "dilate_iterations")
+
+            # Quality: the settings that act on a subset of the maps only, grouped under their own
+            # sub-header with the scope spelled out in the labels. The panel is shared by every
+            # map type, so the controls stay visible instead of hiding per type.
+            quality = settings_layout.column(align=True)
+            quality.label(text="Quality")
+            quality.prop(settings, "supersampling", text="Supersampling (Render Pairs)")
+            quality.prop(settings, "use_global_ao", text="Global AO (AO Only)")
 
     def _draw_high_poly(self, layout, context, ob, mat):
         source = next((item for item in ob.mesh_map_sources if item.material == mat), None)
@@ -120,8 +130,10 @@ class LAYER_MATERIAL_PT_mesh_maps(LayerMaterialButtonsPanel, Panel):
                 hp.prop_search(
                     source, "high_poly_collection", context.blend_data, "collections",
                     text="Collection")
-                hp.label(
-                    text="AO is computed per high-poly object; pieces do not occlude each other")
+                if not mat.mesh_map_settings.use_global_ao:
+                    hp.label(
+                        text="AO is computed per high-poly object; pieces do not occlude each "
+                        "other")
                 hp.prop(source, "cage", text="Cage")
                 hp.prop(source, "cage_extrusion")
                 hp.prop(source, "max_ray_distance")

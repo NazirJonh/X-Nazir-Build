@@ -96,6 +96,19 @@ static void populate_geometry_pixels(Mesh &mesh,
   RE_bake_pixels_populate(&mesh, pixels.data(), size_t(pixels.size()), &targets, uv_name);
 }
 
+/** A zeroed float atlas tile of \a res x \a res texels; release with #IMB_freeImBuf. */
+static ImBuf *make_tile_buffer(const int res)
+{
+  ImBuf *ibuf = IMB_allocImBuf(uint(res), uint(res), ImBufFlags::FloatData);
+  if (ibuf != nullptr) {
+    if (float *data = ibuf->float_data_for_write()) {
+      MutableSpan<float> pixels(data, int64_t(res) * res * 4);
+      pixels.fill(0.0f);
+    }
+  }
+  return ibuf;
+}
+
 class MeshMapBakeTest : public bke::BlenderGTestBase {
  public:
   Main *bmain = nullptr;
@@ -665,6 +678,29 @@ TEST_F(MeshMapBakeTest, edge_samples_are_clamped)
   }
 }
 
+/**
+ * The supersampling clamp the editor's pair preparation stands on (the clamp itself lives in the
+ * editor, so the math it clamps with is what is tested here): a pair whose
+ * #BKE_mesh_maps_bake_estimate_bytes stays under #MESH_MAP_BAKE_MEMORY_LIMIT_MB fits, and one over
+ * it is refused -- whether the cost grew through the resolution, the supersampling or the UDIM
+ * tile count.
+ */
+TEST_F(MeshMapBakeTest, supersampling_limit_clamps_or_fails)
+{
+  const size_t budget = size_t(MESH_MAP_BAKE_MEMORY_LIMIT_MB) * 1024 * 1024;
+  /* 4096 at supersampling 1 fits the budget. */
+  EXPECT_LE(BKE_mesh_maps_bake_estimate_bytes(4096, 1, 1), budget);
+  /* 2048 at supersampling 4 (an 8192 raster) fits the budget. */
+  EXPECT_LE(BKE_mesh_maps_bake_estimate_bytes(2048, 4, 1), budget);
+  /* 4096 at supersampling 4 (a 16384 raster) is over the budget. */
+  EXPECT_GT(BKE_mesh_maps_bake_estimate_bytes(4096, 4, 1), budget);
+  /* 8192 at supersampling 1 stays inside the budget and the raster-side limit, so nothing refuses
+   * it: the budget is what bounds the larger combinations below. */
+  EXPECT_LE(BKE_mesh_maps_bake_estimate_bytes(8192, 1, 1), budget);
+  /* The same 2048x4 pair times four candidate UDIM tiles is over the budget. */
+  EXPECT_GT(BKE_mesh_maps_bake_estimate_bytes(2048, 4, 4), budget);
+}
+
 /** A slab: two quads a unit apart. A texel on the top face casts one ray down and reads 1. */
 TEST_F(MeshMapBakeTest, fill_thickness_measures_interior_distance)
 {
@@ -801,6 +837,494 @@ TEST_F(MeshMapBakeTest, fill_bent_normals_handles_mirrored_low_matrix)
   EXPECT_NEAR(result[1], 0.5f, 1e-6f);
   EXPECT_NEAR(result[2], 1.0f, 1e-6f);
   EXPECT_FLOAT_EQ(result[3], 1.0f);
+}
+
+/** The default AO (global off) keeps the local flag: the bake traces the object alone. */
+TEST_F(MeshMapBakeTest, emit_tree_default_ao_sets_the_local_flag)
+{
+  Material *ma = add_material("MapsMat");
+  MaterialMeshMapSettings settings;
+  settings.use_global_ao = 0;
+  bNode *emission = BKE_mesh_maps_bake_build_emit_tree(
+      *ma->nodetree, MA_MESH_MAP_AO, settings, 3.5f, settings.samples);
+  ASSERT_NE(emission, nullptr);
+  bNode *ao = find_node(*ma->nodetree, SH_NODE_AMBIENT_OCCLUSION);
+  ASSERT_NE(ao, nullptr);
+  EXPECT_TRUE(ao->custom2 & SHD_AO_LOCAL);
+}
+
+TEST_F(MeshMapBakeTest, emit_tree_global_ao_drops_the_local_flag)
+{
+  Material *ma = add_material("MapsMat");
+  MaterialMeshMapSettings settings;
+  settings.use_global_ao = 1;
+  bNode *emission = BKE_mesh_maps_bake_build_emit_tree(
+      *ma->nodetree, MA_MESH_MAP_AO, settings, 3.5f, settings.samples);
+  ASSERT_NE(emission, nullptr);
+  bNode *ao = find_node(*ma->nodetree, SH_NODE_AMBIENT_OCCLUSION);
+  ASSERT_NE(ao, nullptr);
+  EXPECT_FALSE(ao->custom2 & SHD_AO_LOCAL);
+}
+
+/**
+ * Two extend passes fill the empty rows from their written neighbors and never cross a foreign
+ * island: the row between own and foreign mixes both with the 1-2-1 weights, the row past the
+ * foreign island reads the foreign value alone, and the second pass is what reaches that far.
+ */
+TEST_F(MeshMapBakeTest, dilate_fills_empty_and_respects_foreign)
+{
+  const int res = 4;
+  ImBuf *ibuf = make_tile_buffer(res);
+  ASSERT_NE(ibuf, nullptr);
+  Array<uint8_t> own(res * res, 0);
+  Array<uint8_t> own_margin(res * res, 0);
+  Array<uint8_t> foreign(res * res, 0);
+  /* Row 0: own covered with 1. Row 2: a foreign island with 0.25. Rows 1 and 3 are empty. */
+  for (int x = 0; x < res; x++) {
+    own[x] = 1;
+    foreign[2 * res + x] = 1;
+  }
+  const Array<float> result(res * res * 4, 1.0f);
+  float *atlas = ibuf->float_data_for_write();
+  ASSERT_NE(atlas, nullptr);
+  for (int x = 0; x < res; x++) {
+    /* The foreign island arrived from its own bake, so it already carries the written alpha 1;
+     * its RGB is what the extend must never overwrite. */
+    for (int c = 0; c < 3; c++) {
+      atlas[(2 * res + x) * 4 + c] = 0.25f;
+    }
+    atlas[(2 * res + x) * 4 + 3] = 1.0f;
+  }
+  BKE_mesh_maps_bake_extend_passes(
+      MA_MESH_MAP_NORMAL_WORLD, own, own_margin, foreign, 4, result.data(), 0, 2, *ibuf);
+  for (int x = 0; x < res; x++) {
+    /* The own row is merged, not extended. */
+    EXPECT_FLOAT_EQ(atlas[(0 * res + x) * 4 + 0], 1.0f);
+    /* The pass-1 fill of row 1 weights the own row and the foreign row equally:
+     * (1 * 4 + 0.25 * 4) / 8. */
+    EXPECT_FLOAT_EQ(atlas[(1 * res + x) * 4 + 0], 0.625f);
+    /* The foreign island is never overwritten. */
+    EXPECT_FLOAT_EQ(atlas[(2 * res + x) * 4 + 0], 0.25f);
+    /* The second pass reaches one row past the foreign island. */
+    EXPECT_FLOAT_EQ(atlas[(3 * res + x) * 4 + 0], 0.25f);
+    /* Alpha is the written mask: every texel the merge or a pass wrote carries 1. */
+    EXPECT_FLOAT_EQ(atlas[(1 * res + x) * 4 + 3], 1.0f);
+    EXPECT_FLOAT_EQ(atlas[(2 * res + x) * 4 + 3], 1.0f);
+    EXPECT_FLOAT_EQ(atlas[(3 * res + x) * 4 + 3], 1.0f);
+  }
+  IMB_freeImBuf(ibuf);
+}
+
+/** A foreign island fully surrounded by own coverage stays exactly as it was: the mask marks it
+ * #FILTER_MASK_USED, so no extend pass may write over it however many neighbors are written. */
+TEST_F(MeshMapBakeTest, dilate_does_not_overwrite_foreign)
+{
+  const int res = 4;
+  ImBuf *ibuf = make_tile_buffer(res);
+  ASSERT_NE(ibuf, nullptr);
+  Array<uint8_t> own(res * res, 1);
+  Array<uint8_t> own_margin(res * res, 0);
+  Array<uint8_t> foreign(res * res, 0);
+  /* A 2x2 foreign block in the middle holds 0.25; everything else is this object's own. */
+  const int block[4] = {1 * res + 1, 1 * res + 2, 2 * res + 1, 2 * res + 2};
+  for (const int i : block) {
+    own[i] = 0;
+    foreign[i] = 1;
+  }
+  const Array<float> result(res * res * 4, 1.0f);
+  float *atlas = ibuf->float_data_for_write();
+  ASSERT_NE(atlas, nullptr);
+  for (const int i : block) {
+    for (int c = 0; c < 4; c++) {
+      atlas[i * 4 + c] = 0.25f;
+    }
+  }
+  BKE_mesh_maps_bake_extend_passes(
+      MA_MESH_MAP_NORMAL_WORLD, own, own_margin, foreign, 4, result.data(), 0, 3, *ibuf);
+  for (int i = 0; i < res * res; i++) {
+    const bool is_foreign = foreign[i] != 0;
+    for (int c = 0; c < 4; c++) {
+      EXPECT_FLOAT_EQ(atlas[i * 4 + c], is_foreign ? 0.25f : 1.0f) << i << ", " << c;
+    }
+  }
+  IMB_freeImBuf(ibuf);
+}
+
+/** With every texel assigned there is nothing writable and nothing changes however many passes
+ * run; with zero passes only the merge lands and the background stays untouched. */
+TEST_F(MeshMapBakeTest, dilate_stops_when_nothing_writable)
+{
+  const int res = 4;
+  {
+    ImBuf *ibuf = make_tile_buffer(res);
+    ASSERT_NE(ibuf, nullptr);
+    Array<uint8_t> own(res * res, 1);
+    Array<uint8_t> no_margin(res * res, 0);
+    Array<uint8_t> no_foreign(res * res, 0);
+    const Array<float> result(res * res * 4, 0.5f);
+    BKE_mesh_maps_bake_extend_passes(
+        MA_MESH_MAP_NORMAL_WORLD, own, no_margin, no_foreign, 4, result.data(), 0, 8, *ibuf);
+    const float *atlas = ibuf->float_data();
+    ASSERT_NE(atlas, nullptr);
+    for (int i = 0; i < res * res; i++) {
+      for (int c = 0; c < 3; c++) {
+        EXPECT_FLOAT_EQ(atlas[i * 4 + c], 0.5f) << i << ", " << c;
+      }
+      EXPECT_FLOAT_EQ(atlas[i * 4 + 3], 1.0f) << i;
+    }
+    IMB_freeImBuf(ibuf);
+  }
+  {
+    ImBuf *ibuf = make_tile_buffer(res);
+    ASSERT_NE(ibuf, nullptr);
+    Array<uint8_t> own(res * res, 0);
+    Array<uint8_t> no_margin(res * res, 0);
+    Array<uint8_t> no_foreign(res * res, 0);
+    for (int x = 0; x < res; x++) {
+      own[x] = 1;
+    }
+    const Array<float> result(res * res * 4, 1.0f);
+    BKE_mesh_maps_bake_extend_passes(
+        MA_MESH_MAP_NORMAL_WORLD, own, no_margin, no_foreign, 4, result.data(), 0, 0, *ibuf);
+    const float *atlas = ibuf->float_data();
+    ASSERT_NE(atlas, nullptr);
+    for (int x = 0; x < res; x++) {
+      EXPECT_FLOAT_EQ(atlas[x * 4 + 0], 1.0f);
+      EXPECT_FLOAT_EQ(atlas[x * 4 + 3], 1.0f);
+    }
+    for (int i = res; i < res * res; i++) {
+      for (int c = 0; c < 4; c++) {
+        EXPECT_FLOAT_EQ(atlas[i * 4 + c], 0.0f) << i << ", " << c;
+      }
+    }
+    IMB_freeImBuf(ibuf);
+  }
+}
+
+/**
+ * The variant-A rebake: the tile holds bake A's island with its ring, then bake A runs again with
+ * a smaller island, so the old ring is stale. The clear wipes it where the extend will not
+ * rewrite it, the foreign island keeps its content, and nothing survives past the new ring.
+ */
+TEST_F(MeshMapBakeTest, dilate_rebake_does_not_leave_stale)
+{
+  const int res = 4;
+  ImBuf *ibuf = make_tile_buffer(res);
+  ASSERT_NE(ibuf, nullptr);
+  float *atlas = ibuf->float_data_for_write();
+  ASSERT_NE(atlas, nullptr);
+  /* The previous bake covered the whole tile with its island and ring; one foreign island of
+   * another object holds 0.5. */
+  for (int i = 0; i < res * res; i++) {
+    for (int c = 0; c < 4; c++) {
+      atlas[i * 4 + c] = 1.0f;
+    }
+  }
+  for (int c = 0; c < 4; c++) {
+    atlas[(3 * res + 0) * 4 + c] = 0.5f;
+  }
+  Array<uint8_t> own(res * res, 0);
+  Array<uint8_t> own_margin(res * res, 0);
+  Array<uint8_t> foreign(res * res, 0);
+  for (int x = 0; x < res; x++) {
+    /* The new island is row 0 only, with one row of margin below it. */
+    own[x] = 1;
+    own_margin[res + x] = 1;
+  }
+  foreign[3 * res + 0] = 1;
+  const Array<float> result(res * res * 4, 1.0f);
+  /* A margin of 2 widens the clear to 2 + 1 steps, one row past the extend's reach. */
+  BKE_mesh_maps_bake_extend_passes(
+      MA_MESH_MAP_NORMAL_WORLD, own, own_margin, foreign, 4, result.data(), 2, 1, *ibuf);
+  for (int x = 0; x < res; x++) {
+    EXPECT_FLOAT_EQ(atlas[(0 * res + x) * 4 + 0], 1.0f) << x;
+    EXPECT_FLOAT_EQ(atlas[(0 * res + x) * 4 + 3], 1.0f) << x;
+    EXPECT_FLOAT_EQ(atlas[(1 * res + x) * 4 + 0], 1.0f) << x;
+    EXPECT_FLOAT_EQ(atlas[(1 * res + x) * 4 + 3], 1.0f) << x;
+  }
+  /* Row 2 is the pass-1 fill. The two left texels mix the foreign island at (0, 3) as a source,
+   * with the 1-2-1 weights: (1 * 3 + 0.5 * 2) / 5 and (1 * 4 + 0.5 * 1) / 5; the two right ones
+   * read the margin row alone. */
+  EXPECT_FLOAT_EQ(atlas[(2 * res + 0) * 4 + 0], 0.8f);
+  EXPECT_FLOAT_EQ(atlas[(2 * res + 1) * 4 + 0], 0.9f);
+  EXPECT_FLOAT_EQ(atlas[(2 * res + 2) * 4 + 0], 1.0f);
+  EXPECT_FLOAT_EQ(atlas[(2 * res + 3) * 4 + 0], 1.0f);
+  for (int x = 0; x < res; x++) {
+    EXPECT_FLOAT_EQ(atlas[(2 * res + x) * 4 + 3], 1.0f) << x;
+  }
+  /* The foreign island is untouched. */
+  EXPECT_FLOAT_EQ(atlas[(3 * res + 0) * 4 + 0], 0.5f);
+  /* The texel next to it is refilled from it as a source. */
+  EXPECT_FLOAT_EQ(atlas[(3 * res + 1) * 4 + 0], 0.5f);
+  /* Past the new ring the stale 1 of the old bake is gone: cleared back to the zero background. */
+  for (int x = 2; x < res; x++) {
+    for (int c = 0; c < 4; c++) {
+      EXPECT_FLOAT_EQ(atlas[(3 * res + x) * 4 + c], 0.0f) << x << ", " << c;
+    }
+  }
+  IMB_freeImBuf(ibuf);
+}
+
+/** A 2x box downsample averages only the covered subtexels: one covered subtexel of a block keeps
+ * its color instead of fading toward the zero background, and alpha follows the coverage. */
+TEST_F(MeshMapBakeTest, downsample_result_is_coverage_weighted)
+{
+  const int src_res = 2;
+  const int dst_res = 1;
+  Array<float> source(src_res * src_res * 4, 0.0f);
+  Array<uint8_t> source_cov(src_res * src_res, 0);
+  /* Only the first subtexel is covered, with rgb (1, 0.5, 0); the rest are the background. */
+  source[0] = 1.0f;
+  source[1] = 0.5f;
+  source[3] = 1.0f;
+  source_cov[0] = 1;
+  Array<float> dest(dst_res * dst_res * 4, 0.0f);
+  Array<uint8_t> dest_cov(dst_res * dst_res, 0);
+  BKE_mesh_maps_bake_downsample_result(
+      Span<float>(source.data(), source.size()), source_cov, src_res, dest, dst_res, 2);
+  BKE_mesh_maps_bake_downsample_coverage(
+      Span<uint8_t>(source_cov.data(), source_cov.size()), src_res, dest_cov, dst_res, 2);
+  /* The uncovered subtexels contribute neither color nor weight: the covered texel's color
+   * survives undiluted, not the (0.25, 0.125, 0) an average over all four would give. */
+  EXPECT_FLOAT_EQ(dest[0], 1.0f);
+  EXPECT_FLOAT_EQ(dest[1], 0.5f);
+  EXPECT_FLOAT_EQ(dest[2], 0.0f);
+  /* Alpha mirrors the ORed coverage, so a partially covered block is still opaque. */
+  EXPECT_FLOAT_EQ(dest[3], 1.0f);
+  EXPECT_EQ(dest_cov[0], 1);
+}
+
+/** A block with no covered subtexel resolves to the zero background, whatever the raster held. */
+TEST_F(MeshMapBakeTest, downsample_result_empty_block_is_zero)
+{
+  const int src_res = 2;
+  const int dst_res = 1;
+  Array<float> source(src_res * src_res * 4, 1.0f);
+  Array<uint8_t> source_cov(src_res * src_res, 0);
+  Array<float> dest(dst_res * dst_res * 4, 1.0f);
+  BKE_mesh_maps_bake_downsample_result(
+      Span<float>(source.data(), source.size()), source_cov, src_res, dest, dst_res, 2);
+  for (int c = 0; c < 4; c++) {
+    EXPECT_FLOAT_EQ(dest[c], 0.0f);
+  }
+}
+
+/** Two of four covered subtexels with the same color resolve to that color, alpha 1. */
+TEST_F(MeshMapBakeTest, downsample_result_two_of_four_covered)
+{
+  const int src_res = 2;
+  const int dst_res = 1;
+  Array<float> source(src_res * src_res * 4, 0.0f);
+  Array<uint8_t> source_cov(src_res * src_res, 0);
+  for (int i = 0; i < 4; i++) {
+    source[i * 4 + 0] = 0.25f;
+    source[i * 4 + 1] = 0.5f;
+    source[i * 4 + 2] = 0.75f;
+    source_cov[i] = (i % 2 == 0) ? 1 : 0;
+  }
+  Array<float> dest(dst_res * dst_res * 4, 0.0f);
+  BKE_mesh_maps_bake_downsample_result(
+      Span<float>(source.data(), source.size()), source_cov, src_res, dest, dst_res, 2);
+  EXPECT_FLOAT_EQ(dest[0], 0.25f);
+  EXPECT_FLOAT_EQ(dest[1], 0.5f);
+  EXPECT_FLOAT_EQ(dest[2], 0.75f);
+  EXPECT_FLOAT_EQ(dest[3], 1.0f);
+}
+
+/** A block averaging two different unit normals resolves below unit length; the renormalize
+ * helper brings it back to one without touching alpha. */
+TEST_F(MeshMapBakeTest, normalize_normals_restores_unit_length)
+{
+  const int src_res = 2;
+  const int dst_res = 1;
+  Array<float> source(src_res * src_res * 4, 0.0f);
+  Array<uint8_t> source_cov(src_res * src_res, 0);
+  /* One covered subtexel per normal: (0, 0, 1) and (1, 0, 0) share the block. */
+  source[2] = 1.0f;
+  source[3] = 1.0f;
+  source_cov[0] = 1;
+  source[4] = 1.0f;
+  source[7] = 1.0f;
+  source_cov[1] = 1;
+  Array<float> dest(dst_res * dst_res * 4, 0.0f);
+  Array<uint8_t> dest_cov(dst_res * dst_res, 0);
+  BKE_mesh_maps_bake_downsample_result(
+      Span<float>(source.data(), source.size()), source_cov, src_res, dest, dst_res, 2);
+  BKE_mesh_maps_bake_downsample_coverage(
+      Span<uint8_t>(source_cov.data(), source_cov.size()), src_res, dest_cov, dst_res, 2);
+  BKE_mesh_maps_bake_normalize_normals(dest, dest_cov);
+  /* The raw average (0.5, 0, 0.5) is too short; renormalized it is a unit diagonal. */
+  const float len = std::sqrt(dest[0] * dest[0] + dest[1] * dest[1] + dest[2] * dest[2]);
+  EXPECT_FLOAT_EQ(len, 1.0f);
+  EXPECT_FLOAT_EQ(dest[0], std::sqrt(0.5f));
+  EXPECT_FLOAT_EQ(dest[1], 0.0f);
+  EXPECT_FLOAT_EQ(dest[3], 1.0f);
+}
+
+/** The commit's resolve: a 4x4 raster tile boxes down into a 2x2 atlas tile -- the own and margin
+ * coverage OR down separately, and the result follows the coverage-weighted rules: a block with
+ * one covered subtexel keeps its color undiluted, an empty block resolves to the zero background,
+ * and two covered subtexels of the same color resolve to that color. */
+TEST_F(MeshMapBakeTest, resolve_raster_one_tile_factor_two)
+{
+  const int raster_res = 4;
+  const int atlas_res = 2;
+  const int64_t raster_texels = int64_t(raster_res) * raster_res;
+  const int64_t atlas_texels = int64_t(atlas_res) * atlas_res;
+  Array<float> raster(raster_texels * 4, 0.0f);
+  Array<uint8_t> raster_own(raster_texels, 0);
+  Array<uint8_t> raster_margin(raster_texels, 0);
+
+  /* Atlas block (0, 0) covers raster texels {0, 1, 4, 5}: one own subtexel, color (1, 0.5, 0).
+   * Block (0, 1) covers {8, 9, 12, 13}: two own subtexels with the same color. The margin-only
+   * texel 10 fills block (1, 1) with its own color, and the margin texel 0 joins the own texel of
+   * block (0, 0). Block (1, 0) stays empty. */
+  raster[0] = 1.0f;
+  raster[1] = 0.5f;
+  raster_own[0] = 1;
+  raster_margin[0] = 1;
+  for (const int texel : {8, 9}) {
+    raster[texel * 4 + 0] = 0.25f;
+    raster[texel * 4 + 1] = 0.5f;
+    raster[texel * 4 + 2] = 0.75f;
+    raster_own[texel] = 1;
+  }
+  raster[10 * 4 + 0] = 0.2f;
+  raster[10 * 4 + 1] = 0.4f;
+  raster[10 * 4 + 2] = 0.6f;
+  raster_margin[10] = 1;
+
+  /* Prefilled with sentinels, so the assertions tell an actively written texel from a skipped
+   * one. */
+  Array<float> atlas(atlas_texels * 4, 9.0f);
+  Array<uint8_t> atlas_own(atlas_texels, 9);
+  Array<uint8_t> atlas_margin(atlas_texels, 9);
+  BKE_mesh_maps_bake_resolve_raster(raster,
+                                    raster_own,
+                                    raster_margin,
+                                    MA_MESH_MAP_AO,
+                                    raster_res,
+                                    atlas_res,
+                                    1,
+                                    atlas,
+                                    atlas_own,
+                                    atlas_margin);
+
+  /* The own and the margin masks OR down separately: texel 0 is both, texel 1 is neither (its
+   * block's own and margin coverage both stayed empty), texel 2 is own only, texel 3 margin
+   * only. */
+  EXPECT_EQ(atlas_own[0], 1);
+  EXPECT_EQ(atlas_own[1], 0);
+  EXPECT_EQ(atlas_own[2], 1);
+  EXPECT_EQ(atlas_own[3], 0);
+  EXPECT_EQ(atlas_margin[0], 1);
+  EXPECT_EQ(atlas_margin[1], 0);
+  EXPECT_EQ(atlas_margin[2], 0);
+  EXPECT_EQ(atlas_margin[3], 1);
+  /* Block (0, 0): the one covered subtexel's color survives undiluted, alpha 1 by coverage. */
+  EXPECT_FLOAT_EQ(atlas[0], 1.0f);
+  EXPECT_FLOAT_EQ(atlas[1], 0.5f);
+  EXPECT_FLOAT_EQ(atlas[2], 0.0f);
+  EXPECT_FLOAT_EQ(atlas[3], 1.0f);
+  /* Block (1, 0): fully empty, so the resolve zeroes it against the sentinel. */
+  for (int c = 0; c < 4; c++) {
+    EXPECT_FLOAT_EQ(atlas[4 + c], 0.0f) << c;
+  }
+  /* Block (0, 1): two covered subtexels of the same color resolve to that color. */
+  EXPECT_FLOAT_EQ(atlas[8], 0.25f);
+  EXPECT_FLOAT_EQ(atlas[9], 0.5f);
+  EXPECT_FLOAT_EQ(atlas[10], 0.75f);
+  EXPECT_FLOAT_EQ(atlas[11], 1.0f);
+  /* Block (1, 1): the margin texel carries the block, color included. */
+  EXPECT_FLOAT_EQ(atlas[12], 0.2f);
+  EXPECT_FLOAT_EQ(atlas[13], 0.4f);
+  EXPECT_FLOAT_EQ(atlas[14], 0.6f);
+  EXPECT_FLOAT_EQ(atlas[15], 1.0f);
+}
+
+/** A block averaging two different unit normals resolves below unit length; the resolve brings
+ * normal-space maps back to unit length wherever the downsampled union marks. */
+TEST_F(MeshMapBakeTest, resolve_raster_normals_are_renormalized)
+{
+  const int raster_res = 2;
+  const int atlas_res = 1;
+  Array<float> raster(4 * 4, 0.0f);
+  Array<uint8_t> raster_own(4, 0);
+  Array<uint8_t> raster_margin(4, 0);
+  /* One covered subtexel per normal: (0, 0, 1) and (1, 0, 0) share the single atlas block. */
+  raster[2] = 1.0f;
+  raster[3] = 1.0f;
+  raster_own[0] = 1;
+  raster[4] = 1.0f;
+  raster[7] = 1.0f;
+  raster_own[1] = 1;
+  Array<float> atlas(4, 0.0f);
+  Array<uint8_t> atlas_own(1, 0);
+  Array<uint8_t> atlas_margin(1, 0);
+  BKE_mesh_maps_bake_resolve_raster(raster,
+                                    raster_own,
+                                    raster_margin,
+                                    MA_MESH_MAP_NORMAL_WORLD,
+                                    raster_res,
+                                    atlas_res,
+                                    1,
+                                    atlas,
+                                    atlas_own,
+                                    atlas_margin);
+  /* The raw average (0.5, 0, 0.5) is too short; renormalized it is a unit diagonal. */
+  const float len = std::sqrt(atlas[0] * atlas[0] + atlas[1] * atlas[1] + atlas[2] * atlas[2]);
+  EXPECT_FLOAT_EQ(len, 1.0f);
+  EXPECT_FLOAT_EQ(atlas[0], std::sqrt(0.5f));
+  EXPECT_FLOAT_EQ(atlas[1], 0.0f);
+  EXPECT_FLOAT_EQ(atlas[3], 1.0f);
+  EXPECT_EQ(atlas_own[0], 1);
+}
+
+/** The downsample helpers report a refused resolve instead of silently doing nothing: a false
+ * return leaves every destination texel exactly as it was. */
+TEST_F(MeshMapBakeTest, downsample_invalid_factor_is_a_no_op)
+{
+  const int src_res = 2;
+  const int dst_res = 1;
+  Array<float> source(src_res * src_res * 4, 1.0f);
+  Array<uint8_t> source_cov(src_res * src_res, 1);
+  Array<float> dest(dst_res * dst_res * 4, 9.0f);
+  Array<uint8_t> dest_cov(dst_res * dst_res, 9);
+
+  /* A factor below 2 is no downsample. */
+  EXPECT_FALSE(BKE_mesh_maps_bake_downsample_result(
+      source, source_cov, src_res, dest, dst_res, 1));
+  EXPECT_FALSE(BKE_mesh_maps_bake_downsample_coverage(
+      source_cov, src_res, dest_cov, dst_res, 1));
+  /* A source that is not the destination times the factor is a shape mismatch. */
+  EXPECT_FALSE(BKE_mesh_maps_bake_downsample_result(
+      source, source_cov, src_res, dest, dst_res, 3));
+  EXPECT_FALSE(BKE_mesh_maps_bake_downsample_coverage(
+      source_cov, src_res, dest_cov, dst_res, 3));
+  /* A destination too small for its resolution is refused. */
+  EXPECT_FALSE(BKE_mesh_maps_bake_downsample_result(
+      source, source_cov, src_res, MutableSpan<float>(dest.data(), 3), dst_res, 2));
+  EXPECT_FALSE(BKE_mesh_maps_bake_downsample_coverage(
+      source_cov, src_res, MutableSpan<uint8_t>(dest_cov.data(), 0), dst_res, 2));
+
+  /* Nothing was written anywhere. */
+  for (const float value : dest) {
+    EXPECT_FLOAT_EQ(value, 9.0f);
+  }
+  for (const uint8_t value : dest_cov) {
+    EXPECT_EQ(value, 9);
+  }
+
+  /* A valid shape still reports success and writes. */
+  Array<float> written(dst_res * dst_res * 4, 9.0f);
+  Array<uint8_t> written_cov(dst_res * dst_res, 9);
+  EXPECT_TRUE(
+      BKE_mesh_maps_bake_downsample_result(source, source_cov, src_res, written, dst_res, 2));
+  EXPECT_TRUE(
+      BKE_mesh_maps_bake_downsample_coverage(source_cov, src_res, written_cov, dst_res, 2));
+  EXPECT_FLOAT_EQ(written[0], 1.0f);
+  EXPECT_FLOAT_EQ(written[3], 1.0f);
+  EXPECT_EQ(written_cov[0], 1);
 }
 
 /** The Normal Filter curvature reads a tangent normal field: a ramp along U bends positive. */
@@ -1047,6 +1571,16 @@ TEST_F(MeshMapBakeTest, atlas_ensure_creates_float_noncolor_and_reuses)
   ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
   ASSERT_NE(ibuf, nullptr);
   EXPECT_NE(ibuf->float_data(), nullptr);
+  /* A pristine atlas is transparent black: alpha reads as the written mask, so the untouched
+   * background is 0 from the first texel to the last. */
+  const float *data = ibuf->float_data();
+  ASSERT_NE(data, nullptr);
+  const size_t texels = size_t(width) * size_t(height);
+  for (const size_t texel : {size_t(0), texels / 2, texels - 1}) {
+    for (int c = 0; c < 4; c++) {
+      EXPECT_FLOAT_EQ(data[texel * 4 + c], 0.0f) << "texel " << texel << " channel " << c;
+    }
+  }
   BKE_image_release_ibuf(image, ibuf, lock);
 
   /* Same resolution reuses the very same image. */
@@ -1251,6 +1785,38 @@ TEST_F(MeshMapBakeTest, write_with_margin_spreads_scalar)
   EXPECT_FLOAT_EQ(atlas[1], 0.4f);
   EXPECT_FLOAT_EQ(atlas[2], 0.4f);
   EXPECT_FLOAT_EQ(atlas[3], 1.0f);
+}
+
+/**
+ * The alpha invariant over a pristine atlas (the transparent black #BKE_mesh_maps_bake_atlas_ensure
+ * fills): after the merge, alpha is 1 exactly on the covered and the filled margin texels, and the
+ * untouched background keeps RGBA = 0.
+ */
+TEST_F(MeshMapBakeTest, write_with_margin_alpha_is_the_written_mask)
+{
+  uint8_t own_coverage[4] = {1, 0, 0, 0};
+  uint8_t own_margin[4] = {0, 1, 0, 0};
+  uint8_t no_foreign[4] = {0, 0, 0, 0};
+  const float result[16] = {0.10f, 0.20f, 0.30f, 1.0f, 0.40f, 0.50f, 0.60f, 1.0f,
+                            0.70f, 0.80f, 0.90f, 1.0f, 0.15f, 0.25f, 0.35f, 1.0f};
+  /* The pristine background of a fresh atlas: transparent black everywhere. */
+  float atlas[16] = {};
+
+  BKE_mesh_maps_bake_write_with_margin(MA_MESH_MAP_NORMAL_WORLD,
+                                       Span<uint8_t>(own_coverage, 4),
+                                       Span<uint8_t>(own_margin, 4),
+                                       Span<uint8_t>(no_foreign, 4),
+                                       4,
+                                       result,
+                                       MutableSpan<float>(atlas, 16));
+
+  /* The covered and the margin texels carry alpha 1. */
+  EXPECT_FLOAT_EQ(atlas[3], 1.0f);
+  EXPECT_FLOAT_EQ(atlas[7], 1.0f);
+  /* The untouched background stays transparent black, RGB and alpha alike. */
+  for (int i = 8; i < 16; i++) {
+    EXPECT_FLOAT_EQ(atlas[i], 0.0f) << "index " << i;
+  }
 }
 
 /* -------------------------------------------------------------------- */
@@ -1668,7 +2234,7 @@ TEST_F(MeshMapBakeTest, error_of_one_pair_leaves_the_others_alone)
   EXPECT_EQ(sc->status, OB_MESH_MAP_STATUS_VALID);
 }
 
-TEST_F(MeshMapBakeTest, clear_type_blacks_atlas_and_resets_states)
+TEST_F(MeshMapBakeTest, clear_type_resets_atlas_to_transparent_black)
 {
   Material *ma = add_material("MapsMat");
   Object *a = add_empty("A");
@@ -1696,6 +2262,8 @@ TEST_F(MeshMapBakeTest, clear_type_blacks_atlas_and_resets_states)
     data[0] = 0.5f;
     data[1] = 0.5f;
     data[2] = 0.5f;
+    /* A written texel's alpha is 1; the clear has to take it back to the pristine 0. */
+    data[3] = 1.0f;
     BKE_image_release_ibuf(atlas, ibuf, lock);
   }
 
@@ -1713,10 +2281,11 @@ TEST_F(MeshMapBakeTest, clear_type_blacks_atlas_and_resets_states)
   ASSERT_NE(ibuf, nullptr);
   const float *data = ibuf->float_data();
   ASSERT_NE(data, nullptr);
+  /* The cleared atlas is the pristine transparent black: alpha reads as unwritten again. */
   EXPECT_FLOAT_EQ(data[0], 0.0f);
   EXPECT_FLOAT_EQ(data[1], 0.0f);
   EXPECT_FLOAT_EQ(data[2], 0.0f);
-  EXPECT_FLOAT_EQ(data[3], 1.0f);
+  EXPECT_FLOAT_EQ(data[3], 0.0f);
   BKE_image_release_ibuf(atlas, ibuf, lock);
 }
 

@@ -2606,7 +2606,8 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
   /* The mesh map bake's Position normalization is new and defaults to the bounding-box remap:
    * older files read zero (the raw world position) instead of the DNA default, and a raw
    * position is a signed, unbounded gradient nobody asked for. The other new settings read as
-   * their old behavior when zero, so they need no versioning.
+   * their old behavior when zero, so they need no versioning: a zero `margin_type` is the
+   * adjacent-faces margin, and `use_global_ao` and `dilate_iterations` are off by zero.
    *
    * NOTE: Keyed on the member existence instead of a file subversion (see above). The existence
    * check must query the "int8_t" type name, not "char": makesdna stores `int8_t` members under
@@ -2650,6 +2651,21 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
   {
     for (Material &material : bmain->materials) {
       material.mesh_map_settings.cpu_rays = 8;
+    }
+  }
+
+  /* Supersampling is new and defaults to 1: older files read the reused pad byte as zero, which
+   * the bake clamps back to one but RNA reports out of range.
+   *
+   * NOTE: Keyed on the member existence instead of a file subversion (see above). The existence
+   * check must query the "int8_t" type name, not "char": makesdna stores `int8_t` members under
+   * their own type name in the file SDNA, so a "char" query never matches and would reset the
+   * settings on every file load. */
+  if (!DNA_struct_member_exists_with_alias(
+          fd->filesdna, "MaterialMeshMapSettings", "int8_t", "supersampling"))
+  {
+    for (Material &material : bmain->materials) {
+      material.mesh_map_settings.supersampling = 1;
     }
   }
 

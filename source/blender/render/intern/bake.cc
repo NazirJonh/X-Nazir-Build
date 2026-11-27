@@ -140,6 +140,15 @@ void RE_bake_mask_fill(const BakePixel pixel_array[], const size_t pixels_num, c
   }
 }
 
+/**
+ * Expand the covered texels of \a ibuf into the empty ones, up to \a margin texels, following \a
+ * margin_type (#eBakeMarginType).
+ *
+ * The \a mask gates the pass and reports its membership: texels marked #FILTER_MASK_USED are the
+ * covered ones and are never overwritten, every texel the pass fills is marked #FILTER_MASK_MARGIN
+ * in it, and the untouched background stays #FILTER_MASK_NULL. A caller can therefore read which
+ * texels the margin wrote straight from the mask afterwards.
+ */
 void RE_bake_margin(ImBuf *ibuf,
                     char *mask,
                     const int margin,

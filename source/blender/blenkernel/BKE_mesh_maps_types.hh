@@ -33,6 +33,13 @@ struct bNode;
 struct bNodeSocket;
 struct bNodeTree;
 
+/* The margin kind crosses the render boundary: #RE_bake_margin takes these values as its
+ * #eBakeMarginType. Both headers are included here, so the two enums are pinned together where
+ * they meet; #DNA_material_types.h itself cannot include the scene types and only checks the
+ * numbers it declares. */
+static_assert(int(MA_MESH_MAP_MARGIN_ADJACENT_FACES) == int(R_BAKE_ADJACENT_FACES));
+static_assert(int(MA_MESH_MAP_MARGIN_EXTEND) == int(R_BAKE_EXTEND));
+
 /* -------------------------------------------------------------------- */
 /** \name Bake limits
  *
@@ -55,9 +62,49 @@ constexpr int MESH_MAP_BAKE_EDGE_BEVEL_SAMPLES_MIN = 2;
 constexpr int MESH_MAP_BAKE_EDGE_BEVEL_SAMPLES_MAX = 128;
 
 /** The square side the atlas is allocated at: below 16 a degenerate atlas is unreadable, and a
- * 16384 float RGBA buffer already costs 4 GiB, past which the allocation is refused. */
+ * 16384 float RGBA buffer already costs 4 GiB, past which the allocation is refused. The bake
+ * never reaches this bound: its memory budget (#MESH_MAP_BAKE_MEMORY_LIMIT_MB) refuses the pair
+ * first, since baking a 16384 atlas costs several times the budget. */
 constexpr int MESH_MAP_BAKE_RESOLUTION_MIN = 16;
 constexpr int MESH_MAP_BAKE_RESOLUTION_MAX = 16384;
+
+/**
+ * The supersampling factor of the render pairs: the engine rasterizes at the atlas side times
+ * this, and the commit boxes the result back down into the atlas.
+ */
+constexpr int MESH_MAP_BAKE_SUPERSAMPLING_MIN = 1;
+constexpr int MESH_MAP_BAKE_SUPERSAMPLING_MAX = 4;
+
+/**
+ * The highest effective raster side a pair may prepare (the atlas side times the supersampling).
+ * A coarse guard of the raster side only: the real memory control is the
+ * #MESH_MAP_BAKE_MEMORY_LIMIT_MB budget, and a raster past this limit reduces the supersampling
+ * exactly like an over-budget pair, failing only when even the unsupersampled raster breaks it.
+ * Initialized from #MESH_MAP_BAKE_RESOLUTION_MAX rather than spelling the number again: a raster
+ * finer than the largest atlas is never worth preparing, so the two limits coincide; the separate
+ * name keeps the raster-side guard readable where it is checked.
+ */
+constexpr int MESH_MAP_BAKE_RENDER_RESOLUTION_LIMIT = MESH_MAP_BAKE_RESOLUTION_MAX;
+
+/**
+ * The memory budget of one prepared pair, in MiB: what #BKE_mesh_maps_bake_estimate_bytes computes
+ * for the pair's candidate tiles must stay under it. An over-budget pair first trades
+ * supersampling down -- the raster is the largest single cost -- and is refused only when it
+ * cannot fit even unsupersampled. 8192 is the 8 GiB of the estimated single-pair peak, summed
+ * from the pair's actual allocations (the formula lives with #BKE_mesh_maps_bake_estimate_bytes).
+ */
+constexpr int MESH_MAP_BAKE_MEMORY_LIMIT_MB = 8192;
+
+/** The dilate passes that push a finished bake past its margin into the empty background: 64
+ * passes reach 64 texels past the margin, enough to hide mip-level seams, while each pass sweeps
+ * the whole atlas so the cost grows linearly with the count. Bounded by the `int8_t` storage of
+ * #MaterialMeshMapSettings::dilate_iterations and by the per-pass cost at the render resolution. */
+constexpr int MESH_MAP_BAKE_DILATE_MIN = 0;
+constexpr int MESH_MAP_BAKE_DILATE_MAX = 64;
+/* The RNA range and the bake clamp read this limit, and the RNA setter stores the value into the
+ * `int8_t` #MaterialMeshMapSettings::dilate_iterations: a bound past 127 would wrap there (256
+ * came back as 0) before either reader could clamp it. */
+static_assert(MESH_MAP_BAKE_DILATE_MAX <= 127);
 
 /** The Cycles samples a mesh map bake may render with: one sample at least, 4096 at most. */
 constexpr int MESH_MAP_BAKE_SAMPLES_MIN = 1;
@@ -312,6 +359,18 @@ inline constexpr uint32_t MESH_MAP_BAKE_TYPE_MASK_ALL = MESH_MAP_BAKE_TYPE_MASK_
  */
 inline constexpr uint32_t MESH_MAP_BAKE_TYPE_MASK_CPU = (1u << MA_MESH_MAP_ID_OBJECT) |
                                                         (1u << MA_MESH_MAP_ID_MATERIAL);
+
+/**
+ * Whether \a type bakes through the engine for \a ma's settings. The static classification of the
+ * table (#BKE_mesh_maps_type_info_get) answers without settings; the Curvature map switches to a
+ * CPU filter over the baked Tangent Normal atlas when
+ * #MaterialMeshMapSettings::curvature_method is #MA_MESH_MAP_CURVATURE_NORMAL_FILTER.
+ *
+ * Lives here rather than in #BKE_mesh_maps_bake.hh because the content hash and the bake prepare
+ * must classify the same way, and the data-model file that computes the hash must not pull in the
+ * bake contract.
+ */
+bool BKE_mesh_maps_pair_renders(const Material &ma, int8_t type);
 
 /** \} */
 

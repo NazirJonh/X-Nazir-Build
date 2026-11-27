@@ -1477,6 +1477,23 @@ enum eMaterialMeshMapType : int8_t {
   MA_MESH_MAP_TYPE_NUM = 11,
 };
 
+/** #MaterialMeshMapSettings::margin_type: how the bake expands into the uncovered texels. */
+enum eMaterialMeshMapMarginType : int8_t {
+  /** Sample the neighboring UV faces across seams (the v1 behavior). */
+  MA_MESH_MAP_MARGIN_ADJACENT_FACES = 0,
+  /** Extend the covered texels outward into the background. */
+  MA_MESH_MAP_MARGIN_EXTEND = 1,
+};
+
+#ifdef __cplusplus
+/* The values are passed straight to #RE_bake_margin as #eBakeMarginType (DNA_scene_types.h), which
+ * this header deliberately does not include -- the numbers are pinned here and the cross-check
+ * against #eBakeMarginType lives in `BKE_mesh_maps_types.hh`, which includes both. */
+static_assert(int(MA_MESH_MAP_MARGIN_ADJACENT_FACES) == 0 &&
+                  int(MA_MESH_MAP_MARGIN_EXTEND) == 1,
+              "eMaterialMeshMapMarginType must keep matching eBakeMarginType");
+#endif
+
 /** #MaterialMeshMapSettings::position_normalization: what the Position map's texels store. */
 enum eMaterialMeshMapPositionNormalization : int8_t {
   /** The raw world-space position, signed and unbounded. Also the way to share one range across
@@ -2349,7 +2366,9 @@ struct MaterialMeshMapSettings {
   int samples = 32;
   /** Whether the mesh map bake asks Cycles for denoising. */
   int8_t use_denoise = 0;
-  char _pad[3] = {};
+  /** The bake renders at resolution times this, then the commit boxes down into the atlas. */
+  int8_t supersampling = 1;
+  char _pad[2] = {};
   /** UV margin in pixels applied while merging a per-object bake into the atlas. */
   float margin = 16.0f;
   /** Ambient-occlusion ray distance; zero means "from the object bounds". */
@@ -2358,7 +2377,19 @@ struct MaterialMeshMapSettings {
   float edge_radius = 0.01f;
   /** CPU rays per texel, shared by the Thickness bake and the Bent Normal bake. */
   int8_t cpu_rays = 8;
-  char _pad2[3] = {};
+  /** #eMaterialMeshMapMarginType. */
+  int8_t margin_type = MA_MESH_MAP_MARGIN_ADJACENT_FACES;
+  /**
+   * Whether the AO node traces everything in the bake world instead of only the object being
+   * baked: the high-poly pieces of one source then occlude each other.
+   */
+  int8_t use_global_ao = 0;
+  /**
+   * Dilate passes after a merge: each pass fills an empty texel from its written neighbors.
+   * Zero keeps the plain margin; more passes push the map further into the background against
+   * mip-level seams.
+   */
+  int8_t dilate_iterations = 0;
   /**
    * #eMaterialMeshMapPositionNormalization. The box and sphere fit the low-poly mesh of each
    * object in the material's shared atlas separately; use the raw position when several objects

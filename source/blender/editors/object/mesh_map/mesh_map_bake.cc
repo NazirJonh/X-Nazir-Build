@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <utility>
 
 #include "BLI_array.hh"
 #include "BLI_index_range.hh"
@@ -130,6 +131,45 @@ void mesh_map_bake_populate_geometry_pixels(Mesh &mesh,
   RE_bake_pixels_populate(&mesh, pixels.data(), size_t(pixels.size()), &targets, uv_name);
 }
 
+/**
+ * One snapshot of the raster-side parameters of a pair, taken on the main thread from the
+ * material's settings before anything runs: the worker reads nothing but the world, so every
+ * control the worker, the margin pass and the commit need lives here rather than in the user's
+ * data. Plain data, no DNA/RNA.
+ *
+ * The atlas and the raster are named apart so the two texel sizes cannot be confused: the atlas
+ * is the resolution the map is stored at, the raster is what the engine renders or the CPU fills
+ * write into before the commit resolves it -- for a render pair the atlas times the
+ * supersampling, for a CPU pair the atlas itself.
+ */
+struct MeshMapBakeRaster {
+  /** The atlas side: the resolution the map's image is stored at. */
+  int atlas_resolution = 0;
+  /** The raster side: `atlas_resolution * supersampling` for a render pair, the atlas itself for
+   * a CPU pair. */
+  int raster_resolution = 0;
+  /** The margin in RASTER texels: the atlas margin times the supersampling, because the margin
+   * pass runs on the raster and the commit's box-downsample must land the atlas margin exactly. */
+  int margin_raster_pixels = 0;
+  /** The margin in ATLAS texels, the setting itself: the variant-A clear radius the commit grows
+   * is measured in atlas texels and has to match what the merge and the extend are about to
+   * rewrite. */
+  int margin_atlas_pixels = 0;
+  /** #eMaterialMeshMapMarginType; its values match the #eBakeMarginType the margin pass takes. */
+  int8_t margin_type = MA_MESH_MAP_MARGIN_ADJACENT_FACES;
+  /** The pair's #eMaterialMeshMapType. */
+  int8_t type = MA_MESH_MAP_AO;
+  /** Whether the tangent normal of this pair flips its green channel (the DirectX convention). */
+  bool directx_normal = false;
+  /** #eMaterialMeshMapPositionNormalization for a Position pair. */
+  int8_t position_normalization = MA_MESH_MAP_POSITION_BOX;
+  /** The raster is the atlas resolution times this; the commit boxes the result down. */
+  int supersampling = 1;
+  /** The UV layer the raster samples, copied out of the mesh (see
+   * #BKE_mesh_maps_bake_uv_resolve_or_fail). */
+  char uv_name[68] = "";
+};
+
 /** One (object, type) of a run: the private world plus its bookkeeping. */
 struct MeshMapBakeWorld {
   /* The private render world. Null for a CPU ID pair, which needs no engine: those bake from a
@@ -157,15 +197,14 @@ struct MeshMapBakeWorld {
   /** One tile's raster is #pixels_num texels; the buffers cover every tile in #images. */
   size_t pixels_num = 0;
 
-  /* The copied low-poly mesh the margin is derived from, and its UV layer. */
+  /* The copied low-poly mesh the margin is derived from. */
   Mesh *mesh = nullptr;
-  char uv_name[68] = "";
-  int8_t type = MA_MESH_MAP_AO;
-  int resolution = 0;
-  /** Whether the tangent normal of this pair flips its green channel (the DirectX convention). */
-  bool directx_normal = false;
-  /** #eMaterialMeshMapPositionNormalization for a Position pair. */
-  int8_t position_normalization = MA_MESH_MAP_POSITION_BOX;
+  /**
+   * The raster-side snapshot of this pair (see #MeshMapBakeRaster): the worker, the margin pass
+   * and the commit read nothing but this for the pair's type, texel sizes and UV layer, so none
+   * of them can drift back to the user's data.
+   */
+  MeshMapBakeRaster raster;
   char *margin_mask = nullptr;
 
   /* The high-poly source: for a CPU ID pair, the user's original objects (their names decide the
@@ -183,8 +222,10 @@ struct MeshMapBakeWorld {
   BakeHighPolyData *highpoly = nullptr;
   int highpoly_num = 0;
   BakePixel *pixels_high = nullptr;
-  /** Set by the worker when the engine bake failed, so the commit does not call zeros a bake. */
-  bool engine_failed = false;
+  /** Set by the worker when the pair's private pass failed (the engine bake, or the margin
+   * phase's buffer allocation), so the commit marks the pair ERROR instead of writing a broken
+   * result. */
+  bool worker_failed = false;
 };
 
 /** What the pair started from, so a cancel can put the status back. */
@@ -207,8 +248,12 @@ struct MeshMapBakeJob {
   ViewLayer *view_layer = nullptr;
   Material *material = nullptr;
   uint32_t material_session_uid = 0;
-  int resolution = 0;
-  int margin_pixels = 0;
+  /** The atlas side of the run, from the material's settings; the raster side lives in the
+   * world's #MeshMapBakeRaster snapshot. */
+  int atlas_resolution = 0;
+  /** The margin in atlas texels, from the material's settings; the raster-side margin is the
+   * world's #MeshMapBakeRaster snapshot. */
+  int margin_atlas_pixels = 0;
   ReportList *reports = nullptr;
 
   Vector<MeshMapBakePairState> pairs;
@@ -573,7 +618,9 @@ bool mesh_map_bake_fill_curvature_filter(MeshMapBakeWorld &world,
   int normal_width = 0;
   int normal_height = 0;
   BKE_image_get_size(normal_atlas, nullptr, &normal_width, &normal_height);
-  if (normal_width != world.resolution || normal_height != world.resolution) {
+  if (normal_width != world.raster.atlas_resolution ||
+      normal_height != world.raster.atlas_resolution)
+  {
     BKE_mesh_maps_bake_state_fail(state);
     BLI_strncpy(pair.error, "The Tangent Normal atlas must be at the same resolution",
                 sizeof(pair.error));
@@ -617,7 +664,9 @@ bool mesh_map_bake_fill_curvature_filter(MeshMapBakeWorld &world,
     /* The image's own size is checked once above, but a tiled image may hold a tile at another
      * size; the filter writes a `resolution` block per tile, so a smaller tile must fail rather
      * than be overrun. */
-    if (normal_buffer->x != world.resolution || normal_buffer->y != world.resolution) {
+    if (normal_buffer->x != world.raster.atlas_resolution ||
+        normal_buffer->y != world.raster.atlas_resolution)
+    {
       BKE_mesh_maps_bake_state_fail(state);
       BLI_snprintf(pair.error,
                    sizeof(pair.error),
@@ -625,14 +674,14 @@ bool mesh_map_bake_fill_curvature_filter(MeshMapBakeWorld &world,
                    image.tile_number,
                    normal_buffer->x,
                    normal_buffer->y,
-                   world.resolution,
-                   world.resolution);
+                   world.raster.atlas_resolution,
+                   world.raster.atlas_resolution);
       pair.failed = true;
       return false;
     }
     BKE_mesh_maps_bake_fill_curvature_from_normal(world.pixels + image.offset,
                                                   world.pixels_num,
-                                                  world.resolution,
+                                                  world.raster.atlas_resolution,
                                                   Span<float>(normal_buffer->float_data(),
                                                               size_t(world.pixels_num) * 4),
                                                   radius,
@@ -883,16 +932,130 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
     pair.failed = true;
     return false;
   }
-  STRNCPY(job.world.uv_name, uv_name);
-  job.world.type = pair.type;
+  STRNCPY(job.world.raster.uv_name, uv_name);
+  job.world.raster.type = pair.type;
   BKE_mesh_maps_object_hash(*ob_eval, *ma, pair.type, pair.start_hash);
   const float4x4 object_matrix = ob_eval->object_to_world();
 
-  const bool is_render = BKE_mesh_maps_bake_pair_renders(*ma, pair.type);
-  /* A Curvature pair on the Normal Filter runs on the CPU over the already-baked Tangent Normal
-   * atlas: it needs neither a high-poly source nor a cage, and copying/validating them would only
-   * add a failure path (a broken source or a mismatched cage) to a pair that reads neither. */
+  const bool is_render = BKE_mesh_maps_pair_renders(*ma, pair.type);
+  /* A Curvature pair on the Normal Filter runs on the CPU over the already-baked Tangent
+   * Normal atlas: it needs neither a high-poly source nor a cage, and copying/validating them
+   * would only add a failure path (a broken source or a mismatched cage) to a pair that reads
+   * neither. */
   const bool is_curvature_filter = !is_render && pair.type == MA_MESH_MAP_CURVATURE;
+
+  /* The UDIM tiles this pair can cover, from the UV bounds of the faces that use the material,
+   * before anything is allocated: the memory budget below needs the candidate count, and a tile
+   * only another material's faces touch must not be paid for. Read off the evaluated mesh (the
+   * copy below is its localize twin, so the UVs agree), so the pass allocates nothing but the
+   * tile list itself. */
+  Vector<int> tile_numbers;
+  bool uv_outside_udim = false;
+  if (Mesh *mesh_eval = mesh_map_bake_object_mesh(*ob_eval)) {
+    const blender::bke::AttributeAccessor attributes = mesh_eval->attributes();
+    const std::string name(job.world.raster.uv_name);
+    const blender::bke::AttributeReader<float2> uv_reader = attributes.lookup<float2>(
+        name, blender::bke::AttrDomain::Corner);
+    if (uv_reader) {
+      const VArraySpan<float2> uv_map(*uv_reader);
+      const VArraySpan<int> material_indices = *attributes.lookup<int>(
+          "material_index", blender::bke::AttrDomain::Face);
+      if (!uv_map.is_empty()) {
+        const OffsetIndices<int> faces = mesh_eval->faces();
+        for (const int face : faces.index_range()) {
+          const IndexRange corners = faces[face];
+          if (corners.is_empty()) {
+            continue;
+          }
+          /* The same membership rule #BKE_mesh_maps_bake_restrict_to_material applies to the
+           * rasterized texels: a face counts when its slot resolves to this material. */
+          const int slot = material_indices.is_empty() ? 0 : material_indices[face];
+          if (BKE_object_material_get(ob, short(slot + 1)) != ma) {
+            continue;
+          }
+          float2 uv_min = uv_map[corners.first()];
+          float2 uv_max = uv_min;
+          for (const int corner : corners.drop_front(1)) {
+            uv_min = math::min(uv_min, uv_map[corner]);
+            uv_max = math::max(uv_max, uv_map[corner]);
+          }
+          BKE_paint_layers_tiles_from_uv_bounds(uv_min, uv_max, uv_outside_udim, tile_numbers);
+        }
+      }
+    }
+  }
+  if (tile_numbers.is_empty()) {
+    /* No UV layer to read, none of it names a tile, or no face uses the material: the base square
+     * is the only candidate, as when the bake was single-tile. */
+    tile_numbers.append(PAINT_TILE_NUMBER_BASE);
+  }
+  std::sort(tile_numbers.begin(), tile_numbers.end());
+  if (uv_outside_udim && job.reports != nullptr) {
+    BKE_reportf(job.reports,
+                RPT_WARNING,
+                "UV map '%s' of '%s' has corners outside the UDIM range (U and V 0 to 10), "
+                "they are not baked",
+                job.world.raster.uv_name,
+                ob->id.name + 2);
+  }
+
+  /* The engine rasterizes supersampled and the commit boxes down into the atlas; the CPU paths
+   * work texel-to-texel with their atlases, so they stay at the atlas resolution. */
+  const int requested_supersampling = is_render ?
+                                          std::clamp(int(ma->mesh_map_settings.supersampling),
+                                                     MESH_MAP_BAKE_SUPERSAMPLING_MIN,
+                                                     MESH_MAP_BAKE_SUPERSAMPLING_MAX) :
+                                          1;
+  /* The memory budget of the pair (see #BKE_mesh_maps_bake_estimate_bytes), checked before the
+   * first allocation and for render and CPU pairs alike. An over-budget pair first trades
+   * supersampling down -- the raster is the largest single cost -- and is refused only when even
+   * the unsupersampled pair cannot fit. The raster limit rides along as the coarse raster-side
+   * guard, clamping the same way. */
+  const size_t candidate_tiles = size_t(tile_numbers.size());
+  const size_t budget_bytes = size_t(MESH_MAP_BAKE_MEMORY_LIMIT_MB) * 1024 * 1024;
+  int supersampling = requested_supersampling;
+  while (supersampling > 1) {
+    const bool fits = job.atlas_resolution * supersampling <=
+                          MESH_MAP_BAKE_RENDER_RESOLUTION_LIMIT &&
+                      BKE_mesh_maps_bake_estimate_bytes(
+                          job.atlas_resolution, supersampling, candidate_tiles) <= budget_bytes;
+    if (fits) {
+      break;
+    }
+    supersampling--;
+  }
+  const int render_resolution = job.atlas_resolution * supersampling;
+  const size_t estimate_bytes = BKE_mesh_maps_bake_estimate_bytes(
+      job.atlas_resolution, supersampling, candidate_tiles);
+  if (render_resolution > MESH_MAP_BAKE_RENDER_RESOLUTION_LIMIT ||
+      estimate_bytes > budget_bytes)
+  {
+    /* Even the unsupersampled pair is over: refusing is the only honest answer left. */
+    BKE_mesh_maps_bake_state_fail(*state);
+    BLI_snprintf(pair.error,
+                 sizeof(pair.error),
+                 "The bake needs about %d MB (%d UDIM tile(s) at %dx%d), over the %d MB memory "
+                 "budget; lower the atlas resolution or the tiles the UVs cover",
+                 int(estimate_bytes / (1024 * 1024)),
+                 int(candidate_tiles),
+                 render_resolution,
+                 render_resolution,
+                 MESH_MAP_BAKE_MEMORY_LIMIT_MB);
+    pair.failed = true;
+    return false;
+  }
+  if (supersampling < requested_supersampling && job.reports != nullptr) {
+    /* Both bounds clamp the factor down: name the one that actually refused the requested value. */
+    const bool over_budget = BKE_mesh_maps_bake_estimate_bytes(
+                                 job.atlas_resolution, requested_supersampling, candidate_tiles) >
+                             budget_bytes;
+    BKE_reportf(job.reports,
+                RPT_INFO,
+                "Supersampling reduced from %d to %d (%s)",
+                requested_supersampling,
+                supersampling,
+                over_budget ? "memory budget" : "raster limit");
+  }
 
   /* The high-poly source of this material, if any. For a CPU pair its meshes are copied locally so
    * the ray pass can build its BVH trees off the user's data; for a render pair they are copied
@@ -918,8 +1081,20 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
   }
   job.world.mesh = mesh_copy;
   job.world.low_matrix = object_matrix;
-  job.world.directx_normal = ma->mesh_map_settings.use_directx_normal != 0;
-  job.world.position_normalization = ma->mesh_map_settings.position_normalization;
+  /* The per-map controls this pair bakes with: the shared encodings and the two texel sizes, so
+   * the worker and the commit read nothing but the world. The raster margin scales with the
+   * supersampling so the commit's box-downsample lands the atlas margin exactly, while the atlas
+   * margin stays itself: the variant-A clear radius grows in atlas texels and has to match what
+   * the merge and the extend are about to rewrite. */
+  MeshMapBakeRaster &raster = job.world.raster;
+  raster.atlas_resolution = job.atlas_resolution;
+  raster.supersampling = supersampling;
+  raster.raster_resolution = render_resolution;
+  raster.margin_atlas_pixels = job.margin_atlas_pixels;
+  raster.margin_raster_pixels = job.margin_atlas_pixels * supersampling;
+  raster.margin_type = ma->mesh_map_settings.margin_type;
+  raster.directx_normal = ma->mesh_map_settings.use_directx_normal != 0;
+  raster.position_normalization = ma->mesh_map_settings.position_normalization;
 
   if (is_render) {
     /* The private render world: a fresh Main holding the mesh copy, a throw-away scene with the
@@ -930,8 +1105,11 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
     job.world.temp_scene = BKE_scene_add(job.world.temp_main, "Mesh Map Bake");
     job.world.temp_view_layer = static_cast<ViewLayer *>(job.world.temp_scene->view_layers.first);
     STRNCPY(job.world.temp_scene->r.engine, RE_engine_id_CYCLES);
-    job.world.temp_scene->r.xsch = job.resolution;
-    job.world.temp_scene->r.ysch = job.resolution;
+    /* The bake raster itself comes from #BakeImage (at the raster resolution); the scene size only
+     * keeps the temp render consistent with it, and the dummy percent scale and frame give the
+     * throw-away scene valid nonzero `r.size`/`r.cfra` so the engine setup never sees zeros. */
+    job.world.temp_scene->r.xsch = render_resolution;
+    job.world.temp_scene->r.ysch = render_resolution;
     job.world.temp_scene->r.size = 100;
     job.world.temp_scene->r.cfra = 1;
     mesh_map_bake_apply_cycles_settings(*job.world.temp_scene, ma->mesh_map_settings);
@@ -1007,7 +1185,8 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
     }
   }
 
-  Image *atlas = BKE_mesh_maps_bake_atlas_ensure(*job.bmain, *ma, pair.type, job.resolution);
+  Image *atlas = BKE_mesh_maps_bake_atlas_ensure(
+      *job.bmain, *ma, pair.type, job.atlas_resolution);
   if (atlas == nullptr) {
     BKE_mesh_maps_bake_state_fail(*state);
     BLI_strncpy(pair.error, "Could not create the mesh map atlas image", sizeof(pair.error));
@@ -1016,66 +1195,27 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
   }
   job.world.atlas = atlas;
 
-  const size_t pixels_num = size_t(job.resolution) * size_t(job.resolution);
+  const size_t pixels_num = size_t(render_resolution) * size_t(render_resolution);
   job.world.pixels_num = pixels_num;
-  job.world.resolution = job.resolution;
 
   /* The atlas is a tiled image: the bake is one raster per tile the object's UVs cover. The
-   * candidates come from the faces' UV bounds (half-open at the top, so the standard 0..1 layout
-   * covers the base tile alone), and the raster prunes them once it is populated -- a bound can
-   * name a tile no texel of the material lands in, and the base tile the UVs never touch earns
-   * nothing either. The atlas tiles of the survivors are added after the prune, so nothing is
-   * allocated for a tile the bake never writes; a foreign object's tiles are not this bake's, and
-   * its coverage is weighed per tile in the commit. */
-  Vector<int> tile_numbers;
-  bool uv_outside_udim = false;
-  {
-    const blender::bke::AttributeAccessor attributes = mesh_copy->attributes();
-    const std::string name(job.world.uv_name);
-    const blender::bke::AttributeReader<float2> uv_reader = attributes.lookup<float2>(
-        name, blender::bke::AttrDomain::Corner);
-    if (uv_reader) {
-      const VArraySpan<float2> uv_map(*uv_reader);
-      if (!uv_map.is_empty()) {
-        const OffsetIndices<int> faces = mesh_copy->faces();
-        for (const int face : faces.index_range()) {
-          const IndexRange corners = faces[face];
-          if (corners.is_empty()) {
-            continue;
-          }
-          float2 uv_min = uv_map[corners.first()];
-          float2 uv_max = uv_min;
-          for (const int corner : corners.drop_front(1)) {
-            uv_min = math::min(uv_min, uv_map[corner]);
-            uv_max = math::max(uv_max, uv_map[corner]);
-          }
-          BKE_paint_layers_tiles_from_uv_bounds(uv_min, uv_max, uv_outside_udim, tile_numbers);
-        }
-      }
-    }
-  }
-  if (tile_numbers.is_empty()) {
-    /* No UV layer to read, or none of it names a tile: the base square is the only candidate, as
-     * when the bake was single-tile. */
-    tile_numbers.append(PAINT_TILE_NUMBER_BASE);
-  }
-  std::sort(tile_numbers.begin(), tile_numbers.end());
-  if (uv_outside_udim && job.reports != nullptr) {
-    BKE_reportf(job.reports,
-                RPT_WARNING,
-                "UV map '%s' of '%s' has corners outside the UDIM range (U and V 0 to 10), "
-                "they are not baked",
-                job.world.uv_name,
-                ob->id.name + 2);
-  }
+   * candidates came from the material's faces' UV bounds before the budget check and the
+   * allocations (half-open at the top, so the standard 0..1 layout covers the base tile alone),
+   * and the raster still prunes them once it is populated -- a face bounding box can name a tile
+   * no texel of the material lands in, and the base tile the UVs never touch earns nothing
+   * either. The atlas tiles of the survivors are added after the prune, so nothing is allocated
+   * for a tile the bake never writes; a foreign object's tiles are not this bake's, and its
+   * coverage is weighed per tile in the commit. */
   size_t pixels_total = pixels_num * size_t(tile_numbers.size());
   job.world.images.reserve(tile_numbers.size());
   for (const int i : tile_numbers.index_range()) {
     BakeImage image = {};
     image.image = atlas;
     image.tile_number = tile_numbers[i];
-    image.width = job.resolution;
-    image.height = job.resolution;
+    /* The bake raster is the raster side, on purpose: the engine pass and the margin fill run at
+     * this size, and the commit resolves it down into the atlas. */
+    image.width = render_resolution;
+    image.height = render_resolution;
     image.offset = size_t(i) * pixels_num;
     const float2 tile_origin = BKE_image_get_tile_uv_origin(tile_numbers[i]);
     image.uv_offset[0] = tile_origin.x;
@@ -1095,8 +1235,11 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
   job.world.pixels = MEM_new_array_uninitialized<BakePixel>(pixels_total, __func__);
   job.world.result = job.world.targets.result;
 
-  RE_bake_pixels_populate(
-      mesh_copy, job.world.pixels, pixels_total, &job.world.targets, StringRef(job.world.uv_name));
+  RE_bake_pixels_populate(mesh_copy,
+                          job.world.pixels,
+                          pixels_total,
+                          &job.world.targets,
+                          StringRef(job.world.raster.uv_name));
   /* Warm the lazy triangulation caches on the main thread: the worker's rasterize there only reads
    * them, and computing them off-thread would race the main thread's own mesh access. */
   (void)mesh_copy->corner_tris();
@@ -1140,7 +1283,7 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
   }
   for (const int tile_number : tile_numbers) {
     if (!BKE_paint_layers_map_coverage_tile_ensure(
-            *atlas, tile_number, job.resolution, job.resolution))
+            *atlas, tile_number, job.atlas_resolution, job.atlas_resolution))
     {
       BKE_mesh_maps_bake_state_fail(*state);
       BLI_snprintf(pair.error,
@@ -1169,76 +1312,61 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
 
 /**
  * Expand this object's result into its margin inside the private buffer, and record the pixel
- * membership in `world.margin_mask`: #FILTER_MASK_USED for a covered texel, #FILTER_MASK_MARGIN for
- * a filled one, zero elsewhere.
+ * membership in `world.margin_mask`: #FILTER_MASK_USED for a covered texel, #FILTER_MASK_MARGIN
+ * for a filled one, zero elsewhere.
  *
- * The adjacent-faces margin of the existing bake is mirrored here, not the isotropic extend: it
- * follows the UV islands and so is the right default for a shared atlas. It does not report the
- * filled texels back through the caller's mask (it copies the mask internally), so a second pass
- * over a one-valued coverage indicator records them; the geometry and coverage are identical, so
- * the membership is exact.
+ * The pass runs at the raster resolution, so the margin it grows is the raster-side one
+ * (#MeshMapBakeRaster.margin_raster_pixels, the atlas margin times the supersampling); the
+ * commit's box-downsample then lands the atlas margin exactly.
+ *
+ * The margin kind is the pair's (#eMaterialMeshMapMarginType): the adjacent-faces fill follows the
+ * UV islands and so is the right default for a shared atlas, while the extend fill reaches outward
+ * into the background like the full bake's isotropic margin. Both fills report their membership
+ * through the mask themselves -- #IMB_filter_extend marks every texel it fills, and the
+ * adjacent-faces fill keeps the covered texels #FILTER_MASK_USED -- so the commit reads which
+ * texels the margin wrote straight from the mask, with no second pass over the private buffer.
+ *
+ * Returns true when the pass ran or legitimately had nothing to do (no margin set, no prepared
+ * world, or the pass already ran); returns false when the private float buffer cannot be
+ * allocated, which the caller reports as a failed pair.
  */
-void mesh_map_bake_apply_margin(MeshMapBakeWorld &world, const int margin)
+bool mesh_map_bake_apply_margin(MeshMapBakeWorld &world)
 {
+  const int margin = world.raster.margin_raster_pixels;
   if (margin <= 0 || world.mesh == nullptr || world.result == nullptr ||
       world.margin_mask != nullptr)
   {
-    return;
+    return true;
   }
   const size_t pixels_num = world.pixels_num;
-  const int resolution = world.resolution;
-  const StringRef uv_name(world.uv_name);
+  const int resolution = world.raster.raster_resolution;
+  const StringRef uv_name(world.raster.uv_name);
   const int tiles_num = world.tiles_num;
+  const eBakeMarginType margin_type = eBakeMarginType(world.raster.margin_type);
 
-  world.margin_mask = MEM_new_array_zeroed<char>(pixels_num * size_t(tiles_num), __func__);
   ImBuf *ibuf = IMB_allocImBuf(resolution, resolution, ImBufFlags::FloatData);
-  if (ibuf == nullptr) {
-    return;
+  if (ibuf == nullptr || ibuf->float_data_for_write() == nullptr) {
+    /* Out of memory: a result without its margin band would read as seams, so the caller refuses
+     * the pair instead of committing it. The mask stays null, so no half-filled state survives. */
+    if (ibuf != nullptr) {
+      IMB_freeImBuf(ibuf);
+    }
+    return false;
   }
-  ImBuf *indicator = IMB_allocImBuf(resolution, resolution, ImBufFlags::FloatData);
+  float *pixels = ibuf->float_data_for_write();
+  world.margin_mask = MEM_new_array_zeroed<char>(pixels_num * size_t(tiles_num), __func__);
   for (const int tile : IndexRange(tiles_num)) {
     const BakeImage &image = world.images[tile];
     char *mask = world.margin_mask + size_t(tile) * pixels_num;
     float *result_tile = world.result + size_t(tile) * pixels_num * 4;
     RE_bake_mask_fill(world.pixels + image.offset, pixels_num, mask);
 
-    if (ibuf->float_data_for_write() != nullptr) {
-      float *pixels = ibuf->float_data_for_write();
-      memcpy(pixels, result_tile, sizeof(float) * pixels_num * 4);
-      RE_bake_margin(
-          ibuf, mask, margin, R_BAKE_ADJACENT_FACES, world.mesh, uv_name, image.uv_offset);
-      memcpy(result_tile, pixels, sizeof(float) * pixels_num * 4);
-    }
-    if (indicator == nullptr || indicator->float_data_for_write() == nullptr) {
-      continue;
-    }
-    float *values = indicator->float_data_for_write();
-    for (size_t i = 0; i < pixels_num; i++) {
-      const float value = mask[i] == FILTER_MASK_USED ? 1.0f : 0.0f;
-      values[i * 4 + 0] = value;
-      values[i * 4 + 1] = value;
-      values[i * 4 + 2] = value;
-      values[i * 4 + 3] = value;
-    }
-    char *indicator_mask = MEM_dupalloc(mask);
-    RE_bake_margin(indicator,
-                   indicator_mask,
-                   margin,
-                   R_BAKE_ADJACENT_FACES,
-                   world.mesh,
-                   uv_name,
-                   image.uv_offset);
-    for (size_t i = 0; i < pixels_num; i++) {
-      if (mask[i] != FILTER_MASK_USED && values[i * 4] > 0.5f) {
-        mask[i] = FILTER_MASK_MARGIN;
-      }
-    }
-    MEM_delete(indicator_mask);
+    memcpy(pixels, result_tile, sizeof(float) * pixels_num * 4);
+    RE_bake_margin(ibuf, mask, margin, margin_type, world.mesh, uv_name, image.uv_offset);
+    memcpy(result_tile, pixels, sizeof(float) * pixels_num * 4);
   }
   IMB_freeImBuf(ibuf);
-  if (indicator != nullptr) {
-    IMB_freeImBuf(indicator);
-  }
+  return true;
 }
 
 /**
@@ -1249,19 +1377,22 @@ void mesh_map_bake_apply_margin(MeshMapBakeWorld &world, const int margin)
  * the prepare. Either way the margin expansion that follows touches nothing but the private
  * buffers.
  */
-void mesh_map_bake_worker_run(MeshMapBakeJob &job, MeshMapBakeWorld &world)
+void mesh_map_bake_worker_run(MeshMapBakeWorld &world)
 {
-  if (BKE_mesh_maps_bake_type_renders(world.type)) {
+  if (BKE_mesh_maps_bake_type_renders(world.raster.type)) {
     if (world.render == nullptr) {
       /* A rendered type normally holds a render world from the prepare. The one legitimate way to
        * reach here without one is the Normal Filter curvature pair: its prepare succeeded and
        * already filled the result on the CPU, so the margin below still applies to it, exactly
        * as to the ID fills, before the return keeps the result for the commit. The guard only
        * catches a truly inconsistent world beyond that. */
-      mesh_map_bake_apply_margin(world, job.margin_pixels);
+      if (!mesh_map_bake_apply_margin(world)) {
+        world.worker_failed = true;
+        return;
+      }
       return;
     }
-    const eScenePassType pass_type = BKE_mesh_maps_bake_pass_for_type(world.type);
+    const eScenePassType pass_type = BKE_mesh_maps_bake_pass_for_type(world.raster.type);
     bool ok = true;
     if (world.highpoly_num > 0) {
       /* Selected-to-active: each source object bakes the texels that were cast onto it, through
@@ -1291,7 +1422,7 @@ void mesh_map_bake_worker_run(MeshMapBakeJob &job, MeshMapBakeWorld &world)
     }
     if (!ok) {
       /* The commit sees the flag and marks the pair ERROR instead of writing the empty result. */
-      world.engine_failed = true;
+      world.worker_failed = true;
       return;
     }
     if (pass_type == SCE_PASS_NORMAL) {
@@ -1299,7 +1430,7 @@ void mesh_map_bake_worker_run(MeshMapBakeJob &job, MeshMapBakeWorld &world)
        * whole result is walked: every tile's pixels are one block of the same buffers. */
       const eBakeNormalSwizzle swizzle[3] = {R_BAKE_POSX, R_BAKE_POSY, R_BAKE_POSZ};
       eBakeSpace space = R_BAKE_SPACE_WORLD;
-      BKE_mesh_maps_bake_normal_space_for_type(world.type, space);
+      BKE_mesh_maps_bake_normal_space_for_type(world.raster.type, space);
       const size_t pixels_total = world.pixels_num * size_t(world.tiles_num);
       if (space == R_BAKE_SPACE_OBJECT) {
         RE_bake_normal_world_to_object(
@@ -1316,7 +1447,7 @@ void mesh_map_bake_worker_run(MeshMapBakeJob &job, MeshMapBakeWorld &world)
                                         world.mesh,
                                         swizzle,
                                         world.low_matrix.ptr());
-        if (world.directx_normal) {
+        if (world.raster.directx_normal) {
           /* DirectX flips the green channel of an encoded tangent map. The uncovered texels stay
            * zero and the commit never writes them, so flipping everything is safe. */
           const size_t floats_total = pixels_total * 4;
@@ -1329,8 +1460,8 @@ void mesh_map_bake_worker_run(MeshMapBakeJob &job, MeshMapBakeWorld &world)
         RE_bake_normal_world_to_world(world.pixels, pixels_total, 4, world.result, swizzle);
       }
     }
-    else if (world.type == MA_MESH_MAP_POSITION &&
-             world.position_normalization != MA_MESH_MAP_POSITION_RAW)
+    else if (world.raster.type == MA_MESH_MAP_POSITION &&
+             world.raster.position_normalization != MA_MESH_MAP_POSITION_RAW)
     {
       /* The emission pass delivered the raw world-space position; remap it into the object's
        * bounds so the map stays a readable gradient. Only the covered and margin texels survive
@@ -1355,11 +1486,148 @@ void mesh_map_bake_worker_run(MeshMapBakeJob &job, MeshMapBakeWorld &world)
                                               pixels_total,
                                               bb_min,
                                               bb_max,
-                                              world.position_normalization);
+                                              world.raster.position_normalization);
       }
     }
   }
-  mesh_map_bake_apply_margin(world, job.margin_pixels);
+  if (!mesh_map_bake_apply_margin(world)) {
+    world.worker_failed = true;
+  }
+}
+
+/**
+ * The atlas-side view of a finished pair: the resolved result and the two masks the merge reads,
+ * all at the atlas resolution, one `atlas_total` block each (the result times 4). The storage
+ * members keep the buffers alive when the spans are not aliases.
+ */
+struct MeshMapBakeCommitView {
+  /** The resolved buffers; empty when the spans alias the world's raster or masks instead. */
+  Array<float> result_storage;
+  Array<uint8_t> own_storage;
+  Array<uint8_t> margin_storage;
+  /** The atlas-side buffers the merge reads. */
+  Span<float> result;
+  Span<uint8_t> own;
+  Span<uint8_t> margin;
+};
+
+/**
+ * Build the atlas-side view of the finished raster. A supersampled raster is resolved through
+ * #BKE_mesh_maps_bake_resolve_raster into freshly allocated buffers the view owns; a factor of 1
+ * means the raster is the atlas, so the view aliases the world's raster blocks and the own and
+ * margin masks are extracted from the pixels and the margin mask without a downsample.
+ */
+MeshMapBakeCommitView mesh_map_bake_commit_resolve(MeshMapBakeWorld &world, const int8_t type)
+{
+  const int factor = world.raster.supersampling;
+  const int atlas_resolution = world.raster.atlas_resolution;
+  const int tiles_num = world.tiles_num;
+  const int64_t raster_texels_per_tile = int64_t(world.pixels_num);
+  const int64_t atlas_texels_per_tile = int64_t(atlas_resolution) * int64_t(atlas_resolution);
+  const int64_t raster_total = raster_texels_per_tile * tiles_num;
+  const int64_t atlas_total = atlas_texels_per_tile * tiles_num;
+
+  /* The merge reads the raster's own coverage and its margin fill as 0/1 masks: the pixels give
+   * the own side, the margin mask the #FILTER_MASK_MARGIN texels the margin pass wrote. */
+  Array<uint8_t> raster_own(raster_total, 0);
+  BKE_mesh_maps_bake_coverage_from_pixels(world.pixels, size_t(raster_total), raster_own);
+  Array<uint8_t> raster_margin(raster_total, 0);
+  if (world.margin_mask != nullptr) {
+    for (int64_t i = 0; i < raster_total; i++) {
+      raster_margin[i] = world.margin_mask[i] == FILTER_MASK_MARGIN ? 1 : 0;
+    }
+  }
+
+  MeshMapBakeCommitView view;
+  if (factor > 1) {
+    view.result_storage = Array<float>(atlas_total * 4);
+    view.own_storage = Array<uint8_t>(atlas_total, 0);
+    view.margin_storage = Array<uint8_t>(atlas_total, 0);
+    BKE_mesh_maps_bake_resolve_raster(Span<float>(world.result, raster_total * 4),
+                                      raster_own.as_span(),
+                                      raster_margin.as_span(),
+                                      type,
+                                      world.raster.raster_resolution,
+                                      atlas_resolution,
+                                      tiles_num,
+                                      MutableSpan<float>(view.result_storage.data(),
+                                                         atlas_total * 4),
+                                      MutableSpan<uint8_t>(view.own_storage.data(), atlas_total),
+                                      MutableSpan<uint8_t>(view.margin_storage.data(),
+                                                           atlas_total));
+    view.result = view.result_storage.as_span();
+    view.own = view.own_storage.as_span();
+    view.margin = view.margin_storage.as_span();
+    return view;
+  }
+  /* The raster is the atlas: the masks and the result merge as they are, with no downsample and
+   * no normal renormalization, since nothing was averaged that could shrink a normal. */
+  view.result = Span<float>(world.result, atlas_total * 4);
+  view.own = raster_own.as_span();
+  view.margin = raster_margin.as_span();
+  /* The masks alias the local arrays, so their storage moves into the view to outlive it. */
+  view.own_storage = std::move(raster_own);
+  view.margin_storage = std::move(raster_margin);
+  return view;
+}
+
+/**
+ * Merge the resolved pair into \a atlas tile by tile: each tile runs the variant-A clear of this
+ * object's stale margin ring, the guarded merge and the extend passes through
+ * #BKE_mesh_maps_bake_extend_passes, then is marked dirty for the image system. A tile without a
+ * float buffer holds nothing to merge into and is skipped.
+ */
+void mesh_map_bake_commit_tiles(Image &atlas,
+                                const MeshMapBakeWorld &world,
+                                const int8_t type,
+                                const int atlas_resolution,
+                                const int margin_atlas_pixels,
+                                const int dilate_iterations,
+                                const Span<uint8_t> own_coverage,
+                                const Span<uint8_t> own_margin,
+                                const Span<uint8_t> foreign_coverage,
+                                const Span<float> result_atlas)
+{
+  const int64_t atlas_texels_per_tile = int64_t(atlas_resolution) * int64_t(atlas_resolution);
+  for (const int tile : IndexRange(world.tiles_num)) {
+    ImageUser iuser;
+    BKE_imageuser_default(&iuser);
+    iuser.tile = world.images[tile].tile_number;
+    ImageTileBufferScope buffer(atlas, &iuser);
+    if (buffer == nullptr || buffer->float_data() == nullptr) {
+      continue;
+    }
+    const int64_t tile_start = int64_t(tile) * atlas_texels_per_tile;
+    const Span<uint8_t> own_tile = own_coverage.slice(tile_start, atlas_texels_per_tile);
+    const Span<uint8_t> own_margin_tile = own_margin.slice(tile_start, atlas_texels_per_tile);
+    const Span<uint8_t> foreign_tile = foreign_coverage.slice(tile_start, atlas_texels_per_tile);
+    /* One BKE call per tile: the variant-A clear of this object's stale margin ring, the merge
+     * that never lands on another object's islands, and the extend passes that push the map past
+     * its margin -- none of them over a foreign texel. The margin here is the atlas-side one
+     * (#MeshMapBakeRaster.margin_atlas_pixels): #MeshMapBakeRaster.margin_raster_pixels is what
+     * the raster-resolution margin fill ran with, while the clear region grows in atlas texels
+     * and has to match what the merge and the extend are about to rewrite. */
+    BKE_mesh_maps_bake_extend_passes(type,
+                                     own_tile,
+                                     own_margin_tile,
+                                     foreign_tile,
+                                     4,
+                                     result_atlas.data() + tile_start * 4,
+                                     margin_atlas_pixels,
+                                     dilate_iterations,
+                                     *buffer);
+    buffer->userflags |= IB_DISPLAY_BUFFER_INVALID;
+    BKE_image_mark_dirty(&atlas, buffer.get());
+  }
+}
+
+/** Publish the finished atlas to the image system: full-update invalidation, a GPU refresh and a
+ * pack, so the viewport and the file see the merged tiles. */
+void mesh_map_bake_commit_mark_updated(Image &atlas)
+{
+  BKE_image_partial_update_mark_full_update(&atlas);
+  BKE_image_free_gputextures(&atlas);
+  BKE_image_memorypack(&atlas);
 }
 
 /** Write the prepared world's pixels into the live atlas and record the state. Main thread only. */
@@ -1392,10 +1660,10 @@ void mesh_map_bake_commit_current(MeshMapBakeJob &job, MeshMapBakePairState &pai
   if (state == nullptr) {
     return;
   }
-  if (world.engine_failed) {
+  if (world.worker_failed) {
     BKE_mesh_maps_bake_state_fail(*state);
     BLI_strncpy(pair.error,
-                "The bake engine failed; the atlas was left untouched",
+                "The bake pass failed; the atlas was left untouched",
                 sizeof(pair.error));
     pair.failed = true;
     return;
@@ -1413,7 +1681,8 @@ void mesh_map_bake_commit_current(MeshMapBakeJob &job, MeshMapBakePairState &pai
     return;
   }
 
-  Image *atlas = BKE_mesh_maps_bake_atlas_ensure(*job.bmain, *ma, pair.type, job.resolution);
+  Image *atlas = BKE_mesh_maps_bake_atlas_ensure(
+      *job.bmain, *ma, pair.type, world.raster.atlas_resolution);
   if (atlas == nullptr) {
     BKE_mesh_maps_bake_state_fail(*state);
     BLI_strncpy(pair.error,
@@ -1433,70 +1702,58 @@ void mesh_map_bake_commit_current(MeshMapBakeJob &job, MeshMapBakePairState &pai
     WM_main_add_notifier(NC_MATERIAL | ND_SHADING, ma);
     return;
   }
+  /* A supersampled raster boxes down into the atlas resolution first, so the merge, the foreign
+   * coverage and the dilation all work at one texel size; a factor of 1 resolves to nothing and
+   * the view aliases the raster blocks. */
+  const MeshMapBakeCommitView view = mesh_map_bake_commit_resolve(world, pair.type);
+  const int tiles_num = world.tiles_num;
+  const int64_t atlas_total = int64_t(world.raster.atlas_resolution) *
+                              int64_t(world.raster.atlas_resolution) * tiles_num;
+
   /* The atlas is shared: the object's own pixels always land, but its margin must not paint over
    * an island another object using the material already baked. Everything below is per tile: the
    * raster covers every tile in the world, and each tile weighs its own islands. */
-  const size_t pixels_num = world.pixels_num;
-  const int tiles_num = world.tiles_num;
-  const size_t pixels_total = pixels_num * size_t(tiles_num);
-  Array<uint8_t> own_coverage(pixels_total, 0);
-  BKE_mesh_maps_bake_coverage_from_pixels(world.pixels, pixels_total, own_coverage);
-  Array<uint8_t> own_margin(pixels_total, 0);
-  if (world.margin_mask != nullptr) {
-    for (size_t i = 0; i < pixels_total; i++) {
-      own_margin[i] = world.margin_mask[i] == FILTER_MASK_MARGIN ? 1 : 0;
-    }
-  }
-  Array<uint8_t> foreign_coverage(pixels_total, 0);
+  Array<uint8_t> foreign_coverage(atlas_total, 0);
   char overlap_name[MAX_ID_NAME] = "";
   Vector<int> tile_numbers;
   tile_numbers.reserve(size_t(tiles_num));
   for (const int i : IndexRange(tiles_num)) {
     tile_numbers.append(world.images[i].tile_number);
   }
-  BKE_mesh_maps_bake_foreign_coverage(
-      *job.bmain,
-      *job.scene,
-      *job.view_layer,
-      *ob,
-      *ma,
-      job.resolution,
-      tile_numbers.as_span(),
-      own_coverage,
-      mesh_map_bake_populate_geometry_pixels,
-      foreign_coverage,
-      MutableSpan<char>(overlap_name, sizeof(overlap_name)));
+  BKE_mesh_maps_bake_foreign_coverage(*job.bmain,
+                                      *job.scene,
+                                      *job.view_layer,
+                                      *ob,
+                                      *ma,
+                                      world.raster.atlas_resolution,
+                                      tile_numbers.as_span(),
+                                      view.own,
+                                      mesh_map_bake_populate_geometry_pixels,
+                                      foreign_coverage,
+                                      MutableSpan<char>(overlap_name, sizeof(overlap_name)));
   if (overlap_name[0] != '\0' && job.reports != nullptr) {
     BKE_reportf(job.reports,
                 RPT_WARNING,
                 "Mesh map islands of '%s' overlap '%s' in UV '%s'",
                 ob->id.name + 2,
                 overlap_name,
-                world.uv_name);
+                world.raster.uv_name);
   }
 
-  for (const int tile : IndexRange(tiles_num)) {
-    ImageUser iuser;
-    BKE_imageuser_default(&iuser);
-    iuser.tile = world.images[tile].tile_number;
-    ImageTileBufferScope buffer(*atlas, &iuser);
-    if (buffer != nullptr && buffer->float_data() != nullptr) {
-      const int64_t tile_start = int64_t(tile) * int64_t(pixels_num);
-      BKE_mesh_maps_bake_write_with_margin(
-          pair.type,
-          own_coverage.as_span().slice(tile_start, int64_t(pixels_num)),
-          own_margin.as_span().slice(tile_start, int64_t(pixels_num)),
-          foreign_coverage.as_span().slice(tile_start, int64_t(pixels_num)),
-          4,
-          world.result + tile_start * 4,
-          MutableSpan<float>(buffer->float_data_for_write(), pixels_num * 4));
-      buffer->userflags |= IB_DISPLAY_BUFFER_INVALID;
-      BKE_image_mark_dirty(atlas, buffer.get());
-    }
-  }
-  BKE_image_partial_update_mark_full_update(atlas);
-  BKE_image_free_gputextures(atlas);
-  BKE_image_memorypack(atlas);
+  const int dilate_iterations = std::clamp(int(ma->mesh_map_settings.dilate_iterations),
+                                           MESH_MAP_BAKE_DILATE_MIN,
+                                           MESH_MAP_BAKE_DILATE_MAX);
+  mesh_map_bake_commit_tiles(*atlas,
+                             world,
+                             pair.type,
+                             world.raster.atlas_resolution,
+                             world.raster.margin_atlas_pixels,
+                             dilate_iterations,
+                             view.own,
+                             view.margin,
+                             foreign_coverage.as_span(),
+                             view.result);
+  mesh_map_bake_commit_mark_updated(*atlas);
 
   BKE_mesh_maps_bake_state_commit(
       *state, pair.start_hash, now_hash, int(BLI_time_now_seconds_i()));
@@ -1534,7 +1791,7 @@ void mesh_map_bake_start(void *customdata, wmJobWorkerStatus *worker_status)
     if (!job->handshake.worker_await_world(stop_requested)) {
       break;
     }
-    mesh_map_bake_worker_run(*job, job->world);
+    mesh_map_bake_worker_run(job->world);
     if (worker_status->stop) {
       job->stop_requested = true;
       break;
@@ -1748,8 +2005,14 @@ MeshMapBakeJob *mesh_map_bake_job_create(Main &bmain,
   job->view_layer = &view_layer;
   job->material = &ma;
   job->material_session_uid = ma.id.session_uid;
-  job->resolution = std::max(ma.mesh_map_settings.resolution, 1);
-  job->margin_pixels = std::max(int(std::lround(ma.mesh_map_settings.margin)), 0);
+  /* RNA clamps both, but hand-written DNA can carry anything and the budget math multiplies them:
+   * hold them to the constant bounds instead of trusting the DNA. */
+  job->atlas_resolution = std::clamp(ma.mesh_map_settings.resolution,
+                                     MESH_MAP_BAKE_RESOLUTION_MIN,
+                                     MESH_MAP_BAKE_RESOLUTION_MAX);
+  job->margin_atlas_pixels = std::clamp(int(std::lround(ma.mesh_map_settings.margin)),
+                                        0,
+                                        int(MESH_MAP_BAKE_MARGIN_MAX));
   job->reports = reports;
   job->pairs.reserve(plan.size());
 
@@ -1783,7 +2046,7 @@ wmOperatorStatus mesh_map_bake_run_sync(MeshMapBakeJob *job)
     if (!mesh_map_bake_prepare_next(*job)) {
       break;
     }
-    mesh_map_bake_worker_run(*job, job->world);
+    mesh_map_bake_worker_run(job->world);
     if (G.is_break) {
       job->stop_requested = true;
       mesh_map_bake_world_free(job->world);

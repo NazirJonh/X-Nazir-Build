@@ -15,7 +15,13 @@
  * drives Cycles lives in `editors/object/mesh_map/mesh_map_bake.cc`, and this half can be tested
  * without an engine. The joint contract is the atlas format the generated graph and the CPU
  * composite already read: a float image, `Non-Color`, a scalar map in R (spread to RGB by the
- * writer), an RGB map as stored.
+ * writer), an RGB map as stored. Alpha is the written mask: 1 exactly for the texels the merge or
+ * the dilation wrote, 0 for the pristine and the cleared background, and a texel the variant-A
+ * rebake abandons drops back to 0; coverage for merging is still derived from the geometry (the
+ * #BakePixel array), never from alpha. Ray-traced maps of a render pair are rasterized at
+ * `resolution * supersampling` and resolved down on the CPU with coverage-weighted box filtering
+ * before the merge: only covered subtexels average into a destination texel, so a partially covered
+ * edge keeps the island's color instead of fading to the background.
  *
  * The three map families are:
  * - ray-traced maps baked through Cycles: AO, Curvature, Edge and Position (an emission graph fed
@@ -46,6 +52,7 @@ namespace blender {
 struct BakePixel;
 struct Depsgraph;
 struct Image;
+struct ImBuf;
 struct Main;
 struct Material;
 struct Mesh;
@@ -95,12 +102,23 @@ eScenePassType BKE_mesh_maps_bake_pass_for_type(int8_t type);
 bool BKE_mesh_maps_bake_normal_space_for_type(int8_t type, eBakeSpace &r_space);
 
 /**
- * Whether \a type bakes through the engine for \a ma's settings. The static classification
- * (#BKE_mesh_maps_bake_type_renders) answers without settings; the Curvature map switches to a
- * CPU filter over the baked Tangent Normal atlas when
- * #MaterialMeshMapSettings::curvature_method is #MA_MESH_MAP_CURVATURE_NORMAL_FILTER.
+ * Peak bytes one prepared pair needs, checked against #MESH_MAP_BAKE_MEMORY_LIMIT_MB before the
+ * pair allocates: the raster's BakePixel + result + margin mask plus the margin phase's
+ * raster-sized float ImBuf (69 bytes per raster texel per candidate tile -- `sizeof(BakePixel)`
+ * 36 + result 16 + mask 1 + ImBuf 16; the indicator pass the margin used to run is gone and is
+ * not counted), and the merge's atlas-resolution buffers (38 bytes per atlas texel per tile -- the
+ * resolved result 16 plus its coverage and margin masks 2, the foreign coverage 1, the variant-A
+ * clear region 1, the extend mask 1, and #IMB_filter_extend's duplicated float buffer and mask
+ * 16 + 1). The atlas image tiles themselves are user data that outlives the pair and are not
+ * counted; the resolve's transient union buffer is freed before the merge scratch exists.
+ *
+ * The raster side is the atlas side times the supersampling, never inflated past the atlas: the
+ * CPU fills run at the atlas resolution, so \a supersampling only ever grows a render pair's
+ * raster.
  */
-bool BKE_mesh_maps_bake_pair_renders(const Material &ma, int8_t type);
+size_t BKE_mesh_maps_bake_estimate_bytes(int atlas_resolution,
+                                         int supersampling,
+                                         size_t candidate_tiles);
 
 /**
  * The AO ray distance for \a mesh: \a settings.ao_distance when it is positive, otherwise half the
@@ -275,6 +293,158 @@ void BKE_mesh_maps_bake_coverage_union(Span<uint8_t> source, MutableSpan<uint8_t
 size_t BKE_mesh_maps_bake_coverage_overlap(Span<uint8_t> a, Span<uint8_t> b);
 
 /**
+ * Commit one tile of a finished bake into the atlas tile buffer \a tile_buffer and grow the map
+ * past its margin, on the atlas-resolution float buffer the caller already holds: the variant-A
+ * rebake clear, the guarded merge (#BKE_mesh_maps_bake_write_with_margin) and the extend passes,
+ * in that order.
+ *
+ * The rebake semantics are the deterministic variant A: the tile's previous margin ring of this
+ * object is stale the moment its geometry changed, so before anything is merged, every texel
+ * within `margin + iterations` 8-neighborhood steps of \a own_coverage that is neither foreign
+ * coverage nor own coverage is zeroed, color and alpha. The foreign ISLANDS are protected through
+ * \a foreign_coverage, but a foreign island's spilled margin inside the clear region is
+ * deliberately not: it is that island's own rebake that restores it. Stale content further out
+ * (a ring left by a bake of a larger island with a wider margin) is beyond what this variant can
+ * see without storage; it is the documented limitation, not something to extend here.
+ *
+ * The dilation itself is #IMB_filter_extend -- the rule it already implements, no filter kernel
+ * of this module -- and the mask is the whole rule: #FILTER_MASK_USED marks this object's own and
+ * the other objects' texels, sources that are never overwritten; #FILTER_MASK_MARGIN marks this
+ * object's margin fill, a source as well; every other texel is writable background. Each of \a
+ * iterations passes fills a writable texel with the weighted average of its written neighbors,
+ * so the map keeps growing outward past the margin against mip-level seams.
+ *
+ * Alpha is the written mask: the merge writes 1 into every texel it lands on, the extend pins 1
+ * on every texel it fills, and the clear returns a freshly abandoned texel to 0.
+ *
+ * \param own_coverage, \param own_margin, \param foreign_coverage: one 0/1 flag per texel of the
+ *   tile, `tile_buffer.x * tile_buffer.y` each. Every mask must hold the whole tile: the clear,
+ *   the merge and the extend walk all three in full, so a shorter mask is a caller bug the
+ *   function refuses (an assert in a debug build, an untouched buffer in release) rather than a
+ *   bounds on the work.
+ * \param result: `tile_buffer.x * tile_buffer.y * channels` floats of this object's bake at the
+ *   atlas resolution, one tile's block of the shared buffer, exactly as
+ *   #BKE_mesh_maps_bake_write_with_margin takes it; a scalar map has its R spread over G and B
+ *   there.
+ * \param margin: the pair's margin setting, in atlas texels; it widens the clear region but not
+ *   the extend. The raster-side margin the margin pass fills with is this one times the pair's
+ *   supersampling, applied by the caller before the resolve.
+ * \param iterations: the extend passes; 0 skips the extend and keeps the clear and the merge.
+ */
+void BKE_mesh_maps_bake_extend_passes(int8_t type,
+                                      Span<uint8_t> own_coverage,
+                                      Span<uint8_t> own_margin,
+                                      Span<uint8_t> foreign_coverage,
+                                      int channels,
+                                      const float *result,
+                                      int margin,
+                                      int iterations,
+                                      ImBuf &tile_buffer);
+
+/**
+ * Box-downsample an RGBA float raster \a factor times, averaging only the covered subtexels of
+ * each block: an uncovered subtexel contributes neither color nor weight, so the result keeps
+ * the island's color at partially covered edges instead of fading it to the background.
+ * A destination texel whose block is fully uncovered is zeroed. Alpha is 1 for any covered
+ * block, 0 otherwise.
+ *
+ * \param source_rgba: the source raster, `source_resolution * source_resolution * 4` floats.
+ * \param source_coverage: one 0/1 flag per source texel, the same texel count as the raster.
+ * \param source_resolution: the source side, in texels.
+ * \param destination_rgba: the destination, `destination_resolution * destination_resolution * 4`
+ *   floats; written completely on success, untouched otherwise.
+ * \param destination_resolution: the destination side, in texels.
+ * \param factor: the box edge, in texels; \a source_resolution must equal the destination side
+ *   times it, and it must be at least 2.
+ * \return True when the downsample ran. False -- with every destination texel left untouched --
+ *   when the shapes above do not describe one, so a caller can tell a refused resolve from a
+ *   written one instead of trusting a silent no-op.
+ */
+bool BKE_mesh_maps_bake_downsample_result(Span<float> source_rgba,
+                                          Span<uint8_t> source_coverage,
+                                          int source_resolution,
+                                          MutableSpan<float> destination_rgba,
+                                          int destination_resolution,
+                                          int factor);
+
+/**
+ * Box-downsample a 0/1 coverage mask \a factor times: a destination texel is covered when any
+ * texel of its block was.
+ *
+ * \param source: one 0/1 flag per source texel, `source_resolution * source_resolution`.
+ * \param source_resolution: the source side, in texels.
+ * \param destination: one flag per destination texel, `destination_resolution *
+ *   destination_resolution`; written completely on success, untouched otherwise.
+ * \param destination_resolution: the destination side, in texels.
+ * \param factor: the box edge, in texels; \a source_resolution must equal the destination side
+ *   times it, and it must be at least 2.
+ * \return True when the downsample ran; false with \a destination untouched when the shapes do
+ *   not describe one. Same contract as #BKE_mesh_maps_bake_downsample_result, so a caller can
+ *   tell a refused resolve from a written one instead of trusting a silent no-op.
+ */
+bool BKE_mesh_maps_bake_downsample_coverage(Span<uint8_t> source,
+                                            int source_resolution,
+                                            MutableSpan<uint8_t> destination,
+                                            int destination_resolution,
+                                            int factor);
+
+/**
+ * Scale the RGB of every texel \a coverage marks to unit length (`len > 0`): box-averaging a
+ * normal field shrinks the mixed directions below unit length, and the atlas expects unit
+ * normals. Alpha is left alone.
+ *
+ * \param rgba: the RGBA texels, `rgba.size()` a multiple of 4; the RGB of the marked texels is
+ *   scaled in place.
+ * \param coverage: one 0/1 flag per texel. The shorter of the two spans bounds the work.
+ */
+void BKE_mesh_maps_bake_normalize_normals(MutableSpan<float> rgba, Span<uint8_t> coverage);
+
+/**
+ * Resolve a finished raster pair into atlas-resolution buffers, one call for all \a tiles_num
+ * tiles: tile t owns the block `t * resolution * resolution` of every buffer, raster and atlas
+ * alike, and each block boxes down by the exact factor the two resolutions describe.
+ *
+ * The result is averaged over the union of the own and the margin coverage -- the margin fill
+ * already wrote an averaged color into the margin texels, so the union, not the own coverage
+ * alone, is what keeps partially covered edge texels from fading into the zero background -- and
+ * a block the union leaves fully empty resolves to the zero background. Alpha is 1 for any
+ * covered block, 0 otherwise. The own and the margin masks OR-downsample separately: the merge
+ * has to tell a block's own texels from its margin texels.
+ *
+ * When \a type is a native normal pass (see #BKE_mesh_maps_bake_normal_space_for_type), the
+ * resolved normals are scaled back to unit length wherever the downsampled union marks: the box
+ * average of a normal field mixes directions and shrinks below unit length, and the atlas expects
+ * unit normals. Any other type skips that pass.
+ *
+ * \param raster_rgba: the finished raster of the pair -- the render's result or the CPU fill plus
+ *   the margin fill -- `raster_resolution * raster_resolution * tiles_num` RGBA texels.
+ * \param raster_own: one 0/1 flag per raster texel, the texels the object's own rasters cover,
+ *   `raster_resolution * raster_resolution * tiles_num` flags.
+ * \param raster_margin: one 0/1 flag per raster texel, the texels the margin fill wrote, the
+ *   same count as \a raster_own.
+ * \param type: the pair's map type; only consulted for the normal renormalization.
+ * \param raster_resolution: the raster side of one tile, in texels. Must be the atlas side times
+ *   an exact factor of at least 2: a factor of 1 means the raster is the atlas, so the caller
+ *   merges its buffers directly and there is nothing to resolve.
+ * \param atlas_resolution: the atlas side of one tile, in texels.
+ * \param tiles_num: how many UDIM tiles the pair holds; every buffer holds that many blocks.
+ * \param r_atlas_rgba, \param r_atlas_own, \param r_atlas_margin: the outputs, one
+ *   `atlas_resolution * atlas_resolution * tiles_num` block each. Every output texel is written
+ *   on success; nothing is written when the inputs do not describe a valid resolve (an assert in
+ *   a debug build, an untouched buffer in release).
+ */
+void BKE_mesh_maps_bake_resolve_raster(Span<float> raster_rgba,
+                                       Span<uint8_t> raster_own,
+                                       Span<uint8_t> raster_margin,
+                                       int8_t type,
+                                       int raster_resolution,
+                                       int atlas_resolution,
+                                       int tiles_num,
+                                       MutableSpan<float> r_atlas_rgba,
+                                       MutableSpan<uint8_t> r_atlas_own,
+                                       MutableSpan<uint8_t> r_atlas_margin);
+
+/**
  * Fill the RGBA result of a CPU Bent Normal map: every covered texel gets the normalized average
  * of the hemisphere directions around its surface normal that escape \a sources without a hit,
  * written in world space (`0.5 + 0.5 * direction`, a texel whose rays all hit stays black). The
@@ -316,6 +486,11 @@ void BKE_mesh_maps_bake_fill_curvature_from_normal(const BakePixel *pixels,
 
 /**
  * Merge one object's bake into the shared atlas with a margin that respects the other objects.
+ *
+ * Alpha is the written mask: every texel this merge writes gets alpha 1 whatever the bake
+ * delivered, and a texel it does not write is left alone -- the pristine and the cleared background
+ * stay 0. Coverage is still derived from the geometry (the masks, ultimately the #BakePixel array),
+ * never from the atlas's alpha.
  *
  * \param own_coverage: texels the object's own rasters cover. Always written.
  * \param own_margin: texels the margin fill added for this object. Written only where
@@ -373,8 +548,13 @@ int BKE_mesh_maps_bake_foreign_coverage(
 
 /**
  * The atlas of \a ma for \a type, created on first use and recreated when \a resolution no longer
- * matches. The image is a float, `Non-Color`, \a resolution x \a resolution blank; the slot owns it
+ * matches. The image is a float, `Non-Color`, \a resolution x \a resolution blank, and the blank is
+ * transparent black (RGBA = 0) so the pristine background reads as unwritten; the slot owns it
  * through #BKE_mesh_maps_slot_image_set. Returns null for an invalid type or resolution.
+ *
+ * An atlas built by a binary before the transparent-background change keeps an alpha-1 background,
+ * and this call returns an existing atlas as is, so the invariant does not hold for it; such an
+ * atlas is rebuilt by a Clear or a resolution change (pixels are not versioned).
  */
 Image *BKE_mesh_maps_bake_atlas_ensure(Main &bmain, Material &ma, int8_t type, int resolution);
 
@@ -536,8 +716,9 @@ void BKE_mesh_maps_bake_states_rollback(Span<ObjectMeshMapState *> states,
                                         Span<int8_t> previous_statuses);
 
 /**
- * Clear \a ma's atlas for \a type: every texel becomes opaque black, and every object state for
- * (\a ma, \a type) in \a bmain goes back to #OB_MESH_MAP_STATUS_NONE with its hash and time reset.
+ * Clear \a ma's atlas for \a type: every texel becomes the pristine transparent black (RGBA = 0),
+ * and every object state for (\a ma, \a type) in \a bmain goes back to #OB_MESH_MAP_STATUS_NONE
+ * with its hash and time reset.
  * Returns how many object states were reset.
  *
  * The whole atlas is cleared, not one object's pixels: the atlas is a shared material resource, and

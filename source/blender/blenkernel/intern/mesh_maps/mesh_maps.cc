@@ -28,6 +28,7 @@
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_mesh.hh"
+#include "BKE_mesh_maps_types.hh"
 #include "BKE_object.hh"
 
 #include "DEG_depsgraph.hh"
@@ -56,6 +57,19 @@ static_assert(offsetof(Material, mesh_map_settings) % 8 == 0,
               "Material mesh_map_settings must stay pointer-aligned");
 static_assert(offsetof(Material, _pad_tail) + 4 == sizeof(Material),
               "Material must end on its explicit tail pad without compiler padding");
+
+bool BKE_mesh_maps_pair_renders(const Material &ma, const int8_t type)
+{
+  if (type == MA_MESH_MAP_CURVATURE &&
+      ma.mesh_map_settings.curvature_method == MA_MESH_MAP_CURVATURE_NORMAL_FILTER)
+  {
+    /* The filter runs over the baked Tangent Normal atlas, no engine involved. */
+    return false;
+  }
+  /* The static half of the classification, straight from the descriptor table. */
+  const MeshMapTypeInfo *info = BKE_mesh_maps_type_info_get(type);
+  return info != nullptr && (info->flags & MESH_MAP_TYPE_RENDERED) != 0;
+}
 
 namespace {
 
@@ -503,15 +517,24 @@ void BKE_mesh_maps_object_hash(const Object &ob_eval,
   }
 
   /* Material settings that shape this type's bake. Resolution and margin are used by every merge;
-   * samples/denoise belong to the ray-traced maps, ao_distance to AO and edge_radius to Edge. */
+   * samples/denoise belong to the ray-traced maps, ao_distance to AO and edge_radius to Edge. The
+   * margin kind moves every merge, and the position and tangent encodings move their own types. */
   h = mesh_map_hash_mix(h, uint64_t(uint32_t(ma.mesh_map_settings.resolution)));
   h = mesh_map_hash_bytes(h, &ma.mesh_map_settings.margin, sizeof(float));
+  h = mesh_map_hash_mix(h, uint64_t(uint8_t(ma.mesh_map_settings.margin_type)));
+  /* The dilation pushes every merge's result further into the background. */
+  h = mesh_map_hash_mix(h, uint64_t(uint8_t(ma.mesh_map_settings.dilate_iterations)));
   if (ELEM(type, MA_MESH_MAP_AO, MA_MESH_MAP_CURVATURE, MA_MESH_MAP_EDGE)) {
     h = mesh_map_hash_mix(h, uint64_t(uint32_t(ma.mesh_map_settings.samples)));
     h = mesh_map_hash_mix(h, uint64_t(ma.mesh_map_settings.use_denoise != 0 ? 1 : 0));
   }
+  if (BKE_mesh_maps_pair_renders(ma, type)) {
+    /* The engine rasterizes at the supersampled size before the commit boxes down. */
+    h = mesh_map_hash_mix(h, uint64_t(uint8_t(ma.mesh_map_settings.supersampling)));
+  }
   if (type == MA_MESH_MAP_AO) {
     h = mesh_map_hash_bytes(h, &ma.mesh_map_settings.ao_distance, sizeof(float));
+    h = mesh_map_hash_mix(h, uint64_t(ma.mesh_map_settings.use_global_ao != 0 ? 1 : 0));
   }
   if (type == MA_MESH_MAP_EDGE) {
     h = mesh_map_hash_bytes(h, &ma.mesh_map_settings.edge_radius, sizeof(float));
@@ -736,6 +759,7 @@ void BKE_mesh_maps_material_slots_copy(Material &ma_dst, const Material &ma_src)
   ma_dst.mesh_map_settings.resolution = ma_src.mesh_map_settings.resolution;
   ma_dst.mesh_map_settings.samples = ma_src.mesh_map_settings.samples;
   ma_dst.mesh_map_settings.use_denoise = ma_src.mesh_map_settings.use_denoise;
+  ma_dst.mesh_map_settings.margin_type = ma_src.mesh_map_settings.margin_type;
   ma_dst.mesh_map_settings.position_normalization = ma_src.mesh_map_settings.position_normalization;
   ma_dst.mesh_map_settings.use_directx_normal = ma_src.mesh_map_settings.use_directx_normal;
   ma_dst.mesh_map_settings.margin = ma_src.mesh_map_settings.margin;
@@ -743,7 +767,10 @@ void BKE_mesh_maps_material_slots_copy(Material &ma_dst, const Material &ma_src)
   ma_dst.mesh_map_settings.edge_radius = ma_src.mesh_map_settings.edge_radius;
   ma_dst.mesh_map_settings.curvature_scale = ma_src.mesh_map_settings.curvature_scale;
   ma_dst.mesh_map_settings.cpu_rays = ma_src.mesh_map_settings.cpu_rays;
+  ma_dst.mesh_map_settings.use_global_ao = ma_src.mesh_map_settings.use_global_ao;
+  ma_dst.mesh_map_settings.dilate_iterations = ma_src.mesh_map_settings.dilate_iterations;
   ma_dst.mesh_map_settings.curvature_method = ma_src.mesh_map_settings.curvature_method;
+  ma_dst.mesh_map_settings.supersampling = ma_src.mesh_map_settings.supersampling;
   ma_dst.mesh_map_settings.curvature_radius = ma_src.mesh_map_settings.curvature_radius;
   ma_dst.mesh_map_slots = {nullptr, nullptr};
   for (const MaterialMeshMapSlot &src : ma_src.mesh_map_slots) {

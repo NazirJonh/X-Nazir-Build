@@ -12,7 +12,9 @@
 #include "BKE_mesh_maps_bake.hh"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <utility>
 
 #include "BLI_array.hh"
 #include "BLI_ghash.h"
@@ -52,6 +54,7 @@
 #include "DEG_depsgraph.hh"
 #include "DEG_depsgraph_query.hh"
 
+#include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
 
 #include "DNA_customdata_types.h"
@@ -149,15 +152,32 @@ bool BKE_mesh_maps_bake_type_scalar(const int8_t type)
   return info != nullptr && (info->flags & MESH_MAP_TYPE_SCALAR) != 0;
 }
 
-bool BKE_mesh_maps_bake_pair_renders(const Material &ma, const int8_t type)
+size_t BKE_mesh_maps_bake_estimate_bytes(const int atlas_resolution,
+                                         const int supersampling,
+                                         const size_t candidate_tiles)
 {
-  if (type == MA_MESH_MAP_CURVATURE &&
-      ma.mesh_map_settings.curvature_method == MA_MESH_MAP_CURVATURE_NORMAL_FILTER)
-  {
-    /* The filter runs over the baked Tangent Normal atlas, no engine involved. */
-    return false;
-  }
-  return BKE_mesh_maps_bake_type_renders(type);
+  /* The CPU fills have no supersampling to grow the raster with: their raster is the atlas side. */
+  const int raster_resolution = atlas_resolution * std::max(supersampling, 1);
+  const size_t raster_texels = size_t(std::max(raster_resolution, 0)) *
+                               size_t(std::max(raster_resolution, 0));
+  const size_t atlas_texels = size_t(std::max(atlas_resolution, 0)) *
+                              size_t(std::max(atlas_resolution, 0));
+  /* Per raster texel: the populated #BakePixel (36), the RGBA float result (16), the margin mask
+   * (1), and the one raster-sized float ImBuf the margin phase runs through (16): 69. The
+   * indicator pass the margin used to record its filled texels with is gone, so it is not counted;
+   * the commit phase's own coverage and margin masks (2) fit under the ImBuf term, which is freed
+   * before they are allocated.
+   * Per atlas texel: the commit's resolved result (16) and the two downsampled masks (2), the
+   * foreign coverage (1), the variant-A clear region (1), the extend mask (1), and the
+   * #IMB_filter_extend scratch -- its duplicated float buffer (16) plus its duplicated mask (1):
+   * 38. The atlas image tiles themselves are user data that outlives the pair, so they are not
+   * counted; the resolve's transient union buffer (1) is freed before the merge scratch exists.
+   * Everything accumulates in `size_t`, sizeof first, so a 16384 atlas at supersampling 4 (a
+   * raster of about 4.3e9 texels) cannot overflow the multiplications. */
+  const size_t raster_bytes_per_texel = sizeof(BakePixel) + 16 + 1 + 16;
+  const size_t atlas_bytes_per_texel = 16 + 2 + 1 + 1 + 1 + 16 + 1;
+  return candidate_tiles *
+         (raster_bytes_per_texel * raster_texels + atlas_bytes_per_texel * atlas_texels);
 }
 
 eScenePassType BKE_mesh_maps_bake_pass_for_type(const int8_t type)
@@ -206,7 +226,7 @@ float BKE_mesh_maps_bake_ao_distance(const Mesh &mesh, const MaterialMeshMapSett
  * they built into an emission node. */
 
 bool mesh_map_bake_emit_source_ao(bNodeTree &tree,
-                                  const MaterialMeshMapSettings & /*settings*/,
+                                  const MaterialMeshMapSettings &settings,
                                   const float ao_distance,
                                   const int samples,
                                   bNodeSocket **r_source,
@@ -216,10 +236,14 @@ bool mesh_map_bake_emit_source_ao(bNodeTree &tree,
   if (ao == nullptr) {
     return false;
   }
-  /* Only the object itself occludes, and the per-shader-evaluation ray count is the bake's
-   * sample count. The plane stays unlinked so Cycles shades the actual normal. */
+  /* The per-shader-evaluation ray count is the bake's sample count. The plane stays
+   * unlinked so Cycles shades the actual normal. #SHD_AO_LOCAL keeps the occluders to the
+   * object being baked; a global bake traces the whole private world, so the high-poly
+   * pieces of one source occlude each other. */
   ao->custom1 = std::max(samples, 1);
-  ao->custom2 |= SHD_AO_LOCAL;
+  if (settings.use_global_ao == 0) {
+    ao->custom2 |= SHD_AO_LOCAL;
+  }
   if (bNodeSocket *distance = bke::node_find_socket(*ao, SOCK_IN, UString("Distance"))) {
     mesh_map_bake_set_float(*distance, ao_distance > 0.0f ? ao_distance : 1.0f);
   }
@@ -1069,12 +1093,364 @@ void BKE_mesh_maps_bake_write_with_margin(const int8_t type,
     float *destination = atlas.data() + i * size_t(channels);
     copy_v3_v3(destination, source);
     if (channels >= 4) {
-      destination[3] = source[3];
+      /* Alpha is the written mask: a texel is 1 exactly when the merge or the dilation wrote it,
+       * so the engine's per-texel alpha, which the margin fill does not carry, is dropped. */
+      destination[3] = 1.0f;
     }
     if (scalar) {
       destination[1] = source[0];
       destination[2] = source[0];
     }
+  }
+}
+
+/**
+ * Expand \a source by up to \a passes 8-neighborhood steps over a `width x height` grid, OR-ing
+ * the reached texels into \a r_destination. This computes the region the variant-A rebake clears;
+ * it is a plain boolean expansion, not the weighted color fill of #IMB_filter_extend.
+ */
+static void mesh_map_bake_mask_dilate(Span<uint8_t> source,
+                                      const int width,
+                                      const int height,
+                                      const int passes,
+                                      MutableSpan<uint8_t> r_destination)
+{
+  const size_t texels = size_t(width) * size_t(height);
+  if (width <= 0 || height <= 0 || passes <= 0 || size_t(source.size()) < texels ||
+      size_t(r_destination.size()) < texels)
+  {
+    return;
+  }
+  Array<uint8_t> front(texels, 0);
+  Array<uint8_t> back(texels, 0);
+  for (size_t i = 0; i < texels; i++) {
+    front[i] = source[i] != 0 ? uint8_t(1) : uint8_t(0);
+  }
+  for (int pass = 0; pass < passes; pass++) {
+    std::atomic<bool> grew = false;
+    threading::parallel_for(IndexRange(height), 64, [&](const IndexRange y_range) {
+      bool grew_here = false;
+      for (const int y : y_range) {
+        for (int x = 0; x < width; x++) {
+          const size_t i = size_t(y) * size_t(width) + x;
+          if (front[i] != 0) {
+            back[i] = 1;
+            continue;
+          }
+          uint8_t any = 0;
+          for (int dy = -1; dy <= 1 && any == 0; dy++) {
+            for (int dx = -1; dx <= 1 && any == 0; dx++) {
+              const int nx = x + dx;
+              const int ny = y + dy;
+              if (nx < 0 || ny < 0 || nx >= width || ny >= height) {
+                continue;
+              }
+              any = front[size_t(ny) * size_t(width) + nx];
+            }
+          }
+          back[i] = any != 0 ? uint8_t(1) : uint8_t(0);
+          grew_here = grew_here || any != 0;
+        }
+      }
+      if (grew_here) {
+        grew.store(true, std::memory_order_relaxed);
+      }
+    });
+    std::swap(front, back);
+    if (!grew.load(std::memory_order_relaxed)) {
+      /* The expansion is stable: further passes add nothing. */
+      break;
+    }
+  }
+  for (size_t i = 0; i < texels; i++) {
+    if (front[i] != 0) {
+      r_destination[i] = 1;
+    }
+  }
+}
+
+void BKE_mesh_maps_bake_extend_passes(const int8_t type,
+                                      Span<uint8_t> own_coverage,
+                                      Span<uint8_t> own_margin,
+                                      Span<uint8_t> foreign_coverage,
+                                      const int channels,
+                                      const float *result,
+                                      const int margin,
+                                      const int iterations,
+                                      ImBuf &tile_buffer)
+{
+  const size_t texels = size_t(tile_buffer.x) * size_t(tile_buffer.y);
+  if (tile_buffer.float_data() == nullptr || channels < 3 || result == nullptr || texels == 0 ||
+      size_t(own_coverage.size()) < texels || size_t(own_margin.size()) < texels ||
+      size_t(foreign_coverage.size()) < texels)
+  {
+    /* All three masks and the result come from the caller's tile buffers: a shape that does not
+     * hold the whole tile is a bug in the caller, not an input this function can recover from.
+     * Refuse loudly in a debug build and touch nothing in release. */
+    BLI_assert_unreachable();
+    return;
+  }
+  const int clear_radius = std::max(margin, 0) + std::max(iterations, 0);
+
+  /* Variant A of the rebake semantics (documented in BKE_mesh_maps_bake.hh): the tile's previous
+   * margin ring of this object is stale the moment its geometry changed, so it is wiped before
+   * anything is merged. The region is the one the merge and the extend are about to rewrite --
+   * `margin + iterations` 8-neighborhood steps past the own coverage -- minus the foreign
+   * islands, which stay protected, and minus the own coverage, which the merge rewrites with
+   * fresh values. A foreign island's spilled margin inside the region is deliberately not
+   * protected: it is that island's own rebake that restores it. */
+  if (clear_radius > 0) {
+    Array<uint8_t> region(texels, 0);
+    mesh_map_bake_mask_dilate(own_coverage,
+                              tile_buffer.x,
+                              tile_buffer.y,
+                              clear_radius,
+                              MutableSpan<uint8_t>(region.data(), region.size()));
+    float *atlas = tile_buffer.float_data_for_write();
+    threading::parallel_for(IndexRange(tile_buffer.y), 64, [&](const IndexRange y_range) {
+      for (const int y : y_range) {
+        for (int x = 0; x < tile_buffer.x; x++) {
+          const size_t i = size_t(y) * size_t(tile_buffer.x) + x;
+          if (region[i] == 0 || own_coverage[i] != 0 || foreign_coverage[i] != 0) {
+            continue;
+          }
+          float *texel = atlas + i * 4;
+          texel[0] = 0.0f;
+          texel[1] = 0.0f;
+          texel[2] = 0.0f;
+          texel[3] = 0.0f;
+        }
+      }
+    });
+  }
+
+  BKE_mesh_maps_bake_write_with_margin(
+      type,
+      own_coverage,
+      own_margin,
+      foreign_coverage,
+      channels,
+      result,
+      MutableSpan<float>(tile_buffer.float_data_for_write(), int64_t(texels) * 4));
+
+  if (iterations <= 0) {
+    return;
+  }
+  /* The dilation rule is the one #IMB_filter_extend already implements, and the mask is the whole
+   * rule: #FILTER_MASK_USED texels -- this object's own and the other objects' islands -- are
+   * sources that are never overwritten, #FILTER_MASK_MARGIN texels -- this object's margin fill --
+   * are sources too, and every other texel is writable background. */
+  Array<char> mask(texels, FILTER_MASK_NULL);
+  for (size_t i = 0; i < texels; i++) {
+    if (own_coverage[i] != 0 || foreign_coverage[i] != 0) {
+      mask[i] = FILTER_MASK_USED;
+    }
+    else if (own_margin[i] != 0) {
+      mask[i] = FILTER_MASK_MARGIN;
+    }
+  }
+  IMB_filter_extend(&tile_buffer, mask.data(), iterations);
+  /* Alpha is the written mask (see #BKE_mesh_maps_bake_write_with_margin): the extend averages the
+   * source alpha instead of pinning it, so pin 1 back on every texel a pass wrote. */
+  float *atlas = tile_buffer.float_data_for_write();
+  for (size_t i = 0; i < texels; i++) {
+    if (mask[i] == FILTER_MASK_MARGIN) {
+      atlas[i * 4 + 3] = 1.0f;
+    }
+  }
+}
+
+bool BKE_mesh_maps_bake_downsample_result(Span<float> source_rgba,
+                                          Span<uint8_t> source_coverage,
+                                          const int source_resolution,
+                                          MutableSpan<float> destination_rgba,
+                                          const int destination_resolution,
+                                          const int factor)
+{
+  const size_t source_texels = size_t(source_resolution) * size_t(source_resolution);
+  const size_t destination_texels = size_t(destination_resolution) * size_t(destination_resolution);
+  if (factor <= 1 || source_resolution != destination_resolution * factor ||
+      source_rgba.size() < source_texels * 4 || source_coverage.size() < source_texels ||
+      destination_rgba.size() < destination_texels * 4)
+  {
+    /* The false return is the contract (see the header): a caller that hands over shapes that do
+     * not describe a factor-N box-downsample learns so and keeps its destination, instead of a
+     * silent no-op it cannot tell from a written one. No assert here, so a test of this path
+     * works in debug builds too. */
+    return false;
+  }
+  threading::parallel_for(IndexRange(destination_resolution), 64, [&](const IndexRange y_range) {
+    for (const int y : y_range) {
+      for (int x = 0; x < destination_resolution; x++) {
+        /* An uncovered subtexel is the zeroed background, so it contributes neither color nor
+         * weight: averaging it in would darken the island's partially covered edges. */
+        float acc_rgb[3] = {0.0f, 0.0f, 0.0f};
+        int covered_num = 0;
+        for (int dy = 0; dy < factor; dy++) {
+          for (int dx = 0; dx < factor; dx++) {
+            const size_t sx = size_t(x * factor + dx);
+            const size_t sy = size_t(y * factor + dy);
+            const size_t s = sy * size_t(source_resolution) + sx;
+            if (source_coverage[s] == 0) {
+              continue;
+            }
+            const float *texel = source_rgba.data() + s * 4;
+            for (int c = 0; c < 3; c++) {
+              acc_rgb[c] += texel[c];
+            }
+            covered_num++;
+          }
+        }
+        const size_t d = size_t(y) * size_t(destination_resolution) + x;
+        if (covered_num == 0) {
+          /* A fully uncovered block is background, whatever the caller's buffer held before. */
+          for (int c = 0; c < 4; c++) {
+            destination_rgba[d * 4 + c] = 0.0f;
+          }
+          continue;
+        }
+        for (int c = 0; c < 3; c++) {
+          destination_rgba[d * 4 + c] = acc_rgb[c] / float(covered_num);
+        }
+        /* Alpha follows the coverage, not the averaged source: the engine only sets it on covered
+         * texels and the margin fill leaves it untouched, so it carries no weight information. */
+        destination_rgba[d * 4 + 3] = 1.0f;
+      }
+    }
+  });
+  return true;
+}
+
+bool BKE_mesh_maps_bake_downsample_coverage(Span<uint8_t> source,
+                                            const int source_resolution,
+                                            MutableSpan<uint8_t> destination,
+                                            const int destination_resolution,
+                                            const int factor)
+{
+  const size_t source_texels = size_t(source_resolution) * size_t(source_resolution);
+  const size_t destination_texels = size_t(destination_resolution) * size_t(destination_resolution);
+  if (factor <= 1 || source_resolution != destination_resolution * factor ||
+      source.size() < source_texels || destination.size() < destination_texels)
+  {
+    /* Same contract as #BKE_mesh_maps_bake_downsample_result: a refused resolve is reported, not
+     * silenced, and the destination stays untouched. No assert here, so a test of this path
+     * works in debug builds too. */
+    return false;
+  }
+  threading::parallel_for(IndexRange(destination_resolution), 128, [&](const IndexRange y_range) {
+    for (const int y : y_range) {
+      for (int x = 0; x < destination_resolution; x++) {
+        uint8_t any = 0;
+        for (int dy = 0; dy < factor && any == 0; dy++) {
+          for (int dx = 0; dx < factor && any == 0; dx++) {
+            const size_t sx = size_t(x * factor + dx);
+            const size_t sy = size_t(y * factor + dy);
+            any = source[sy * size_t(source_resolution) + sx];
+          }
+        }
+        destination[size_t(y) * size_t(destination_resolution) + x] = any;
+      }
+    }
+  });
+  return true;
+}
+
+void BKE_mesh_maps_bake_normalize_normals(MutableSpan<float> rgba, Span<uint8_t> coverage)
+{
+  const size_t texels = std::min(rgba.size() / 4, coverage.size());
+  threading::parallel_for(IndexRange(int64_t(texels)), 1024, [&](const IndexRange range) {
+    for (const int64_t i : range) {
+      if (coverage[size_t(i)] == 0) {
+        continue;
+      }
+      float *texel = rgba.data() + size_t(i) * 4;
+      const float len = std::sqrt(texel[0] * texel[0] + texel[1] * texel[1] + texel[2] * texel[2]);
+      if (len > 0.0f) {
+        texel[0] /= len;
+        texel[1] /= len;
+        texel[2] /= len;
+      }
+    }
+  });
+}
+
+void BKE_mesh_maps_bake_resolve_raster(Span<float> raster_rgba,
+                                       Span<uint8_t> raster_own,
+                                       Span<uint8_t> raster_margin,
+                                       const int8_t type,
+                                       const int raster_resolution,
+                                       const int atlas_resolution,
+                                       const int tiles_num,
+                                       MutableSpan<float> r_atlas_rgba,
+                                       MutableSpan<uint8_t> r_atlas_own,
+                                       MutableSpan<uint8_t> r_atlas_margin)
+{
+  const int factor = atlas_resolution > 0 ? raster_resolution / atlas_resolution : 0;
+  const int64_t raster_texels_per_tile = int64_t(raster_resolution) * int64_t(raster_resolution);
+  const int64_t atlas_texels_per_tile = int64_t(atlas_resolution) * int64_t(atlas_resolution);
+  const int64_t raster_total = raster_texels_per_tile * int64_t(tiles_num);
+  const int64_t atlas_total = atlas_texels_per_tile * int64_t(tiles_num);
+  if (tiles_num <= 0 || atlas_resolution <= 0 || factor < 2 ||
+      int64_t(atlas_resolution) * factor != int64_t(raster_resolution) ||
+      raster_rgba.size() < raster_total * 4 || raster_own.size() < raster_total ||
+      raster_margin.size() < raster_total || r_atlas_rgba.size() < atlas_total ||
+      r_atlas_own.size() < atlas_total || r_atlas_margin.size() < atlas_total)
+  {
+    /* The caller owns the buffer shapes and the factor: a mismatch is a bug in the caller, not an
+     * input this resolve can recover from. Refuse loudly in a debug build and leave every output
+     * untouched in release. */
+    BLI_assert_unreachable();
+    return;
+  }
+
+  /* The resolve may only average subtexels that carry color: the margin fill already wrote an
+   * averaged color into the margin texels, so the union of the two rasters -- not the own
+   * coverage alone -- is what keeps partially covered edge texels from fading into the zero
+   * background. */
+  Array<uint8_t> raster_union(raster_total, 0);
+  BKE_mesh_maps_bake_coverage_union(raster_own, raster_union);
+  BKE_mesh_maps_bake_coverage_union(raster_margin, raster_union);
+  /* The downsampled union is only read by the normal renormalization, but every tile computes it
+   * next to the other masks, so one buffer serves the whole pair. */
+  Array<uint8_t> union_atlas(atlas_total, 0);
+
+  for (const int tile : IndexRange(tiles_num)) {
+    const int64_t raster_start = int64_t(tile) * raster_texels_per_tile;
+    const int64_t atlas_start = int64_t(tile) * atlas_texels_per_tile;
+    const bool own_ok = BKE_mesh_maps_bake_downsample_coverage(
+        Span<uint8_t>(raster_own.data() + raster_start, raster_texels_per_tile),
+        raster_resolution,
+        MutableSpan<uint8_t>(r_atlas_own.data() + atlas_start, atlas_texels_per_tile),
+        atlas_resolution,
+        factor);
+    const bool margin_ok = BKE_mesh_maps_bake_downsample_coverage(
+        Span<uint8_t>(raster_margin.data() + raster_start, raster_texels_per_tile),
+        raster_resolution,
+        MutableSpan<uint8_t>(r_atlas_margin.data() + atlas_start, atlas_texels_per_tile),
+        atlas_resolution,
+        factor);
+    const bool union_ok = BKE_mesh_maps_bake_downsample_coverage(
+        Span<uint8_t>(raster_union.data() + raster_start, raster_texels_per_tile),
+        raster_resolution,
+        MutableSpan<uint8_t>(union_atlas.data() + atlas_start, atlas_texels_per_tile),
+        atlas_resolution,
+        factor);
+    const bool result_ok = BKE_mesh_maps_bake_downsample_result(
+        raster_rgba.slice(raster_start * 4, raster_texels_per_tile * 4),
+        Span<uint8_t>(raster_union.data() + raster_start, raster_texels_per_tile),
+        raster_resolution,
+        MutableSpan<float>(r_atlas_rgba.data() + atlas_start * 4, atlas_texels_per_tile * 4),
+        atlas_resolution,
+        factor);
+    /* The shapes were validated above, so the downsample helpers cannot refuse. */
+    BLI_assert(own_ok && margin_ok && union_ok && result_ok);
+    UNUSED_VARS_NDEBUG(own_ok, margin_ok, union_ok, result_ok);
+  }
+  /* Box-averaging a normal field shrinks any block that mixed directions below unit length, and
+   * the atlas expects unit normals, so the resolved normals are renormalized before the merge. */
+  eBakeSpace space = R_BAKE_SPACE_WORLD;
+  if (BKE_mesh_maps_bake_normal_space_for_type(type, space)) {
+    BKE_mesh_maps_bake_normalize_normals(r_atlas_rgba, union_atlas.as_span());
   }
 }
 
@@ -1288,7 +1664,11 @@ Image *BKE_mesh_maps_bake_atlas_ensure(Main &bmain,
       return slot->image;
     }
   }
-  const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  /* A pristine atlas is transparent black so alpha reads as the written mask; RGB stays 0 so
+   * filtering never pulls stale color from the background. The tile ensure
+   * (#BKE_paint_layers_map_coverage_tile_ensure) fills every UDIM tile added later from this base
+   * tile's gen color, so the tiles follow without an initialization of their own. */
+  const float black[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   Image *image = BKE_image_add_generated(&bmain,
                                          unsigned(resolution),
                                          unsigned(resolution),
@@ -1602,7 +1982,7 @@ int BKE_mesh_maps_bake_clear_type(Main &bmain, Material &ma, const int8_t type)
         texel[0] = 0.0f;
         texel[1] = 0.0f;
         texel[2] = 0.0f;
-        texel[3] = 1.0f;
+        texel[3] = 0.0f;
       }
       ibuf.userflags |= IB_DISPLAY_BUFFER_INVALID;
       BKE_image_mark_dirty(image, &ibuf);

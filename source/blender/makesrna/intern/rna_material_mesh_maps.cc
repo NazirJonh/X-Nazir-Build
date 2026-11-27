@@ -181,6 +181,21 @@ PointerRNA rna_Material_mesh_map_settings_get(PointerRNA *ptr)
 
 namespace blender {
 
+/* Values match #eMaterialMeshMapMarginType. */
+static const EnumPropertyItem rna_material_mesh_map_margin_type_items[] = {
+    {MA_MESH_MAP_MARGIN_ADJACENT_FACES,
+     "ADJACENT_FACES",
+     0,
+     "Adjacent Faces",
+     "Fill the margin by sampling the neighboring UV faces across seams"},
+    {MA_MESH_MAP_MARGIN_EXTEND,
+     "EXTEND",
+     0,
+     "Extend",
+     "Fill the margin by extending the covered texels outward"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 /* Values match #eMaterialMeshMapCurvatureMethod. */
 static const EnumPropertyItem rna_material_mesh_map_curvature_method_items[] = {
     {MA_MESH_MAP_CURVATURE_POINTINESS,
@@ -367,6 +382,14 @@ void rna_def_material_mesh_maps(BlenderRNA *brna, StructRNA *srna)
   RNA_def_property_boolean_sdna(prop, nullptr, "use_denoise", 1);
   rna_def_mesh_map_ui_update(prop, "Denoise", "Ask Cycles to denoise the mesh map bake");
 
+  prop = RNA_def_property(srna, "margin_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "margin_type");
+  RNA_def_property_enum_items(prop, rna_material_mesh_map_margin_type_items);
+  rna_def_mesh_map_ui_update(prop,
+                             "Margin Type",
+                             "How a bake expands into the atlas texels the UV islands "
+                             "leave empty");
+
   prop = RNA_def_property(srna, "position_normalization", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "position_normalization");
   RNA_def_property_enum_items(prop, rna_material_mesh_map_position_normalization_items);
@@ -407,6 +430,32 @@ void rna_def_material_mesh_maps(BlenderRNA *brna, StructRNA *srna)
       "CPU Rays",
       "Ray directions per texel the CPU Thickness and Bent Normal bakes cast; more rays give a "
       "smoother, slower bake");
+
+  prop = RNA_def_property(srna, "use_global_ao", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_global_ao", 1);
+  rna_def_mesh_map_ui_update(
+      prop,
+      "Global AO",
+      "Trace everything in the bake world instead of only the baked object, so the high-poly "
+      "pieces of one source occlude each other");
+
+  prop = RNA_def_property(srna, "dilate_iterations", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "dilate_iterations");
+  RNA_def_property_range(prop, MESH_MAP_BAKE_DILATE_MIN, MESH_MAP_BAKE_DILATE_MAX);
+  rna_def_mesh_map_ui_update(
+      prop,
+      "Dilate",
+      "Passes that push the baked map into the empty background past its margin, against "
+      "mip-level seams; zero keeps the plain margin");
+
+  prop = RNA_def_property(srna, "supersampling", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "supersampling");
+  RNA_def_property_range(prop, MESH_MAP_BAKE_SUPERSAMPLING_MIN, MESH_MAP_BAKE_SUPERSAMPLING_MAX);
+  rna_def_mesh_map_ui_update(
+      prop,
+      "Supersampling",
+      "The render rasterizes at resolution times this and the commit boxes down, smoothing the "
+      "ray-traced maps' edges");
 
   prop = RNA_def_property(srna, "curvature_method", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "curvature_method");

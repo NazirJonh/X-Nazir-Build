@@ -337,10 +337,12 @@ enum eIMBInterpolationFilterMode {
 void IMB_mask_filter_extend(char *mask, int width, int height);
 void IMB_mask_clear(ImBuf *ibuf, const char *mask, int val);
 /**
- * If alpha is zero, it checks surrounding pixels and averages color. sets new alphas to 1.0
- * When a mask is given, the mask will be used instead of the alpha channel, where only
- * pixels with a mask value of 0 will be written to, and only pixels with a mask value of 1
- * will be used for the average. The mask will be set to one for the pixels which were written.
+ * If alpha is zero, it checks surrounding pixels and averages color. Sets new alphas to 1.0.
+ * When a mask is given, the mask is used instead of the alpha channel. A texel is "assigned" when
+ * its mask value is non-zero: assigned texels are never written (they may be any non-zero value,
+ * e.g. #FILTER_MASK_USED for an island and #FILTER_MASK_MARGIN for a margin fill) and are the only
+ * ones used for the average. Every texel the filter writes is marked #FILTER_MASK_MARGIN in the
+ * mask, so a caller can read which texels a pass filled.
  */
 void IMB_filter_extend(ImBuf *ibuf, char *mask, int filter);
 

@@ -218,8 +218,14 @@ class TextureMarginMap {
    * Walk over the map and for margin pixels follow the direction stored in the bottom 3
    * bits back to the face.
    * Then look up the pixel from the next face.
+   *
+   * \a assigned_mask marks every pixel the extend filter that runs after this step must leave
+   * alone: the filled margin pixels, the face pixels and the background. \a margin_mask, when
+   * given, is the caller's membership mask instead: the pixels this lookup fills are marked
+   * #FILTER_MASK_MARGIN there, while the caller's own #FILTER_MASK_USED face pixels and the
+   * background are left for it to keep.
    */
-  void lookup_pixels(ImBuf *ibuf, char *mask, int maxPolygonSteps)
+  void lookup_pixels(ImBuf *ibuf, char *assigned_mask, char *margin_mask, int maxPolygonSteps)
   {
     float4 *ibuf_ptr_fl = reinterpret_cast<float4 *>(ibuf->float_data_for_write());
     uchar4 *ibuf_ptr_ch = reinterpret_cast<uchar4 *>(ibuf->byte_data_for_write());
@@ -282,7 +288,10 @@ class TextureMarginMap {
                     ibuf, destX, destY);
               }
               /* Add our new pixels to the assigned pixel map. */
-              mask[pixel_index] = 1;
+              assigned_mask[pixel_index] = FILTER_MASK_MARGIN;
+              if (margin_mask != nullptr) {
+                margin_mask[pixel_index] = FILTER_MASK_MARGIN;
+              }
             }
           }
         }
@@ -290,7 +299,7 @@ class TextureMarginMap {
           /* These are not margin pixels, make sure the extend filter which is run after this step
            * leaves them alone.
            */
-          mask[pixel_index] = 1;
+          assigned_mask[pixel_index] = FILTER_MASK_USED;
         }
         pixel_index++;
       }
@@ -517,11 +526,17 @@ static void generate_margin(ImBuf *ibuf,
   bool draw_new_mask = false;
   /* Now the map contains 3 sorts of values: 0xFFFFFFFF for empty pixels, `0x80000000 + polyindex`
    * for margin pixels, just `polyindex` for face pixels. */
+  /* The extend filters below run on an "assigned" mask of their own: every pixel they must leave
+   * alone is non-zero there, the background included. The caller's `mask` keeps the membership
+   * instead -- #FILTER_MASK_USED for the face pixels it filled, #FILTER_MASK_MARGIN for the pixels
+   * this pass fills, #FILTER_MASK_NULL for the untouched background -- so a caller can read which
+   * texels the margin wrote without running a second indicator pass. */
+  char *assigned_mask;
   if (mask) {
-    mask = MEM_dupalloc(mask);
+    assigned_mask = MEM_dupalloc(mask);
   }
   else {
-    mask = MEM_new_array_zeroed<char>(size_t(ibuf->x) * size_t(ibuf->y), __func__);
+    assigned_mask = MEM_new_array_zeroed<char>(size_t(ibuf->x) * size_t(ibuf->y), __func__);
     draw_new_mask = true;
   }
 
@@ -543,10 +558,10 @@ static void generate_margin(ImBuf *ibuf,
     /* NOTE: we need the top bit for the dijkstra distance map. */
     BLI_assert(tri_faces[i] < 0x80000000);
 
-    map.rasterize_tri(vec[0], vec[1], vec[2], tri_faces[i], mask, draw_new_mask);
+    map.rasterize_tri(vec[0], vec[1], vec[2], tri_faces[i], assigned_mask, draw_new_mask);
   }
 
-  char *tmpmask = MEM_dupalloc(mask);
+  char *tmpmask = MEM_dupalloc(assigned_mask);
   /* Extend (with averaging) by 2 pixels. Those will be overwritten, but it
    * helps linear interpolations on the edges of polygons. */
   IMB_filter_extend(ibuf, tmpmask, 2);
@@ -556,19 +571,38 @@ static void generate_margin(ImBuf *ibuf,
 
   /* Looking further than 3 polygons away leads to so much cumulative rounding
    * that it isn't worth it. So hard-code it to 3. */
-  map.lookup_pixels(ibuf, mask, 3);
+  map.lookup_pixels(ibuf, assigned_mask, mask, 3);
 
   /* Use the extend filter to fill in the missing pixels at the corners, not strictly correct, but
    * the visual difference seems very minimal. This also catches pixels we missed because of very
    * narrow polygons.
    */
-  IMB_filter_extend(ibuf, mask, margin);
+  IMB_filter_extend(ibuf, assigned_mask, margin);
 
-  MEM_delete(mask);
+  if (mask != nullptr) {
+    /* The corner fill ran on the assigned mask; copy the memberships it added into the caller's,
+     * so it reports every texel the margin pass ended up writing. */
+    const size_t pixel_count = size_t(ibuf->x) * size_t(ibuf->y);
+    for (size_t i = 0; i < pixel_count; i++) {
+      if (mask[i] == FILTER_MASK_NULL && assigned_mask[i] == FILTER_MASK_MARGIN) {
+        mask[i] = FILTER_MASK_MARGIN;
+      }
+    }
+  }
+
+  MEM_delete(assigned_mask);
 }
 
 }  // namespace render::texturemargin
 
+/**
+ * Fill \a ibuf's empty texels from the faces adjacent across the UV seams, up to \a margin texels.
+ *
+ * The \a mask gates the pass and reports its membership: it must hold #FILTER_MASK_USED on the
+ * covered texels (as #RE_bake_mask_fill leaves it), and it comes back with the membership -- the
+ * covered texels keep #FILTER_MASK_USED, every texel the fill wrote is marked #FILTER_MASK_MARGIN,
+ * and the untouched background stays #FILTER_MASK_NULL.
+ */
 void RE_generate_texturemargin_adjacentfaces(ImBuf *ibuf,
                                              char *mask,
                                              const int margin,

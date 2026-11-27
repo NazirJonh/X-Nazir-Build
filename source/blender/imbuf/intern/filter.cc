@@ -6,11 +6,15 @@
  * \ingroup imbuf
  */
 
+#include <atomic>
 #include <cmath>
+#include <cstring>
 
 #include "MEM_guardedalloc.h"
 
+#include "BLI_index_range.hh"
 #include "BLI_math_base.h"
+#include "BLI_task.hh"
 #include "BLI_utildefines.h"
 
 #include "IMB_filter.hh"
@@ -214,16 +218,15 @@ void IMB_filter_extend(ImBuf *ibuf, char *mask, int filter)
   void *srcbuf = ibuf->float_data() ? static_cast<void *>(ibuf->float_data_for_write()) :
                                       static_cast<void *>(ibuf->byte_data_for_write());
   char *srcmask = mask;
-  int cannot_early_out = 1, r, n, k, i, j, c;
   float weight[25];
 
   /* build a weights buffer */
-  n = 1;
+  const int n = 1;
 
 #if 0
-  k = 0;
-  for (i = -n; i <= n; i++) {
-    for (j = -n; j <= n; j++) {
+  int k = 0;
+  for (int i = -n; i <= n; i++) {
+    for (int j = -n; j <= n; j++) {
       weight[k++] = sqrt(float(i) * i + j * j);
     }
   }
@@ -239,90 +242,101 @@ void IMB_filter_extend(ImBuf *ibuf, char *mask, int filter)
   weight[7] = 2;
   weight[8] = 1;
 
-  /* run passes */
-  for (r = 0; cannot_early_out == 1 && r < filter; r++) {
-    int x, y;
-    cannot_early_out = 0;
+  /* Each pass only reads the previous pass's buffers and writes a private destination, so the
+   * pass body is pure and can run over rows in parallel; only the "did this pass fill anything"
+   * flag has to be combined across threads. */
+  for (int r = 0; r < filter; r++) {
+    std::atomic<bool> filled_any = false;
+    threading::parallel_for(IndexRange(height), 64, [&](const IndexRange y_range) {
+      bool filled = false;
+      for (const int y : y_range) {
+        for (int x = 0; x < width; x++) {
+          const int index = filter_make_index(x, y, width, height);
 
-    for (y = 0; y < height; y++) {
-      for (x = 0; x < width; x++) {
-        const int index = filter_make_index(x, y, width, height);
+          /* only update unassigned pixels */
+          if (!check_pixel_assigned(srcbuf, srcmask, index, depth, is_float)) {
+            float tmp[4];
+            float wsum = 0;
+            float acc[4] = {0, 0, 0, 0};
+            int k = 0;
 
-        /* only update unassigned pixels */
-        if (!check_pixel_assigned(srcbuf, srcmask, index, depth, is_float)) {
-          float tmp[4];
-          float wsum = 0;
-          float acc[4] = {0, 0, 0, 0};
-          k = 0;
+            if (check_pixel_assigned(
+                    srcbuf, srcmask, filter_make_index(x - 1, y, width, height), depth, is_float) ||
+                check_pixel_assigned(
+                    srcbuf, srcmask, filter_make_index(x + 1, y, width, height), depth, is_float) ||
+                check_pixel_assigned(
+                    srcbuf, srcmask, filter_make_index(x, y - 1, width, height), depth, is_float) ||
+                check_pixel_assigned(
+                    srcbuf, srcmask, filter_make_index(x, y + 1, width, height), depth, is_float))
+            {
+              for (int i = -n; i <= n; i++) {
+                for (int j = -n; j <= n; j++) {
+                  if (i != 0 || j != 0) {
+                    const int tmpindex = filter_make_index(x + i, y + j, width, height);
 
-          if (check_pixel_assigned(
-                  srcbuf, srcmask, filter_make_index(x - 1, y, width, height), depth, is_float) ||
-              check_pixel_assigned(
-                  srcbuf, srcmask, filter_make_index(x + 1, y, width, height), depth, is_float) ||
-              check_pixel_assigned(
-                  srcbuf, srcmask, filter_make_index(x, y - 1, width, height), depth, is_float) ||
-              check_pixel_assigned(
-                  srcbuf, srcmask, filter_make_index(x, y + 1, width, height), depth, is_float))
-          {
-            for (i = -n; i <= n; i++) {
-              for (j = -n; j <= n; j++) {
-                if (i != 0 || j != 0) {
-                  const int tmpindex = filter_make_index(x + i, y + j, width, height);
-
-                  if (check_pixel_assigned(srcbuf, srcmask, tmpindex, depth, is_float)) {
-                    if (is_float) {
-                      for (c = 0; c < depth; c++) {
-                        tmp[c] = (static_cast<const float *>(srcbuf))[depth * tmpindex + c];
+                    if (check_pixel_assigned(srcbuf, srcmask, tmpindex, depth, is_float)) {
+                      if (is_float) {
+                        for (int c = 0; c < depth; c++) {
+                          tmp[c] = (static_cast<const float *>(srcbuf))[depth * tmpindex + c];
+                        }
                       }
-                    }
-                    else {
-                      for (c = 0; c < depth; c++) {
-                        tmp[c] = float((static_cast<const uchar *>(srcbuf))[depth * tmpindex + c]);
+                      else {
+                        for (int c = 0; c < depth; c++) {
+                          tmp[c] = float(
+                              (static_cast<const uchar *>(srcbuf))[depth * tmpindex + c]);
+                        }
                       }
-                    }
 
-                    wsum += weight[k];
+                      wsum += weight[k];
 
-                    for (c = 0; c < depth; c++) {
-                      acc[c] += weight[k] * tmp[c];
+                      for (int c = 0; c < depth; c++) {
+                        acc[c] += weight[k] * tmp[c];
+                      }
                     }
                   }
-                }
-                k++;
-              }
-            }
-
-            if (wsum != 0) {
-              for (c = 0; c < depth; c++) {
-                acc[c] /= wsum;
-              }
-
-              if (is_float) {
-                for (c = 0; c < depth; c++) {
-                  (static_cast<float *>(dstbuf))[depth * index + c] = acc[c];
-                }
-              }
-              else {
-                for (c = 0; c < depth; c++) {
-                  (static_cast<uchar *>(dstbuf))[depth * index + c] =
-                      acc[c] > 255 ? 255 : (acc[c] < 0 ? 0 : uchar(roundf(acc[c])));
+                  k++;
                 }
               }
 
-              if (dstmask != nullptr) {
-                dstmask[index] = FILTER_MASK_MARGIN; /* assigned */
+              if (wsum != 0) {
+                for (int c = 0; c < depth; c++) {
+                  acc[c] /= wsum;
+                }
+
+                if (is_float) {
+                  for (int c = 0; c < depth; c++) {
+                    (static_cast<float *>(dstbuf))[depth * index + c] = acc[c];
+                  }
+                }
+                else {
+                  for (int c = 0; c < depth; c++) {
+                    (static_cast<uchar *>(dstbuf))[depth * index + c] =
+                        acc[c] > 255 ? 255 : (acc[c] < 0 ? 0 : uchar(roundf(acc[c])));
+                  }
+                }
+
+                if (dstmask != nullptr) {
+                  dstmask[index] = FILTER_MASK_MARGIN; /* assigned */
+                }
+                filled = true;
               }
-              cannot_early_out = 1;
             }
           }
         }
       }
-    }
+      if (filled) {
+        filled_any.store(true, std::memory_order_relaxed);
+      }
+    });
 
     /* keep the original buffer up to date. */
     memcpy(srcbuf, dstbuf, bsize);
     if (dstmask != nullptr) {
       memcpy(srcmask, dstmask, size_t(width) * height);
+    }
+    if (!filled_any.load(std::memory_order_relaxed)) {
+      /* Nothing was filled: the next pass would copy the same buffers over again. */
+      break;
     }
   }
 

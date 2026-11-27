@@ -125,7 +125,11 @@ CurvePatchSampler::CurvePatchSampler(const CurvePatchItem &item,
       end_endpoint_radius_(item.geometry.spline.radius_at(total_length_) * item.params.radius),
       mtex_size_(brush.mtex.size[0], brush.mtex.size[1]),
       mtex_ofs_(brush.mtex.ofs[0], brush.mtex.ofs[1]),
-      mask_slot_(BKE_brush_mask_slot_view_get(brush, object_mode))
+      mask_slot_(texture.stamp_textures_disabled ?
+                     BrushMaskSlotView{&brush.mask_mtex,
+                                       eBrushTextureSlot::Mask,
+                                       BKE_brush_mask_texture_invert_get(brush)} :
+                     BKE_brush_mask_slot_view_get(brush, object_mode))
 {
   /* The Mask is sampled in the patch frame, so its aspect correction is a property of the slot
    * alone and can be resolved once per sampler rather than per covered element. */
@@ -245,7 +249,8 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
   const CurvePatchTextureBinding &texture = texture_;
   const CurvePatchStrokeContext &ctx = ctx_;
   const Brush &brush = brush_;
-  const MTex *mtex = &brush.mtex;
+  static const MTex empty_stamp_mtex = dna::shallow_zero_initialize();
+  const MTex *mtex = texture.stamp_textures_disabled ? &empty_stamp_mtex : &brush.mtex;
   const float2 mtex_size = mtex_size_;
   const float2 mtex_ofs = mtex_ofs_;
   const float total_length = total_length_;

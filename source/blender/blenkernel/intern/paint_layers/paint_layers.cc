@@ -1323,6 +1323,12 @@ MaterialPaintLayer *BKE_paint_layers_curve_patch_row_find(
         return false;
       }
     }
+    for (MaterialPaintLayer &item : layer.mask_stack) {
+      if (item.curve_patch == &payload) {
+        found = &item;
+        return false;
+      }
+    }
     return true;
   });
   return found;
@@ -1350,7 +1356,8 @@ bool BKE_paint_layers_curve_patch_brush_set(Material &ma,
 {
   if (row.curve_patch == nullptr || row.source != MA_PAINT_LAYER_SOURCE_CURVE_PATCH ||
       (BKE_paint_layers_owner_list(ma, row) == nullptr &&
-       BKE_paint_layers_correction_owner(ma, row) == nullptr))
+       BKE_paint_layers_correction_owner(ma, row) == nullptr &&
+       BKE_paint_layers_mask_item_owner(ma, row) == nullptr))
   {
     return false;
   }
@@ -1365,6 +1372,11 @@ bool BKE_paint_layers_curve_patch_brush_set(Material &ma,
   Brush *snapshot = paint_layer_curve_patch_brush_snapshot_create(bmain, source);
   if (snapshot == nullptr) {
     return false;
+  }
+  if (row.role == MA_PAINT_LAYER_ROLE_MASK_ITEM && snapshot->material_paint != nullptr) {
+    /* A mask Curve Patch reads a grey: its default source is the brush's Base Color slot, not the
+     * stock Alpha source (which a Paint Brush usually leaves off and would fall back to Coverage). */
+    snapshot->material_paint->mask_source = BRUSH_MATERIAL_PAINT_MASK_SOURCE_BASE_COLOR;
   }
   Brush *previous = row.curve_patch->brush;
   row.curve_patch->brush = snapshot;
@@ -1593,6 +1605,7 @@ MaterialPaintLayer *BKE_paint_layers_curve_patch_effect_add(Material &ma,
   MaterialPaintLayer *effect = paint_layer_alloc(ma, name != nullptr ? name : "Curve Patch");
   effect->role = MA_PAINT_LAYER_ROLE_EFFECT;
   effect->source = MA_PAINT_LAYER_SOURCE_CURVE_PATCH;
+  effect->kind_subtype = MA_PAINT_LAYER_CURVE_PATCH_EFFECT;
   BLI_addtail(&owner->effects, effect);
   /* Linked first: the channel records are added through the ownership check, and a fresh effect
    * starts transparent, so it lays nothing until the curves are baked into its maps. */
@@ -1609,6 +1622,49 @@ MaterialPaintLayer *BKE_paint_layers_curve_patch_effect_add(Material &ma,
 
   BKE_paint_layers_tag_edited(ma);
   return effect;
+}
+
+MaterialPaintLayer *BKE_paint_layers_curve_patch_mask_add(Material &ma,
+                                                          MaterialPaintLayer &layer,
+                                                          const char *name,
+                                                          Main &bmain)
+{
+  if (!paint_layer_in_stack(ma, &layer) || BKE_paint_layers_mask_base(layer) == nullptr ||
+      BKE_paint_layers_asset_row_is_definition_member(layer))
+  {
+    return nullptr;
+  }
+  MaterialPaintLayer *item = paint_layer_alloc(ma, name != nullptr ? name : "Mask Curve Patch");
+  item->role = MA_PAINT_LAYER_ROLE_MASK_ITEM;
+  item->source = MA_PAINT_LAYER_SOURCE_CURVE_PATCH;
+  item->kind_subtype = MA_PAINT_LAYER_CURVE_PATCH_MASK;
+  /* Mix: the item says what the coverage is where it covers, rather than scaling it as the base
+   * does. The blend is the item's own setting, like a row's. */
+  item->blend = MA_PAINT_LAYER_BLEND_MIX;
+  item->flag = MA_PAINT_LAYER_ENABLED;
+  BLI_addtail(&layer.mask_stack, item);
+  /* One channel, as every map-based mask item: its grey is the mask. The record is added once the
+   * item is part of the material, which the record edit checks. */
+  MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
+      ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  if (record == nullptr) {
+    BLI_remlink(&layer.mask_stack, item);
+    BKE_material_paint_layer_free(item);
+    BKE_paint_layers_tag_edited(ma);
+    return nullptr;
+  }
+
+  MaterialPaintLayerCurvePatch *payload = BKE_paint_layers_curve_patch_payload_create(bmain);
+  if (payload == nullptr) {
+    BLI_remlink(&layer.mask_stack, item);
+    BKE_material_paint_layer_free(item);
+    BKE_paint_layers_tag_edited(ma);
+    return nullptr;
+  }
+  item->curve_patch = payload;
+
+  BKE_paint_layers_tag_edited(ma);
+  return item;
 }
 
 /**
@@ -3095,6 +3151,20 @@ MaterialPaintLayer *BKE_paint_layers_active_mask_item_get(Material &ma)
       (layer->flag & MA_PAINT_LAYER_MASK_BASE) == 0)
   {
     return layer;
+  }
+  return nullptr;
+}
+
+MaterialPaintLayer *BKE_paint_layers_active_curve_patch_row_get(Material &ma)
+{
+  if (MaterialPaintLayer *item = BKE_paint_layers_active_mask_item_get(ma)) {
+    if (item->source == MA_PAINT_LAYER_SOURCE_CURVE_PATCH) {
+      return item;
+    }
+  }
+  MaterialPaintLayer *row = BKE_paint_layers_active_layer_get(ma);
+  if (row != nullptr && row->source == MA_PAINT_LAYER_SOURCE_CURVE_PATCH) {
+    return row;
   }
   return nullptr;
 }

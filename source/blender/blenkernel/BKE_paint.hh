@@ -2197,6 +2197,17 @@ Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get(
     uint32_t extra_channel_mask = 0);
 
 /**
+ * The one Base Color mask-map target of the active row, resolved without asking the brush's PBR
+ * channel enable list. A mask stroke and a Mask Curve Patch write that single map whatever the
+ * brush's visible channels say; the value they paint comes from the brush's Mask Source.
+ *
+ * \return an empty list when the active material is not layered, the active row has no mask, or its
+ * mask item has no Base Color map.
+ */
+Vector<PaintMaterialImageTarget> BKE_paint_material_mask_image_targets_get(
+    Object &ob, PaintModeSettings &mode_settings);
+
+/**
  * Same as #BKE_paint_material_image_targets_get, but for an explicit set of channels
  * (\a channel_mask, a bit mask of #eMaterialPaintChannel) instead of the ones the brush writes.
  *

@@ -252,6 +252,7 @@ bke::CurvePatchParams curve_patch_params_live_overlay(const Brush &brush,
 
 void curve_patch_texture_binding_clear(CurvePatchTextureBinding &r_binding)
 {
+  r_binding.stamp_textures_disabled = false;
   r_binding.stamp_texture_variants.reinitialize(0);
   r_binding.stamp_texture_weights_cdf.clear();
   r_binding.stamp_slots.reinitialize(0);
@@ -325,7 +326,8 @@ static void curve_patch_stamp_slot_from_material(const BrushCurvePatchTextureSlo
 
 void curve_patch_texture_binding_from_brush(const Brush &brush,
                                             const float radius,
-                                            CurvePatchTextureBinding &r_binding)
+                                            CurvePatchTextureBinding &r_binding,
+                                            const bool stamp_textures_disabled)
 {
   const BrushCurvePatchSettings &settings = brush.curve_patch;
   /* Every variant below is this slot with only its `tex` swapped, so all the mapping settings stay
@@ -333,6 +335,11 @@ void curve_patch_texture_binding_from_brush(const Brush &brush,
   const MTex &mtex = brush.mtex;
 
   curve_patch_texture_binding_clear(r_binding);
+  r_binding.stamp_textures_disabled = stamp_textures_disabled;
+  if (stamp_textures_disabled) {
+    /* A mask patch has no stamp texture: the Mask slot is sampled as coverage by the sampler. */
+    return;
+  }
 
   if (settings.stamp_texture_source == BRUSH_CURVE_PATCH_TEX_MULTI) {
     /* Sized up front because `Array` cannot grow -- the container is fixed-size precisely because

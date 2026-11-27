@@ -116,13 +116,17 @@ Vector<ImagePaintTarget> init_image_paint_targets(Object &ob,
   switch (paint_mode_settings.canvas_source) {
     case PAINT_CANVAS_SOURCE_MATERIAL: {
       const BrushMaterialPaint *brush_paint = brush ? brush->material_paint : nullptr;
+      const bool mask_mode =
+          BKE_paint_layers_target_mode(&paint_mode_settings) == PaintLayersTargetMode::Mask;
       const Vector<PaintMaterialImageTarget> material_targets =
-          BKE_paint_material_image_targets_get(
-              ob,
-              paint_mode_settings,
-              brush_paint,
-              visible_material_channels,
-              brush ? BKE_brush_curve_patch_slot_channel_mask(*brush) : 0);
+          mask_mode ?
+              BKE_paint_material_mask_image_targets_get(ob, paint_mode_settings) :
+              BKE_paint_material_image_targets_get(
+                  ob,
+                  paint_mode_settings,
+                  brush_paint,
+                  visible_material_channels,
+                  brush ? BKE_brush_curve_patch_slot_channel_mask(*brush) : 0);
       /* What the object mask hides belongs to the active row, so every channel map of the stroke
        * shares it. */
       bool object_masked = false;
@@ -170,7 +174,7 @@ Vector<ImagePaintTarget> init_image_paint_targets(Object &ob,
           target.mask_erase_fill = float4(fill);
         }
         target.channel_name = BKE_paint_material_channel_info(material_target.channel).ui_name;
-        if (material_target.is_color_channel) {
+        if (material_target.is_color_channel && !target.is_mask_target) {
           const float3 rgb = float3(material_target.color);
           target.color_override = float4(rgb, 1.0f);
         }
@@ -2531,6 +2535,11 @@ bool SCULPT_use_image_paint_brush(PaintModeSettings &settings,
   }
   switch (settings.canvas_source) {
     case PAINT_CANVAS_SOURCE_MATERIAL: {
+      /* A Mask stroke writes the active mask item's one Base Color map, whatever the brush's
+       * channel list says; the mask entry ensures that map. */
+      if (BKE_paint_layers_target_mode(&settings) == PaintLayersTargetMode::Mask) {
+        return !BKE_paint_material_mask_image_targets_get(ob, settings).is_empty();
+      }
       /* Multi-channel Principled maps; empty target list is a no-op (no texpaint fallback). */
       const BrushMaterialPaint *brush_paint = brush ? brush->material_paint : nullptr;
       return !BKE_paint_material_image_targets_get(

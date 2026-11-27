@@ -232,6 +232,8 @@ struct ImageCurvePatchSession {
    * the bent raster owns -- is never restored or painted over. See #curve_patch_layer_activate_2d.
    */
   bool is_bend_curve_only = false;
+  /** True for a mask Curve Patch: no stamp texture, the Mask slot is coverage. */
+  bool stamp_textures_disabled = false;
   /**
    * UV origin of the tile the Image Editor currently displays. The session's curves are in global
    * UV (so a canvas text or a 2D Curve Patch knows its UDIM tiles); the editor's region is one
@@ -309,7 +311,8 @@ ImageCurvePatchSession *image_curve_patch_session_begin_layer(bContext *C,
                                                               const Paint *paint,
                                                               Image *ref_image,
                                                               Material &ma,
-                                                              const bUUID &row_marker);
+                                                              const bUUID &row_marker,
+                                                              bool stamp_textures_disabled = false);
 
 /**
  * Whether a live 2D session edits the Curve Patch effect row identified by \a row_marker on

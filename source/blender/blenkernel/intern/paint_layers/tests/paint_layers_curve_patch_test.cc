@@ -77,6 +77,19 @@ class PaintLayersCurvePatch : public bke::BlenderGTestBase {
     return BKE_paint_layers_add_with_policy(ma, params);
   }
 
+  /** The mask Add: one Base Color map over the layer's base mask. */
+  MaterialPaintLayer *add_mask_effect(Material &ma,
+                                      MaterialPaintLayer &layer,
+                                      const Brush *brush = nullptr)
+  {
+    PaintLayerAddParams params;
+    params.kind = PaintLayerAddKind::MaskCurvePatch;
+    params.anchor = &layer;
+    params.bmain = bmain;
+    params.curve_patch_brush = brush;
+    return BKE_paint_layers_add_with_policy(ma, params);
+  }
+
   /** The assign path the Curve Patch panel drives: a snapshot duplicated from the source brush. */
   Brush *assign_brush(Material &ma, MaterialPaintLayer &effect, Brush &brush)
   {
@@ -121,6 +134,45 @@ TEST_F(PaintLayersCurvePatch, AddCreatesOwnedPayload)
   PaintVector *payload_vectors = effect->curve_patch->vectors;
   Brush *payload_brush = effect->curve_patch->brush;
   ASSERT_TRUE(BKE_paint_layers_correction_remove(*ma, effect));
+  EXPECT_EQ(payload_vectors->id.us, 0);
+  EXPECT_EQ(payload_brush->id.us, 0);
+}
+
+TEST_F(PaintLayersCurvePatch, AddMaskCorrectionCreatesOneBaseColorMap)
+{
+  Material *ma = BKE_material_add(bmain, "CPMaskMat");
+  MaterialPaintLayer *layer = add_layer(*ma);
+  ASSERT_NE(layer, nullptr);
+  ASSERT_EQ(BKE_paint_layers_mask_base(*layer), nullptr);
+  ASSERT_EQ(BLI_listbase_count(&layer->mask_stack), 0);
+
+  MaterialPaintLayer *item = add_mask_effect(*ma, *layer);
+  ASSERT_NE(item, nullptr);
+  EXPECT_EQ(item->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+  EXPECT_EQ(item->source, MA_PAINT_LAYER_SOURCE_CURVE_PATCH);
+  EXPECT_EQ(item->kind_subtype, MA_PAINT_LAYER_CURVE_PATCH_MASK);
+  ASSERT_NE(BKE_paint_layers_mask_base(*layer), nullptr);
+  ASSERT_EQ(BLI_listbase_count(&layer->mask_stack), 2);
+  ASSERT_NE(item->curve_patch, nullptr);
+  EXPECT_NE(item->curve_patch->vectors, nullptr);
+  EXPECT_EQ(item->curve_patch->brush, nullptr);
+  EXPECT_EQ(item->channels_num, 1);
+  ASSERT_NE(item->channels, nullptr);
+  EXPECT_EQ(item->channels[0].channel, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  EXPECT_EQ(item->channels[0].image, nullptr);
+
+  /* The payload lookup and the brush assign both reach a mask item, not only a content effect. */
+  EXPECT_EQ(BKE_paint_layers_curve_patch_row_find(*ma, *item->curve_patch), item);
+  Brush *brush = BKE_brush_add(bmain, "CPMaskBrush", OB_MODE_SCULPT);
+  brush->sculpt_brush_type = SCULPT_BRUSH_TYPE_PAINT;
+  Brush *snapshot = assign_brush(*ma, *item, *brush);
+  ASSERT_NE(snapshot, nullptr);
+  ASSERT_NE(snapshot->material_paint, nullptr);
+  EXPECT_EQ(snapshot->material_paint->mask_source, BRUSH_MATERIAL_PAINT_MASK_SOURCE_BASE_COLOR);
+
+  PaintVector *payload_vectors = item->curve_patch->vectors;
+  Brush *payload_brush = item->curve_patch->brush;
+  ASSERT_TRUE(BKE_paint_layers_mask_item_remove(*ma, item));
   EXPECT_EQ(payload_vectors->id.us, 0);
   EXPECT_EQ(payload_brush->id.us, 0);
 }

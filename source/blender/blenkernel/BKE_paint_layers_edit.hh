@@ -121,6 +121,13 @@ enum class PaintLayerAddKind : int8_t {
    */
   CurvePatchEffect,
   /**
+   * A Curve Patch as an item of the anchor row's mask: its curves stamp one Base Color map, whose
+   * grey is the mask value. The payload (a curve container and a duplicate of the active brush) is
+   * created with the item. Made over the base mask, which is added white first when missing.
+   * Refused without #PaintLayerAddParams::bmain.
+   */
+  MaskCurvePatch,
+  /**
    * A Text Decal as a content effect of a row (or of the row an effect hangs on): the rasterized
    * styled text of #PaintLayerAddParams::text_object is baked into its maps and re-baked when the
    * object changes, and the text is placed through the effect's own projection frame. Refused
@@ -228,7 +235,8 @@ struct PaintLayerAddParams {
    */
   int text_decal_size = 0;
   /**
-   * The brush a #PaintLayerAddKind::CurvePatchEffect takes its snapshot from, or null for a
+   * The brush a #PaintLayerAddKind::CurvePatchEffect or ::MaskCurvePatch takes its snapshot from,
+   * or null for a
    * brush-less effect. The Add policy validates it with
    * #BKE_paint_layers_curve_patch_brush_is_assignable and silently leaves the row brush-less when
    * it is not a Paint Brush that can stamp a patch (a geometry brush such as Draw or Clay, a Mask

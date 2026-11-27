@@ -983,6 +983,25 @@ def draw_texture_drop_row(layout, data, propname, label):
     return row
 
 
+def curve_patch_mask_effect_active(context):
+    """Whether the Curve Patch tool currently edits a mask item.
+
+    A mask Curve Patch has no stamp texture: the brush's Mask slot is its only texture input, and
+    the sampler consumes it as coverage. The Stroke panel hides the texture-source controls for
+    that role instead of offering a choice the session ignores.
+    """
+    settings = getattr(context, "tool_settings", None)
+    paint_mode = getattr(settings, "paint_mode", None) if settings is not None else None
+    if paint_mode is None or paint_mode.layer_target_mode != 'MASK':
+        return False
+    ob = getattr(context, "object", None)
+    ma = ob.active_material if ob is not None else None
+    if ma is None or not ma.is_layered:
+        return False
+    item = ma.paint_layers.active_mask_item
+    return item is not None and item.source == 'CURVE_PATCH'
+
+
 def draw_curve_patch_brush_drop_row(layout, payload):
     """Brush slot of a Curve Patch effect: the ID browser of the brush it was made from.
 
@@ -1084,6 +1103,7 @@ class StrokePanel(BrushPanel):
         if brush.stroke_method == 'CURVE_PATCH' and mode in {'SCULPT', 'PAINT_2D'}:
             tex_slot = brush.texture_slot
             cp = brush.curve_patch
+            mask_effect = curve_patch_mask_effect_active(context)
             if mode == 'SCULPT':
                 # Curve Patch applies its own relief directly and never reaches the brush
                 # implementation, so every supported brush gives the same result. Say so,
@@ -1141,8 +1161,12 @@ class StrokePanel(BrushPanel):
                     # degenerate to the same result there.
                     col.row().prop(cp, "stamp_projection", text="Projection", expand=True)
                 col.separator()
-                col.row().prop(cp, "stamp_texture_source", text="Textures", expand=True)
-                if cp.stamp_texture_source == 'MULTI':
+                if mask_effect:
+                    col.label(text="Texture: the brush's Mask slot", icon='MOD_MASK')
+                source_row = col.row()
+                source_row.active = not mask_effect
+                source_row.prop(cp, "stamp_texture_source", text="Textures", expand=True)
+                if not mask_effect and cp.stamp_texture_source == 'MULTI':
                     row = col.row()
                     # A context pointer set on a layout is inherited only by its children, so the
                     # list target is published on each layout hosting a drop target: the list
@@ -1215,8 +1239,10 @@ class StrokePanel(BrushPanel):
                                 icon='UV_DATA')
                         col.prop(active_slot, "weight", text="Weight")
             else:
-                col.row().prop(cp, "ribbon_texture_source", text="Textures", expand=True)
-                if cp.ribbon_texture_source == 'MULTI':
+                source_row = col.row()
+                source_row.active = not mask_effect
+                source_row.prop(cp, "ribbon_texture_source", text="Textures", expand=True)
+                if not mask_effect and cp.ribbon_texture_source == 'MULTI':
                     draw_texture_drop_row(col, cp, "texture_start", "Start")
                     col.prop(cp, "cap_start_length", text="Start Length")
                     draw_texture_drop_row(col, cp, "texture_middle", "Middle")

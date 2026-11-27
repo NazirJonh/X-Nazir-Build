@@ -550,11 +550,14 @@ static void session_resolve_texture_bindings(CurvePatchSession &session, const B
      * active patch's radius -- the only one whose brush the user is currently looking at. Each
      * secondary gets its own binding in ITS local units in #session_sync_secondary_mirrors (the
      * ribbon caps are lengths). */
-    curve_patch_texture_binding_from_brush(
-        *tex_brush, session.active_item().params.radius, session.doc.texture);
+    curve_patch_texture_binding_from_brush(*tex_brush,
+                                            session.active_item().params.radius,
+                                            session.doc.texture,
+                                            session.stamp_textures_disabled);
   }
   else {
     curve_patch_texture_binding_clear(session.doc.texture);
+    session.doc.texture.stamp_textures_disabled = session.stamp_textures_disabled;
   }
 }
 
@@ -583,10 +586,12 @@ static void session_sync_secondary_mirrors(CurvePatchSession &session,
       curve_patch_texture_binding_from_brush(
           *tex_brush,
           target.mirror_items[session.doc.active_patch].params.radius,
-          *target.texture);
+          *target.texture,
+          session.stamp_textures_disabled);
     }
     else {
       curve_patch_texture_binding_clear(*target.texture);
+      target.texture->stamp_textures_disabled = session.stamp_textures_disabled;
     }
   });
 }
@@ -779,8 +784,9 @@ const char *curve_patch_space_mismatch_message(const bContext &C)
     return nullptr;
   }
   Material *ma = BKE_object_material_get(const_cast<Object *>(ob), ob->actcol);
-  const MaterialPaintLayer *row = ma != nullptr ? BKE_paint_layers_active_layer_get(*ma) :
-                                                  nullptr;
+  const MaterialPaintLayer *row = ma != nullptr ?
+                                       BKE_paint_layers_active_curve_patch_row_get(*ma) :
+                                       nullptr;
   if (row == nullptr || row->source != MA_PAINT_LAYER_SOURCE_CURVE_PATCH ||
       row->curve_patch == nullptr || (row->flag & MA_PAINT_LAYER_ENABLED) == 0 ||
       curve_patch_layer_row_space(*row) != MA_CURVE_PATCH_SPACE_2D)
@@ -1543,7 +1549,8 @@ CurvePatchSession *curve_patch_start_from_layer(
     const FunctionRef<void(CurvePatchDocument &)> publish_document,
     const ViewContext &vc,
     const FunctionRef<void(Span<int>)> prepare_canvas,
-    const bool curve_only)
+    const bool curve_only,
+    const bool stamp_textures_disabled)
 {
   if (ob.runtime->sculpt_session == nullptr) {
     BKE_report(CTX_wm_reports(&C), RPT_WARNING, "Curve Patch: the object has no Sculpt session");
@@ -1577,6 +1584,7 @@ CurvePatchSession *curve_patch_start_from_layer(
 
   CurvePatchSession *session = MEM_new<CurvePatchSession>(__func__);
   session->is_bend_curve_only = curve_only;
+  session->stamp_textures_disabled = stamp_textures_disabled;
   /* The document is the one \a publish_document fills: the owned container's items for the vector
    * source (frozen parameters straight from DNA), the curve object's evaluated splines for the
    * object source. A publish drops the curves it cannot use; what remains must stamp. */
@@ -1611,13 +1619,16 @@ CurvePatchSession *curve_patch_start_from_layer(
     MEM_delete(session);
     return nullptr;
   }
-  if (brush->material_paint == nullptr ||
-      BKE_paint_material_image_targets_get(ob,
-                                           paint_mode_settings,
-                                           brush->material_paint,
-                                           sd.paint.visible_material_channels)
-          .is_empty())
-  {
+  const bool mask_stroke =
+      BKE_paint_layers_target_mode(&paint_mode_settings) == PaintLayersTargetMode::Mask;
+  const Vector<PaintMaterialImageTarget> image_targets =
+      mask_stroke ?
+          BKE_paint_material_mask_image_targets_get(ob, paint_mode_settings) :
+          BKE_paint_material_image_targets_get(ob,
+                                               paint_mode_settings,
+                                               brush->material_paint,
+                                               sd.paint.visible_material_channels);
+  if (image_targets.is_empty()) {
     BKE_report(CTX_wm_reports(&C),
                RPT_WARNING,
                curve_patch_refusal_message(CurvePatchRefusal::NoImageCanvas));
@@ -1953,7 +1964,7 @@ void ED_curve_patch_overlay_data_get_stack(const Object *ob,
   if (ma == nullptr) {
     return;
   }
-  const MaterialPaintLayer *row = BKE_paint_layers_active_layer_get(
+  const MaterialPaintLayer *row = BKE_paint_layers_active_curve_patch_row_get(
       const_cast<Material &>(*ma));
   if (row == nullptr || row->source != MA_PAINT_LAYER_SOURCE_CURVE_PATCH ||
       row->curve_patch == nullptr)

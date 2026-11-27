@@ -306,6 +306,40 @@ static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
     }
     return effect;
   }
+  if (params.kind == PaintLayerAddKind::MaskCurvePatch) {
+    /* Aimed at a correction or a mask item, an Add means one more on the row it hangs on. */
+    MaterialPaintLayer *owner = params.anchor;
+    if (owner != nullptr) {
+      if (MaterialPaintLayer *parent = BKE_paint_layers_correction_owner(ma, *owner)) {
+        owner = parent;
+      }
+      else if (MaterialPaintLayer *item_parent = BKE_paint_layers_mask_item_owner(ma, *owner)) {
+        owner = item_parent;
+      }
+    }
+    if (owner == nullptr || params.bmain == nullptr) {
+      return nullptr;
+    }
+    /* Like any mask correction, it lays over the base mask: made first, white. */
+    const bool base_added = BKE_paint_layers_mask_base(*owner) == nullptr;
+    if (base_added && BKE_paint_layers_mask_add(ma, owner, 1.0f) == nullptr) {
+      return nullptr;
+    }
+    const std::string name = numbered_effect_name(owner->mask_stack, "Mask Curve Patch", params.name);
+    MaterialPaintLayer *item = BKE_paint_layers_curve_patch_mask_add(
+        ma, *owner, name.c_str(), *params.bmain);
+    if (item == nullptr && base_added) {
+      /* A refused Add leaves nothing behind, the base mask it made included. */
+      BKE_paint_layers_mask_remove(ma, owner);
+    }
+    if (item != nullptr && params.curve_patch_brush != nullptr &&
+        BKE_paint_layers_curve_patch_brush_is_assignable(*params.curve_patch_brush))
+    {
+      BKE_paint_layers_curve_patch_brush_set(
+          ma, *params.bmain, *item, *params.curve_patch_brush);
+    }
+    return item;
+  }
   if (params.kind == PaintLayerAddKind::TextDecalEffect) {
     /* An Add aimed at an effect means another one on the row it hangs on. */
     MaterialPaintLayer *owner = params.anchor;

@@ -103,6 +103,21 @@ struct CurvePatchLiveInputs {
   int mask_map_mode = 0;
   int mask_mapping = 0;
   bool mask_invert = false;
+  /**
+   * The PBR Mask slot (`Brush.mask_mtex`) as a mask Curve Patch samples it. The 3D layer patch
+   * deliberately does not use the legacy Sculpt swap: the slot the brush panel calls "Mask" is
+   * `mask_mtex`, and dragging a texture there must re-stamp against it.
+   */
+  const void *pbr_mask_tex = nullptr;
+  const void *pbr_mask_tex_image = nullptr;
+  uint64_t pbr_mask_tex_pixel_version = 0;
+  float2 pbr_mask_tex_size = float2(0.0f);
+  float2 pbr_mask_tex_ofs = float2(0.0f);
+  float pbr_mask_tex_rot = 0.0f;
+  int pbr_mask_mapping_flags = 0;
+  int pbr_mask_map_mode = 0;
+  int pbr_mask_mapping = 0;
+  bool pbr_mask_invert = false;
   float texture_sample_bias = 0.0f;
   /** Identity of the Mask slot's extended correction (#Brush.mask_correction), 0 when it is off.
    * Folded as a hash rather than as spelled-out fields: the pointwise and spatial stacks carry a
@@ -139,6 +154,10 @@ struct CurvePatchLiveInputs {
   {
     return tex != prev.tex || mask_tex != prev.mask_tex ||
            mask_tex_image != prev.mask_tex_image ||
+           mask_tex_pixel_version != prev.mask_tex_pixel_version ||
+           pbr_mask_tex != prev.pbr_mask_tex ||
+           pbr_mask_tex_image != prev.pbr_mask_tex_image ||
+           pbr_mask_tex_pixel_version != prev.pbr_mask_tex_pixel_version ||
            tex_edit_count != prev.tex_edit_count || tex_size != prev.tex_size ||
            tex_ofs != prev.tex_ofs || texture_pointer_digest != prev.texture_pointer_digest ||
            cap_tex_start != prev.cap_tex_start || cap_tex_middle != prev.cap_tex_middle ||

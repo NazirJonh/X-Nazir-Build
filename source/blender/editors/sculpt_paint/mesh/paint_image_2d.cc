@@ -5235,8 +5235,14 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
       }
     }
 
-    const Vector<PaintMaterialImageTarget> targets = BKE_paint_material_image_targets_get(
-        *ob, paint_mode, &brush_paint, settings->imapaint.paint.visible_material_channels);
+    const Vector<PaintMaterialImageTarget> targets =
+        mask_target_mode ?
+            BKE_paint_material_mask_image_targets_get(*ob, paint_mode) :
+            BKE_paint_material_image_targets_get(
+                *ob,
+                paint_mode,
+                &brush_paint,
+                settings->imapaint.paint.visible_material_channels);
     if (targets.is_empty()) {
       return nullptr;
     }

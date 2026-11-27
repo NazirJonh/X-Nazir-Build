@@ -38,7 +38,6 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_curve_patch_object.hh"
-#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_paint_vector.hh"
 
@@ -197,6 +196,7 @@ struct PassiveStampScope {
   const short actcol;
   const bUUID active_row;
   const ePaintCanvasSource canvas_source;
+  const int8_t layer_target_mode;
   Brush *const brush;
   const float overlap_factor;
 
@@ -206,7 +206,8 @@ struct PassiveStampScope {
                     Sculpt &sd,
                     Brush &snapshot,
                     const int slot,
-                    const bUUID &row_marker)
+                    const bUUID &row_marker,
+                    const bool mask_role)
       : stamp_object(stamp_object),
         ma(ma),
         paint_mode(paint_mode),
@@ -214,6 +215,7 @@ struct PassiveStampScope {
         actcol(stamp_object.actcol),
         active_row(ma.active_layer_marker),
         canvas_source(paint_mode.canvas_source),
+        layer_target_mode(paint_mode.layer_target_mode),
         brush(sd.paint.brush),
         overlap_factor(sd.paint.runtime->overlap_factor)
   {
@@ -222,6 +224,7 @@ struct PassiveStampScope {
      * with none, not with the row this stamp aimed at. */
     BKE_paint_layers_active_set(ma, row_marker);
     paint_mode.canvas_source = PAINT_CANVAS_SOURCE_MATERIAL;
+    paint_mode.layer_target_mode = mask_role ? PAINT_LAYER_TARGET_MASK : PAINT_LAYER_TARGET_CONTENT;
     /* A plain pointer swap: the apply and the symmetry machinery read the active brush, and the
      * row's snapshot is the tool this stamp runs. The script path runs the same machinery on
      * whatever brush is active, so nothing beyond the pointer is needed. */
@@ -233,6 +236,7 @@ struct PassiveStampScope {
     sd.paint.runtime->overlap_factor = overlap_factor;
     sd.paint.brush = brush;
     paint_mode.canvas_source = canvas_source;
+    paint_mode.layer_target_mode = layer_target_mode;
     BKE_paint_layers_active_set(ma, active_row);
     stamp_object.actcol = actcol;
   }
@@ -255,12 +259,7 @@ static bool curve_patch_layer_object_maps_reset(Object &stamp_object,
     if (!target.is_material_channel) {
       continue;
     }
-    PaintLayersTarget reset_target;
-    reset_target.material = &ma;
-    reset_target.layer = &row;
-    reset_target.channel = int(target.channel);
-    reset_target.mode = PaintLayersTargetMode::Content;
-    maps_reset |= BKE_paint_layers_target_content_reset(reset_target);
+    maps_reset |= curve_patch_layer_row_map_reset(ma, row, int(target.channel));
   }
   return maps_reset;
 }
@@ -348,13 +347,20 @@ static CurvePatchLayerRestampStatus curve_patch_layer_object_source_rebuild_pass
     return CurvePatchLayerRestampStatus::Unsupported;
   }
   PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
-  PassiveStampScope stamp_scope(
-      *stamp_object, ma, paint_mode, *sd, *snapshot, slot, row.marker);
+  PassiveStampScope stamp_scope(*stamp_object,
+                                 ma,
+                                 paint_mode,
+                                 *sd,
+                                 *snapshot,
+                                 slot,
+                                 row.marker,
+                                 row.role == MA_PAINT_LAYER_ROLE_MASK_ITEM);
 
   const bool maps_reset = curve_patch_layer_object_maps_reset(
       *stamp_object, ma, row, paint_mode, *sd, *snapshot);
 
-  const CurvePatchApplyInput input;
+  CurvePatchApplyInput input;
+  input.stamp_textures_disabled = row.role == MA_PAINT_LAYER_ROLE_MASK_ITEM;
   const CurvePatchApplyStatus stamp_status = curve_patch_apply_with_status(
       *scene,
       *depsgraph,
@@ -484,12 +490,7 @@ CurvePatchLayerRestampStatus ED_curve_patch_layer_row_restamp(Main &bmain,
       if (!target.is_material_channel) {
         continue;
       }
-      PaintLayersTarget paint_target;
-      paint_target.material = &ma;
-      paint_target.layer = &row;
-      paint_target.channel = int(target.channel);
-      paint_target.mode = PaintLayersTargetMode::Content;
-      BKE_paint_layers_target_content_reset(paint_target);
+      ed::sculpt_paint::curve_patch_layer_row_map_reset(ma, row, int(target.channel));
     }
   }
   if (session->view_context.C != nullptr) {

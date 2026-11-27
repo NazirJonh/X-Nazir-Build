@@ -605,16 +605,24 @@ StackRow paint_mask_item_row_build(const Material &material,
   row.locked = BKE_paint_layers_is_locked(item);
   row.supported = true;
   const bool text_decal = item.source == MA_PAINT_LAYER_SOURCE_TEXT;
+  const bool curve_patch = item.source == MA_PAINT_LAYER_SOURCE_CURVE_PATCH;
   row.name = item.name[0] != '\0' ?
                  item.name :
                  (from_material ? "Material Mask" :
                                   (text_decal ? "Mask Text Decal" :
-                                                (fill ? "Mask Fill" : "Mask Paint")));
+                                                (curve_patch ? "Mask Curve Patch" :
+                                                               (fill ? "Mask Fill" :
+                                                                       "Mask Paint"))));
   row.name_buffer = const_cast<char *>(item.name);
   if (text_decal) {
     /* As the effect form: the action jumps into the source Text object's Edit Mode. */
     row.action_icon = ICON_FONT_DATA;
     row.action_tooltip = TIP_("Edit Text: enter the Edit Mode of the Text object this mask reads");
+  }
+  if (curve_patch) {
+    /* The mask item's action is its tool entrance, as the content effect's is. */
+    row.action_icon = ICON_CURVE_DATA;
+    row.action_tooltip = TIP_("Edit Curves: enter the Curve Patch tool of this mask item");
   }
   /* The icons and glyphs the Add Effect menu names these roles by, through the one look: a Mask
    * Paint Correction is the Grease Pencil paint icon there, so the row it makes reads the same. */
@@ -1681,14 +1689,28 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
           subtype);
     }
 
-    /* 3D control curves stamped through a brush snapshot of the effect's own. Only an effect: there
-     * is no Curve Patch layer. */
+    /* 3D control curves stamped through a brush snapshot of the effect's own. One Effects line: it
+     * lays over the active layer's colour, or over its mask while a mask slot is the one showing. */
     add(with_look(effect({"CURVE_PATCH_CORRECTION",
                           N_("Curve Patch"),
                           "3D control curves stamped through the effect's own brush snapshot, laid "
-                          "over the active layer's colour, below the layer's own blend"}),
+                          "over the active target: the layer's colour, or its mask while a mask "
+                          "slot is the one showing"}),
                   paint_look_for_source(MA_PAINT_LAYER_SOURCE_CURVE_PATCH, PaintLookRole::Content)),
-        PaintLayerAddKind::CurvePatchEffect);
+        PaintLayerAddKind::CurvePatchEffect,
+        0,
+        PaintLayerAddKind::MaskCurvePatch,
+        N_("Curve Patch"));
+    /* The mask role the entry above folds into while a mask slot is the one showing. It keeps the
+     * same name: the Effects menu lists one Curve Patch line, never a separate mask item. */
+    add(with_look(effect({"CURVE_PATCH_MASK",
+                          N_("Curve Patch"),
+                          "Control curves stamped through the effect's own brush snapshot into the "
+                          "active layer's mask; the brush's Mask slot supplies the texture"}),
+                  paint_look_for_source(MA_PAINT_LAYER_SOURCE_CURVE_PATCH,
+                                        PaintLookRole::MaskItem,
+                                        MA_PAINT_LAYER_CURVE_PATCH_MASK)),
+        PaintLayerAddKind::MaskCurvePatch);
 
     /* The styled text of a Text object, baked into the effect's maps. Only an effect: there is no
      * Text Decal layer. The Add names the Text object, which row_add checks. */
@@ -1954,7 +1976,7 @@ static bool stack_layer_curve_patch_edit_poll(bContext *C)
     return false;
   }
   Material &material = id_cast<Material &>(*owner);
-  const MaterialPaintLayer *row = BKE_paint_layers_active_layer_get(material);
+  const MaterialPaintLayer *row = BKE_paint_layers_active_curve_patch_row_get(material);
   return row != nullptr && row->source == MA_PAINT_LAYER_SOURCE_CURVE_PATCH &&
          row->curve_patch != nullptr;
 }
@@ -2966,7 +2988,10 @@ class PaintLayersStackSource final : public StackSource,
       params.source = id_cast<Material *>(args.source);
     }
     params.kind = add_kind;
-    if (params.kind == PaintLayerAddKind::CurvePatchEffect) {
+    if (ELEM(params.kind,
+             PaintLayerAddKind::CurvePatchEffect,
+             PaintLayerAddKind::MaskCurvePatch))
+    {
       /* The payload is created with the effect: a database for its PaintVector. The Add also takes
        * the active brush when it is a usable source, so the typical Add opens the tool at once;
        * an unusable one (a Sculpt brush that cannot stamp a patch) leaves the row brush-less and
@@ -3072,7 +3097,8 @@ class PaintLayersStackSource final : public StackSource,
                                          PaintLayerAddKind::MaskFilter,
                                          PaintLayerAddKind::AnchorPointMaskCorrection,
                                          PaintLayerAddKind::MaskGradient,
-                                         PaintLayerAddKind::MaskTextDecal);
+                                         PaintLayerAddKind::MaskTextDecal,
+                                         PaintLayerAddKind::MaskCurvePatch);
     const bool is_correction = is_mask_correction || is_filter ||
                                ELEM(params.kind,
                                     PaintLayerAddKind::Correction,

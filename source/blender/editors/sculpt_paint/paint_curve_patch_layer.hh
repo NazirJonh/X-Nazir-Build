@@ -513,6 +513,14 @@ bool ED_paint_layers_curve_patch_row_maps_ensure(bContext &C,
                                                 Material &ma,
                                                 MaterialPaintLayer &row);
 
+/**
+ * Reset one map the session is about to re-render: a content target addresses the row's channel
+ * record, a mask target its single Base Color record through the item. Shared by the interactive
+ * entry and the passive object-source rebuild so the two cannot disagree on the mask/content
+ * branch.
+ */
+bool curve_patch_layer_row_map_reset(Material &ma, MaterialPaintLayer &row, int channel);
+
 /** \} */
 
 /* -------------------------------------------------------------------- */

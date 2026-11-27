@@ -34,6 +34,7 @@
 #include "BKE_image.hh"
 #include "BKE_image_paint_selection.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_types.hh"
 
 #include "DNA_brush_types.h"
@@ -237,8 +238,10 @@ void image_curve_patch_geometry_rebuild(bContext *C, ImageCurvePatchSession &ses
    * the radius; a layer whose curves carry different widths gets the active curve's caps, which
    * is the same approximation the single-patch path made for its one curve. */
   if (session.doc.has_active_item()) {
-    curve_patch_texture_binding_from_brush(
-        *brush, session.doc.active_item().params.radius, session.doc.texture);
+    curve_patch_texture_binding_from_brush(*brush,
+                                            session.doc.active_item().params.radius,
+                                            session.doc.texture,
+                                            session.stamp_textures_disabled);
   }
 
   /* 5. Build each patch from its (already-in-pixel-space) control curve.
@@ -343,6 +346,7 @@ struct RasterTarget {
   bool is_material_channel = false;
   bool is_color_channel = false;
   bool is_normal_channel = false;
+  bool is_mask_target = false;
   eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
   /** What this canvas paints where no source supplies a color: the channel RGB, the packed
    * direction for Normal, grey `(v, v, v)` for a scalar channel, or the brush color for the
@@ -375,8 +379,12 @@ static Vector<RasterTarget> resolve_targets(bContext *C,
       brush.material_paint != nullptr)
   {
     const BrushMaterialPaint &brush_paint = *brush.material_paint;
-    const Vector<PaintMaterialImageTarget> material_targets = BKE_paint_material_image_targets_get(
-        *ob, paint_mode, &brush_paint, paint.visible_material_channels);
+    const bool mask_mode =
+        BKE_paint_layers_target_mode(&paint_mode) == PaintLayersTargetMode::Mask;
+    const Vector<PaintMaterialImageTarget> material_targets =
+        mask_mode ? BKE_paint_material_mask_image_targets_get(*ob, paint_mode) :
+                    BKE_paint_material_image_targets_get(
+                        *ob, paint_mode, &brush_paint, paint.visible_material_channels);
     for (const PaintMaterialImageTarget &material_target : material_targets) {
       if (material_target.image == nullptr) {
         continue;
@@ -386,12 +394,21 @@ static Vector<RasterTarget> resolve_targets(bContext *C,
       target.is_material_channel = true;
       target.is_color_channel = material_target.is_color_channel;
       target.is_normal_channel = material_target.is_normal_channel;
+      target.is_mask_target = mask_mode &&
+                              material_target.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR;
       target.channel = material_target.channel;
-      target.blend = IMB_BlendMode(
-          BKE_paint_material_channel_blend_mode(brush_paint, material_target.channel, invert));
-      /* The same three cases #init_image_paint_targets and `paint_2d_new_stroke()` resolve, in
-       * the same order, so a channel means the same thing on all three canvases. */
-      if (material_target.is_color_channel) {
+      target.blend = target.is_mask_target ?
+                         IMB_BLEND_MIX :
+                         IMB_BlendMode(BKE_paint_material_channel_blend_mode(
+                             brush_paint, material_target.channel, invert));
+      /* The same cases #init_image_paint_targets and `paint_2d_new_stroke()` resolve, in the same
+       * order, so a channel means the same thing on all three canvases. A mask canvas is one grey
+       * from the brush's Mask Source, never a channel colour or a ribbon texture. */
+      if (target.is_mask_target) {
+        target.flat_color = float3(
+            BKE_paint_material_mask_value_get(brush_paint, paint, brush, invert));
+      }
+      else if (material_target.is_color_channel) {
         target.flat_color = BKE_paint_material_channel_color_get(
             brush_paint, paint, brush, material_target.channel, invert);
       }
@@ -450,7 +467,7 @@ static WrittenBounds blend_tile_region(const TileRegion &region,
 {
   /* Whether this canvas takes its RGB from the RIBBON's own texture. Normal packs a direction and
    * a scalar channel carries one value, so neither can. Mirrors the 3D `target_paints_color`. */
-  const bool target_paints_color = !target.is_normal_channel &&
+  const bool target_paints_color = !target.is_mask_target && !target.is_normal_channel &&
                                    (target.is_color_channel || !target.is_material_channel);
   const bool target_has_source = target.is_material_channel && channel_sources != nullptr &&
                                  channel_sources->has_usable_source(target.channel);
@@ -469,8 +486,9 @@ static WrittenBounds blend_tile_region(const TileRegion &region,
   uchar *byte_data = is_float ? nullptr : ibuf.byte_data_for_write();
   const ColorSpace *byte_colorspace = is_float ? nullptr : ibuf.byte_buffer.colorspace;
   /* Randomize Color, scoped as described at its use below. */
-  const bool target_jitters_color = target.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR ||
-                                    !target.is_material_channel;
+  const bool target_jitters_color = !target.is_mask_target &&
+                                    (target.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR ||
+                                     !target.is_material_channel);
   /* A byte canvas stores colors in its own color space, so every written pixel needs one
    * scene-linear -> canvas conversion. Done per pixel that is an OCIO call each, which cost ~10 us
    * apiece in the measured log and dominated the whole restamp (Normal, the one target that is
@@ -492,11 +510,11 @@ static WrittenBounds blend_tile_region(const TileRegion &region,
   const int row_count = region.y1 - region.y0;
   const int width = region.x1 - region.x0;
   threading::EnumerableThreadSpecific<WrittenBounds> written_tls;
-  threading::parallel_for(IndexRange(row_count), 1, [&](const IndexRange row_range) {
-    /* The sampler is per-iteration, but the thread id it receives also selects the per-thread
-     * node-tree exec stack in #RE_texture_evaluate and the per-thread RNG. Those live in the
-     * shared #Tex, not in the sampler, so a constant id would let every worker mutate slot 0
-     * at once. */
+  /* Build one sampler per task, not one per row: its constructor resolves the Mask slot aspect,
+   * the mask correction and the PBR stamp masks, which are all properties of the brush, not of the
+   * row. A 2K canvas otherwise paid that construction 2K times. The grain size lets a task own a
+   * band of rows, so the reusable arrays below and the sampler are amortized over it too. */
+  threading::parallel_for(IndexRange(row_count), 16, [&](const IndexRange row_range) {
     const int thread_id = BLI_task_parallel_thread_id(nullptr);
     WrittenBounds &written = written_tls.local();
     /* One row's worth of pixels waiting for the batched color conversion above. */
@@ -516,6 +534,15 @@ static WrittenBounds blend_tile_region(const TileRegion &region,
       pending_rgb.reserve(width);
       pending_alpha.reserve(width);
     }
+    CurvePatchSourceGeometry source;
+    source.positions = positions;
+    source.normals = normals;
+    source.orig_positions = nullptr;
+    source.indices_are_mesh_verts = false;
+    /* The sampler holds the spans, not the values: every row below overwrites `positions` in
+     * place, so one construction serves the whole task band. */
+    const CurvePatchSampler sampler(
+        patch, texture, ctx, brush, source, /*mask=*/{}, tex_pool, OB_MODE_TEXTURE_PAINT);
     for (const int row_offset : row_range) {
       const int y_px = region.y0 + row_offset;
 
@@ -566,15 +593,6 @@ static WrittenBounds blend_tile_region(const TileRegion &region,
             uv, ref_tile_uv_origin, ref_tile_resolution);
         positions[i] = float3(ref_px.x, ref_px.y, 0.0f);
       }
-
-      CurvePatchSourceGeometry source;
-      source.positions = positions;
-      source.normals = normals;
-      source.orig_positions = nullptr;
-      source.indices_are_mesh_verts = false;
-
-      CurvePatchSampler sampler(
-          patch, texture, ctx, brush, source, /*mask=*/{}, tex_pool, OB_MODE_TEXTURE_PAINT);
 
       for (const int i : IndexRange(width)) {
         const float selection_weight = row_selection.is_empty() ? 1.0f : row_selection[i];
@@ -634,11 +652,13 @@ static WrittenBounds blend_tile_region(const TileRegion &region,
                 float3(1.0f, 0.0f, 0.0f),
                 float3(0.0f, 1.0f, 0.0f));
           }
-          else if (target.is_color_channel) {
+          else if (target.is_color_channel && !target.is_mask_target) {
             paint_rgb = channel_sources->color_at_uv(
                 target.channel, sample->patch_uv, thread_id, /*decode_linear=*/!defer_decode);
           }
           else {
+            /* A mask canvas takes the source's intensity, not its RGB: the same scalar a Mask
+             * stroke reads, then the Mask slot clips the coverage. */
             paint_rgb = float3(
                 channel_sources->scalar_at_uv(target.channel, sample->patch_uv, thread_id));
           }
@@ -812,8 +832,12 @@ void image_curve_patch_raster_draw(bContext *C, ImageCurvePatchSession &session)
   if (!invert && brush->material_paint != nullptr &&
       paint_mode.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL)
   {
-    channel_source_set.emplace(
-        *brush->material_paint, paint_mode, paint->visible_material_channels);
+    const bool resolve_mask_source =
+        paint_mode.layer_target_mode == PAINT_LAYER_TARGET_MASK;
+    channel_source_set.emplace(*brush->material_paint,
+                               paint_mode,
+                               paint->visible_material_channels,
+                               resolve_mask_source);
     if (channel_source_set->is_active()) {
       channel_sources.emplace(
           *channel_source_set, *brush->material_paint, paint_mode, *paint, *brush);

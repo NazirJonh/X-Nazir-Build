@@ -1665,12 +1665,12 @@ static const PaintLayerKindInfo kinds[] = {
     /* A Curve Patch owns the channel maps its 3D control curves are stamped into, through a
      * private brush snapshot. It is therefore paintable like an Image row (NOT
      * #PAINT_LAYER_KIND_READS_SOURCE, which means "owns no map"): its maps are both the stroke
-     * target during a session and the output of its bake. It exists only as a content effect: it
-     * lays the stamped maps over the row it hangs on, below the row's own blend, and is never a
-     * layer of the stack. The kind has no float parameters of its own: the tool settings live in
-     * the snapshot. */
+     * target during a session and the output of its bake. As a content effect it lays the stamped
+     * maps over the row it hangs on, below the row's own blend; as a mask item it lays its one Base
+     * Color map as the mask's grey. It is never a layer of the stack. The kind has no float
+     * parameters of its own: the tool settings live in the snapshot. */
     {MA_PAINT_LAYER_SOURCE_CURVE_PATCH,
-     0,
+     MA_PAINT_LAYER_CURVE_PATCH_EFFECT,
      "Curve Patch",
      PaintLayerKindCategory::Source,
      uint8_t(paint_layer_role_bit(MA_PAINT_LAYER_ROLE_EFFECT)),
@@ -1678,6 +1678,18 @@ static const PaintLayerKindInfo kinds[] = {
      0,
      0,
      true},
+    /* The mask form: one Base Color map, painted by the same Curve Patch tool. The mask value is a
+     * single grey, so the item carries no other channel records; its tool has no stamp textures and
+     * reads the brush's Mask slot as coverage alone. */
+    {MA_PAINT_LAYER_SOURCE_CURVE_PATCH,
+     MA_PAINT_LAYER_CURVE_PATCH_MASK,
+     "Mask Curve Patch",
+     PaintLayerKindCategory::Source,
+     mask_item_roles,
+     nullptr,
+     0,
+     0,
+     false},
     /* A Text Decal effect is a Fill-like row: each channel holds a constant value or the texture
      * the user dropped on it (#PAINT_LAYER_KIND_FLAT_VALUE, so a value edit is the cheap
      * values-only sync and a Fill's rules for textures, mapping and strokes apply). The rasterized

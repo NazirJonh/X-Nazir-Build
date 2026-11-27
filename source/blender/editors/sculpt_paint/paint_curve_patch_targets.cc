@@ -29,6 +29,7 @@
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
@@ -290,9 +291,15 @@ static Vector<const Image *> curve_patch_canvas_images(Object &ob,
 {
   Vector<const Image *> images;
   if (paint_mode_settings.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL) {
-    for (const PaintMaterialImageTarget &target : BKE_paint_material_image_targets_get(
-             ob, paint_mode_settings, brush.material_paint, visible_material_channels))
-    {
+    const bool mask_mode =
+        BKE_paint_layers_target_mode(&paint_mode_settings) == PaintLayersTargetMode::Mask;
+    const Vector<PaintMaterialImageTarget> targets =
+        mask_mode ? BKE_paint_material_mask_image_targets_get(ob, paint_mode_settings) :
+                    BKE_paint_material_image_targets_get(ob,
+                                                         paint_mode_settings,
+                                                         brush.material_paint,
+                                                         visible_material_channels);
+    for (const PaintMaterialImageTarget &target : targets) {
       images.append(target.image);
     }
     return images;

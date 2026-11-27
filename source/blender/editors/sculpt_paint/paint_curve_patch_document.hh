@@ -147,6 +147,13 @@ struct CurvePatchStampSlot {
 /** Resolved texture slots for one build. Stays in the editor layer because `MTex` is DNA and the
  * core must not depend on it. */
 struct CurvePatchTextureBinding {
+  /**
+   * A mask Curve Patch reads no stamp texture at all: the brush's Mask slot is its only texture,
+   * and that slot is consumed as coverage by the sampler, not as a stamp colour. The flag makes
+   * the binding empty, tells the sampler to sample no brush texture, and points it at
+   * `Brush.mask_mtex` (the PBR Mask slot) rather than the legacy mode-resolved slot.
+   */
+  bool stamp_textures_disabled = false;
   /** Resolved texture variants for this restamp: copies of `Brush::mtex` with only `tex` swapped,
    * so every mapping setting (Size / Offset / Angle / Swap Axis) stays shared. Rebuilt on every
    * restamp because the texture source toggles are live-synced like

@@ -626,6 +626,17 @@ static float3 curve_patch_channel_flat_color(const paint::image::ImagePaintTarge
                                              const PaintModeSettings &settings,
                                              const bool invert)
 {
+  if (target.is_mask_target) {
+    /* A mask canvas paints one grey: the value the brush's Mask Source selects. Base Color reads
+     * the brush's Base Color slot (kept in sync with the brush colour unless the user unsynced
+     * it), Alpha its Alpha pair, Coverage the brush colour; invert honours the same source. */
+    if (brush.material_paint == nullptr) {
+      return BKE_brush_color_get(&paint, &brush);
+    }
+    const float mask_value = BKE_paint_material_mask_value_get(
+        *brush.material_paint, paint, brush, invert);
+    return float3(mask_value);
+  }
   const bool live_channel = target.is_material_channel && brush.material_paint != nullptr;
   if (!live_channel) {
     return target.color_override ? float3(*target.color_override) :
@@ -1452,11 +1463,16 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
    * per-channel sources are all resolved up front. */
   std::optional<material::ChannelSourceSampler> channel_sources;
   if (brush.material_paint != nullptr) {
+    /* A mask Curve Patch paints the Base Color source the brush's Mask Source selects -- the same
+     * channel a Mask stroke resolves -- so the sampler must open that one channel. */
+    const bool resolve_mask_source =
+        paint_mode_settings_->layer_target_mode == PAINT_LAYER_TARGET_MASK;
     channel_sources.emplace(ss,
                             brush,
                             *brush.material_paint,
                             *paint_mode_settings_,
-                            cache.paint->visible_material_channels);
+                            cache.paint->visible_material_channels,
+                            resolve_mask_source);
     if (channel_sources->is_active()) {
       /* Area Plane mapping depends on the dab's own location and motion, so the matrices are
        * rebuilt per pass -- the patch's equivalent of "per dab". */
@@ -1552,7 +1568,7 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
    * direction and a scalar channel carries a single value, so neither can take an RGB from it.
    * The channel's own SOURCE is a separate mechanism and does reach Normal -- see
    * `target_paints_normal_source`. Resolved per canvas because it is a property of the channel. */
-  const bool target_paints_color = !paint_target.is_normal_channel &&
+  const bool target_paints_color = !paint_target.is_mask_target && !paint_target.is_normal_channel &&
                                    (paint_target.is_color_channel ||
                                     !paint_target.is_material_channel);
   const eMaterialPaintChannel target_channel = paint_target.channel;
@@ -2269,7 +2285,8 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
    * Deliberately NOT `brush.blend` for the plain image canvas: a Curve Patch stamps a shape
    * rather than accumulating dabs, and Mix is the behavior that contract has always had.
    * Only the per-channel modes are honored here. */
-  const IMB_BlendMode blend_mode = (paint_target.is_material_channel &&
+  const IMB_BlendMode blend_mode = (!paint_target.is_mask_target &&
+                                    paint_target.is_material_channel &&
                                     brush.material_paint != nullptr) ?
                                        IMB_BlendMode(BKE_paint_material_channel_blend_mode(
                                            *brush.material_paint,
@@ -2390,8 +2407,9 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
                                                  brush_color, pixel.tex_color, pixel.tex_valid) :
                                              brush_color);
         const float3 pass_rgb =
-            (paint_target.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR ||
-             !paint_target.is_material_channel) ?
+            (!paint_target.is_mask_target &&
+             (paint_target.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR ||
+              !paint_target.is_material_channel)) ?
                 BKE_paint_stroke_color_jitter_apply_color(dab_color_jitter, pass_rgb_raw) :
                 pass_rgb_raw;
         /* The coverage-weighted form: a pass that is transparent at this texel (texture alpha,

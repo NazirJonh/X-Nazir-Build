@@ -364,6 +364,9 @@ CurvePatchApplyStatus curve_patch_apply_with_status(
       *ss->cache, ob, sd, *brush, paint_mode_settings, params[0], effect_type, input);
 
   auto *session = MEM_new<CurvePatchSession>(__func__);
+  /* The role of the stamp target is the caller's: it knows the row it aims at, while the material's
+   * active marker is UI state a script may have pointed elsewhere. */
+  session->stamp_textures_disabled = input.stamp_textures_disabled;
   session->doc.patches.resize(control_curves.size());
   session->doc.active_patch = 0;
   session->use_face_set_on_commit = brush->curve_patch.face_set != 0 ||

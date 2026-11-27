@@ -976,6 +976,17 @@ struct MaterialPaintLayerText {
   char _pad[4] = {};
 };
 
+/**
+ * #MaterialPaintLayer::kind_subtype of a #MA_PAINT_LAYER_SOURCE_CURVE_PATCH row. Zero is the
+ * content effect every file written before this enum reads back as; one is the mask correction.
+ */
+enum eMaterialPaintLayerCurvePatchKind : int16_t {
+  /** The content correction: its maps lay over the row's colour. */
+  MA_PAINT_LAYER_CURVE_PATCH_EFFECT = 0,
+  /** The mask correction: its one Base Color map is the mask's grey. */
+  MA_PAINT_LAYER_CURVE_PATCH_MASK = 1,
+};
+
 /** #MaterialPaintLayerCurvePatch::space -- where the effect's control curves live and which
  * editor edits them. One space per EFFECT (the whole container is interpreted in it), not per
  * curve: the two sessions are different tools, and a mixed container would have no single

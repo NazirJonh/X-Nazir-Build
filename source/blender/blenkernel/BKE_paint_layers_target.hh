@@ -363,6 +363,16 @@ Image *BKE_paint_layers_mask_base_map_ensure(Main &bmain,
 bool BKE_paint_layers_target_content_reset(PaintLayersTarget &target);
 
 /**
+ * The mask counterpart of #BKE_paint_layers_target_content_reset: put the Base Color map of
+ * \a target's mask item back to the item's flat value. Used by a Curve Patch session before it
+ * re-renders its curves into that map.
+ *
+ * \return false when the target is not a Mask target, its mask item has no Base Color record, or
+ * that record has no live map.
+ */
+bool BKE_paint_layers_mask_target_reset(PaintLayersTarget &target);
+
+/**
  * Give the active row a map for every channel of the material's global set that the row takes part
  * in and has no map for yet, so a fresh layer is paintable in all of them at once instead of
  * growing one stroke at a time (and the UI never offers to create missing maps for it).

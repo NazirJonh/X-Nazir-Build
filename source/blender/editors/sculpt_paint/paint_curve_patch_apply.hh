@@ -70,6 +70,13 @@ struct CurvePatchApplyInput {
   float3 view_normal = float3(0.0f, 0.0f, 1.0f);
   /** No tablet in a script: the strength multiplier a stroke would have read from pressure. */
   float pressure = 1.0f;
+  /**
+   * The patch stamps a mask Curve Patch: no stamp texture is sampled, and the brush's Mask slot
+   * supplies the coverage. The caller knows the role of the row it aims at; the apply must not
+   * infer it from the material's global active marker, or a script that applies a content patch
+   * while a mask item is selected would silently lose its stamp texture.
+   */
+  bool stamp_textures_disabled = false;
 };
 
 /**

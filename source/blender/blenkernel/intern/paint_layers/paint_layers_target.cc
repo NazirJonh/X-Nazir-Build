@@ -990,6 +990,51 @@ bool BKE_paint_layers_target_content_reset(PaintLayersTarget &target)
   return true;
 }
 
+bool BKE_paint_layers_mask_target_reset(PaintLayersTarget &target)
+{
+  if (target.material == nullptr || target.mask_item == nullptr ||
+      target.mode != PaintLayersTargetMode::Mask)
+  {
+    return false;
+  }
+  MaterialPaintLayerChannel *record = paint_layer_channel_find(
+      *target.mask_item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  if (record == nullptr || record->image == nullptr || !paint_layer_channel_live(record)) {
+    return false;
+  }
+  Image &image = *record->image;
+  if (ID_IS_LINKED(&image.id)) {
+    return false;
+  }
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(&image, nullptr, &lock);
+  if (ibuf == nullptr || (ibuf->byte_data() == nullptr && ibuf->float_data() == nullptr)) {
+    BKE_image_release_ibuf(&image, ibuf, lock);
+    return false;
+  }
+  /* A mask is a scalar stored in the map's RGB; its alpha is the item's coverage and must keep
+   * describing where the item lays. A fresh mask map starts from the record's own value, so the
+   * same fill the content reset uses is the right one here. */
+  float fill[4];
+  copy_v4_v4(fill, record->value);
+  BKE_image_release_ibuf(&image, ibuf, lock);
+  paint_layers_image_fill(image, /*is_color=*/false, fill);
+
+  for (const ImageTile &tile : image.tiles) {
+    ImageUser tile_user;
+    BKE_imageuser_default(&tile_user);
+    tile_user.tile = tile.tile_number;
+    ImageTileBufferScope buffer(image, &tile_user);
+    if (buffer != nullptr) {
+      BKE_image_mark_dirty(&image, buffer.get());
+    }
+  }
+  BKE_image_partial_update_mark_full_update(&image);
+  BKE_image_free_gputextures(&image);
+  target.channel_record = record;
+  return true;
+}
+
 Image *BKE_paint_layers_active_channel_map_ensure(Main &bmain,
                                                   Material &ma,
                                                   const int channel,

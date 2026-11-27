@@ -289,7 +289,8 @@ ImageCurvePatchSession *image_curve_patch_session_begin_layer(bContext *C,
                                                               const Paint *paint,
                                                               Image *ref_image,
                                                               Material &ma,
-                                                              const bUUID &row_marker)
+                                                              const bUUID &row_marker,
+                                                              const bool stamp_textures_disabled)
 {
   image_curve_patch_session_discard_stale();
   if (brush == nullptr || ref_image == nullptr) {
@@ -330,6 +331,7 @@ ImageCurvePatchSession *image_curve_patch_session_begin_layer(bContext *C,
 
   image_curve_patch_session_init_common(C, *session, brush, paint, ref_image);
   session->is_layer = true;
+  session->stamp_textures_disabled = stamp_textures_disabled;
   session->layer_material = &ma;
   session->layer_row_marker = row_marker;
 
@@ -647,7 +649,8 @@ static bool image_curve_patch_passive_overlay_get(const ARegion *region,
   if (ma == nullptr) {
     return false;
   }
-  const MaterialPaintLayer *row = BKE_paint_layers_active_layer_get(const_cast<Material &>(*ma));
+  const MaterialPaintLayer *row =
+      BKE_paint_layers_active_curve_patch_row_get(const_cast<Material &>(*ma));
   if (row == nullptr || row->source != MA_PAINT_LAYER_SOURCE_CURVE_PATCH ||
       row->curve_patch == nullptr || row->curve_patch->vectors == nullptr ||
       (row->flag & MA_PAINT_LAYER_ENABLED) == 0 ||

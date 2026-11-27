@@ -283,6 +283,29 @@ CurvePatchLiveInputs curve_patch_live_inputs_capture(const Paint &paint,
   in.mask_map_mode = int(mask_mtex.brush_map_mode);
   in.mask_mapping = int(mask_mtex.mapping);
   in.mask_invert = mask_slot.invert;
+
+  /* The PBR Mask slot, sampled directly by a mask Curve Patch. Captured on every session, not
+   * only a mask one: the modal's live-input comparison has no row role, and a change here is
+   * cheap to detect even when the current patch ignores it. */
+  const MTex &pbr_mask_mtex = brush.mask_mtex;
+  const Tex *pbr_mask_tex = pbr_mask_mtex.tex;
+  const Image *pbr_mask_image = (pbr_mask_tex != nullptr && pbr_mask_tex->type == TEX_IMAGE) ?
+                                    pbr_mask_tex->ima :
+                                    nullptr;
+  in.pbr_mask_tex = pbr_mask_tex;
+  in.pbr_mask_tex_image = pbr_mask_image;
+  in.pbr_mask_tex_pixel_version = (pbr_mask_image != nullptr && pbr_mask_image->runtime != nullptr) ?
+                                      pbr_mask_image->runtime->pixel_version.load(
+                                          std::memory_order_relaxed) :
+                                      0;
+  in.pbr_mask_tex_size = float2(pbr_mask_mtex.size[0], pbr_mask_mtex.size[1]);
+  in.pbr_mask_tex_ofs = float2(pbr_mask_mtex.ofs[0], pbr_mask_mtex.ofs[1]);
+  in.pbr_mask_tex_rot = pbr_mask_mtex.rot;
+  in.pbr_mask_mapping_flags = int(pbr_mask_mtex.mapping_flags);
+  in.pbr_mask_map_mode = int(pbr_mask_mtex.brush_map_mode);
+  in.pbr_mask_mapping = int(pbr_mask_mtex.mapping);
+  in.pbr_mask_invert = BKE_brush_mask_texture_invert_get(brush);
+
   in.texture_sample_bias = brush.texture_sample_bias;
   in.mask_correction_hash = BKE_brush_mask_correction_hash_for_brush(brush);
 

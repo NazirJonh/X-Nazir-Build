@@ -5829,6 +5829,40 @@ Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get_for_channe
   return paint_material_image_targets_get_for_mask(ob, mode_settings, channel_mask, nullptr);
 }
 
+Vector<PaintMaterialImageTarget> BKE_paint_material_mask_image_targets_get(
+    Object &ob, PaintModeSettings &mode_settings)
+{
+  /* The one map this answers for is the material-layer mask canvas; another canvas source has no
+   * material mask to offer, and a Content-mode session must not silently fall through to it. */
+  if (mode_settings.canvas_source != PAINT_CANVAS_SOURCE_MATERIAL ||
+      BKE_paint_layers_target_mode(&mode_settings) != PaintLayersTargetMode::Mask)
+  {
+    return {};
+  }
+  Material *layered = BKE_paint_layers_active_material_get(&ob);
+  if (layered == nullptr) {
+    return {};
+  }
+  PaintLayersTarget layer_target;
+  if (!BKE_paint_layers_target_get(*layered,
+                                   PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                   PaintLayersTargetMode::Mask,
+                                   layer_target))
+  {
+    return {};
+  }
+  Image *image = BKE_paint_layers_target_image(layer_target);
+  if (image == nullptr) {
+    return {};
+  }
+  PaintMaterialImageTarget target;
+  target.channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  target.image = image;
+  target.iuser = nullptr;
+  target.is_color_channel = true;
+  return {target};
+}
+
 MaterialPaintAttributeStatus BKE_paint_mesh_material_attribute_ensure(Mesh &mesh,
                                                                       const StringRef attr_name,
                                                                       bool *r_created)

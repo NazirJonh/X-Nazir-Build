@@ -497,6 +497,8 @@ struct CurvePatchSession {
    * live. The row's maps are emptied when the session opens and never gain a stamp.
    */
   bool is_bend_curve_only = false;
+  /** True for a mask Curve Patch: no stamp texture, the Mask slot is coverage. */
+  bool stamp_textures_disabled = false;
 
   /** Whether this session is a Stack Layers effect (#layer_material set). Such a session has no
    * Enter/Esc of its own -- it lives and dies with the row's selection, its curves belong to the
@@ -631,11 +633,13 @@ void curve_patch_texture_binding_clear(CurvePatchTextureBinding &r_binding);
  * convert the UI's brush-diameter cap lengths into world units.
  *
  * `r_binding` is fully overwritten, including the SINGLE-mode case, where it comes back empty and
- * the relief reads `brush.mtex` directly.
+ * the relief reads `brush.mtex` directly. With \a stamp_textures_disabled the binding stays empty
+ * and the sampler samples no brush texture: a mask Curve Patch reads the Mask slot as coverage.
  */
 void curve_patch_texture_binding_from_brush(const Brush &brush,
                                             float radius,
-                                            CurvePatchTextureBinding &r_binding);
+                                            CurvePatchTextureBinding &r_binding,
+                                            bool stamp_textures_disabled = false);
 
 /**
  * Restore every vertex in the effect's snapshot to its snapshotted position, then re-apply the
@@ -874,7 +878,8 @@ CurvePatchSession *curve_patch_start_from_layer(
     FunctionRef<void(CurvePatchDocument &)> publish_document,
     const ViewContext &vc,
     FunctionRef<void(Span<int>)> prepare_canvas,
-    bool curve_only = false);
+    bool curve_only = false,
+    bool stamp_textures_disabled = false);
 
 /**
  * Publish a Curve Patch session from a finished #BRUSH_STROKE_ROLL stroke. Builds the control

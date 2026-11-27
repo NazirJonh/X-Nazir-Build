@@ -694,6 +694,20 @@ class LayerMaterialButtonsPanel:
         return None
 
     @staticmethod
+    def _curve_patch_subject(context):
+        """The row whose Curve Patch panel is shown: the active mask item when it is one, else
+        the active row. A mask Curve Patch hangs on its layer, so `paint_layers.active` answers
+        the layer and the item has to be asked for through the shown mask item."""
+        owner, layer = LayerMaterialButtonsPanel._active_layer(context)
+        if owner is None:
+            return None, None
+        item = LayerMaterialButtonsPanel._shown_mask_item(context, owner, layer)
+        if (item is not None and item.source == 'CURVE_PATCH' and
+                item.curve_patch is not None):
+            return owner, item
+        return owner, layer
+
+    @staticmethod
     def _object_mask_editing(context):
         """While the active row's object mask is edited, the tab shows only the Mask panel."""
         return context.scene.tool_settings.paint_mode.layer_object_mask_edit
@@ -1565,9 +1579,10 @@ class LAYER_MATERIAL_PT_decal(LayerMaterialButtonsPanel, Panel):
         if ob is None or ob.mode != 'TEXTURE_PAINT':
             return False
         # A 2D Curve Patch effect keeps the object in Texture Paint mode, but has no decal rows:
-        # the block buttons would act on a group the effect does not belong to.
-        _owner, layer = cls._active_layer(context)
-        return layer is None or layer.source != 'CURVE_PATCH'
+        # the block buttons would act on a group the effect does not belong to. A mask Curve Patch
+        # is asked for through its mask item: the active row is the layer it hangs on.
+        _owner, subject = cls._curve_patch_subject(context)
+        return subject is None or subject.source != 'CURVE_PATCH'
 
     def draw_header(self, context):
         # Show the active decal name next to the panel label so the user knows which group the
@@ -1959,11 +1974,11 @@ class LAYER_MATERIAL_PT_curve_patch(LayerMaterialButtonsPanel, Panel):
     def poll(cls, context):
         if cls._object_mask_editing(context):
             return False
-        _owner, layer = cls._active_layer(context)
+        _owner, layer = cls._curve_patch_subject(context)
         return layer is not None and layer.source == 'CURVE_PATCH' and layer.curve_patch is not None
 
     def draw(self, context):
-        _owner, layer = self._active_layer(context)
+        _owner, layer = self._curve_patch_subject(context)
         if layer is None or layer.curve_patch is None:
             return
         draw_curve_patch_brush_drop_row(self.layout, layer.curve_patch)
@@ -1986,7 +2001,12 @@ class LAYER_MATERIAL_PT_curve_patch_channels(LayerMaterialButtonsPanel, Panel):
 
     @classmethod
     def poll(cls, context):
-        return LAYER_MATERIAL_PT_curve_patch.poll(context)
+        if not LAYER_MATERIAL_PT_curve_patch.poll(context):
+            return False
+        owner, subject = cls._curve_patch_subject(context)
+        _owner, layer = cls._active_layer(context)
+        # A mask Curve Patch is one grey, not a set of material channels.
+        return owner is not None and subject is not None and subject == layer
 
     def draw(self, context):
         layout = self.layout

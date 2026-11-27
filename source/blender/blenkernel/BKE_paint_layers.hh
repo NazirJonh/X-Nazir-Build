@@ -927,7 +927,8 @@ const char *BKE_paint_layers_curve_patch_snapshot_source_name(const Brush &brush
 const char *BKE_paint_layers_curve_patch_brush_source_name(
     const MaterialPaintLayerCurvePatch &payload);
 
-/** The Curve Patch row (an effect of some layer of \a ma) that owns \a payload, or null. */
+/** The Curve Patch row (a content effect or a mask item of some layer of \a ma) that owns
+ * \a payload, or null. */
 MaterialPaintLayer *BKE_paint_layers_curve_patch_row_find(
     Material &ma, const MaterialPaintLayerCurvePatch &payload);
 
@@ -973,6 +974,20 @@ MaterialPaintLayer *BKE_paint_layers_curve_patch_effect_add(Material &ma,
                                                             MaterialPaintLayer *owner,
                                                             const char *name,
                                                             Main &bmain);
+
+/**
+ * Add a Curve Patch mask correction to \a layer's mask stack: one Base Color map, stamped by the
+ * item's own curves through its private brush snapshot, read by the mask graph as the item's grey.
+ * The base mask is the caller's business (the Add policy makes it white first when missing).
+ *
+ * \param bmain: the database the payload's container is created in.
+ * \return the new mask item, or null when \a layer is not a row of \a ma's stack, has no base mask,
+ * or \a bmain is null.
+ */
+MaterialPaintLayer *BKE_paint_layers_curve_patch_mask_add(Material &ma,
+                                                          MaterialPaintLayer &layer,
+                                                          const char *name,
+                                                          Main &bmain);
 
 /**
  * Add a Text Decal content effect to \a owner: its channels are painted with the rasterized styled
@@ -1418,6 +1433,14 @@ bUUID BKE_paint_layers_active_get(const Material &ma);
  * on, whose mask is what the mode paints (the correction is #BKE_paint_layers_active_mask_item_get).
  */
 MaterialPaintLayer *BKE_paint_layers_active_layer_get(Material &ma);
+
+/**
+ * The active Curve Patch row of \a ma: the active mask item when it is one
+ * (#MA_PAINT_LAYER_SOURCE_CURVE_PATCH), else the active row when that is a Curve Patch effect, else
+ * null. The mask item must be asked for explicitly: #BKE_paint_layers_active_layer_get answers the
+ * row the item hangs on, which is never a Curve Patch.
+ */
+MaterialPaintLayer *BKE_paint_layers_active_curve_patch_row_get(Material &ma);
 
 /**
  * Move \a layer relative to \a anchor in \a ma's stack.

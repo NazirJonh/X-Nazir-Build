@@ -627,6 +627,41 @@ bool ED_paint_layers_curve_patch_row_maps_ensure(bContext &C,
                              paint_mode.new_channel_image_size :
                              PAINT_NEW_CHANNEL_IMAGE_SIZE_1K;
 
+  if (row.role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+    /* A mask Curve Patch owns one map: the item's Base Color record. Resolve it explicitly, not
+     * through the material's channel set, so a material without Base Color in its set still takes
+     * the mask. The map is the stroke target and the mask graph's grey. */
+    MaterialPaintLayer *owner = BKE_paint_layers_mask_item_owner(ma, row);
+    if (owner == nullptr) {
+      return false;
+    }
+    PaintLayersTarget target;
+    target.material = &ma;
+    target.layer = owner;
+    target.mask_item = &row;
+    target.channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+    target.mode = PaintLayersTargetMode::Mask;
+    const bool existed = std::any_of(row.channels,
+                                     row.channels + row.channels_num,
+                                     [](const MaterialPaintLayerChannel &record) {
+                                       return record.channel ==
+                                                  PAINT_MATERIAL_CHANNEL_BASE_COLOR &&
+                                              record.image != nullptr;
+                                     });
+    const bool ready = BKE_paint_layers_target_ensure_writable(bmain, target, image_size) !=
+                       nullptr;
+    if (ready && !existed) {
+      WM_file_tag_modified();
+      BKE_paint_layers_tag_edited(ma);
+      BKE_paint_layers_regenerate_tagged(bmain);
+      CTX_data_ensure_evaluated_depsgraph(&C);
+    }
+    if (Object *ob = CTX_data_active_object(&C)) {
+      BKE_texpaint_slots_refresh_object(CTX_data_scene(&C), ob);
+    }
+    return ready;
+  }
+
   /* The interactive Image effect resolves its targets from the enabled channel maps, and the
    * bake renders every enabled record in the material's set. Creating the maps for that same set
    * is what keeps the session's preview and the committed bake showing the same channels; the
@@ -1032,6 +1067,35 @@ static Brush *curve_patch_layer_entry_brush_get(ReportList *reports,
   return brush;
 }
 
+static bool curve_patch_layer_row_is_mask(const MaterialPaintLayer &row)
+{
+  return row.role == MA_PAINT_LAYER_ROLE_MASK_ITEM;
+}
+
+/** Reset one map the session is about to re-render. Content targets address the row's channel
+ * record; a mask target addresses its single Base Color record through the item. */
+bool curve_patch_layer_row_map_reset(Material &ma,
+                                     MaterialPaintLayer &row,
+                                     const int channel)
+{
+  PaintLayersTarget target;
+  target.material = &ma;
+  target.channel = channel;
+  if (curve_patch_layer_row_is_mask(row)) {
+    MaterialPaintLayer *owner = BKE_paint_layers_mask_item_owner(ma, row);
+    if (owner == nullptr) {
+      return false;
+    }
+    target.layer = owner;
+    target.mask_item = &row;
+    target.mode = PaintLayersTargetMode::Mask;
+    return BKE_paint_layers_mask_target_reset(target);
+  }
+  target.layer = &row;
+  target.mode = PaintLayersTargetMode::Content;
+  return BKE_paint_layers_target_content_reset(target);
+}
+
 /** Give the row at least one curve, with ids and a placement in the visible space (\a seeds_place),
  * so the first session has something to grab. */
 static void curve_patch_layer_entry_curves_prepare(MaterialPaintLayer &row,
@@ -1137,6 +1201,7 @@ bool curve_patch_layer_activate_2d(bContext &C, Material &ma, MaterialPaintLayer
     BKE_report(reports, RPT_WARNING, "That row is not a Curve Patch effect");
     return false;
   }
+  const bool mask_role = curve_patch_layer_row_is_mask(row);
 
   /* The tool edits in an Image Editor: the one the click came from when there is one, otherwise
    * the largest of the screen. There is no cross-screen search here -- the 3D path requires
@@ -1274,7 +1339,7 @@ bool curve_patch_layer_activate_2d(bContext &C, Material &ma, MaterialPaintLayer
       WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_IMAGE, nullptr);
     }
     ImageCurvePatchSession *session = image_curve_patch_session_begin_layer(
-        &C, reports, pv, brush, &paint_2d, ref_image, ma, row.marker);
+        &C, reports, pv, brush, &paint_2d, ref_image, ma, row.marker, false);
     if (session == nullptr) {
       return false;
     }
@@ -1320,8 +1385,12 @@ bool curve_patch_layer_activate_2d(bContext &C, Material &ma, MaterialPaintLayer
    * (`paint_image_curve_patch_raster.cc` resolves them through this source). */
   PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
   paint_mode.canvas_source = PAINT_CANVAS_SOURCE_MATERIAL;
-  BKE_paint_material_layer_target_mode_set(
-      *CTX_data_main(&C), *scene, paint_2d, paint_mode, PAINT_LAYER_TARGET_CONTENT);
+  BKE_paint_material_layer_target_mode_set(*CTX_data_main(&C),
+                                           *scene,
+                                           paint_2d,
+                                           paint_mode,
+                                           mask_role ? PAINT_LAYER_TARGET_MASK :
+                                                       PAINT_LAYER_TARGET_CONTENT);
 
   /* The 2D seed is laid in the Image Editor's visible canvas (UV), not on the mesh. */
   curve_patch_layer_entry_curves_prepare(row, [&](PaintVector &seed_pv) {
@@ -1341,19 +1410,18 @@ bool curve_patch_layer_activate_2d(bContext &C, Material &ma, MaterialPaintLayer
    * renders all curves. The targets resolve through the same call the session's rasterizer makes
    * (`resolve_targets`), so a channel that joins or leaves between the reset and the restamp
    * still captures into the session's tile map. */
-  const Vector<PaintMaterialImageTarget> targets = BKE_paint_material_image_targets_get(
-      *ob, paint_mode, brush->material_paint, paint_2d.visible_material_channels);
+  const Vector<PaintMaterialImageTarget> targets =
+      mask_role ? BKE_paint_material_mask_image_targets_get(*ob, paint_mode) :
+                  BKE_paint_material_image_targets_get(*ob,
+                                                       paint_mode,
+                                                       brush->material_paint,
+                                                       paint_2d.visible_material_channels);
   bool maps_reset = false;
   for (const PaintMaterialImageTarget &target : targets) {
     if (target.image == nullptr) {
       continue;
     }
-    PaintLayersTarget reset_target;
-    reset_target.material = &ma;
-    reset_target.layer = &row;
-    reset_target.channel = int(target.channel);
-    reset_target.mode = PaintLayersTargetMode::Content;
-    maps_reset |= BKE_paint_layers_target_content_reset(reset_target);
+    maps_reset |= curve_patch_layer_row_map_reset(ma, row, int(target.channel));
   }
 
   /* The reference image is the row's Base Color map when it has one, else its first map: the
@@ -1378,7 +1446,7 @@ bool curve_patch_layer_activate_2d(bContext &C, Material &ma, MaterialPaintLayer
   }
 
   ImageCurvePatchSession *session = image_curve_patch_session_begin_layer(
-      &C, reports, pv, brush, &paint_2d, ref_image, ma, row.marker);
+      &C, reports, pv, brush, &paint_2d, ref_image, ma, row.marker, mask_role);
   if (session == nullptr) {
     /* Nothing was published; the destructor restores the previous brush. A session that failed
      * after the maps were reset leaves them empty, so the row must not look up to date. */
@@ -1428,6 +1496,7 @@ bool curve_patch_layer_activate(bContext &C, Material &ma, MaterialPaintLayer &r
     BKE_report(reports, RPT_WARNING, "That row is not a Curve Patch effect");
     return false;
   }
+  const bool mask_role = curve_patch_layer_row_is_mask(row);
   Object *ob = CTX_data_active_object(&C);
   if (ob == nullptr || ob->type != OB_MESH) {
     BKE_report(reports, RPT_WARNING, "Select a mesh object to edit a Curve Patch effect");
@@ -1464,7 +1533,7 @@ bool curve_patch_layer_activate(bContext &C, Material &ma, MaterialPaintLayer &r
           ma, &row, eMaterialPaintChannel(PAINT_MATERIAL_CHANNEL_BASE_COLOR), true);
     }
   }
-  else if (row.channels_num > 0 &&
+  else if (!mask_role && row.channels_num > 0 &&
            std::none_of(row.channels,
                         row.channels + row.channels_num,
                         [](const MaterialPaintLayerChannel &record) {
@@ -1572,8 +1641,12 @@ bool curve_patch_layer_activate(bContext &C, Material &ma, MaterialPaintLayer &r
   /* Through the BKE switch, not a plain write: leaving a Mask target mode restores the saved
    * content brush and clears #mask_saved_brush, so the restore below captures the brush the user
    * actually holds on content -- and a later Mask entry does not remember the snapshot. */
-  BKE_paint_material_layer_target_mode_set(
-      *CTX_data_main(&C), *scene, sd->paint, paint_mode, PAINT_LAYER_TARGET_CONTENT);
+  BKE_paint_material_layer_target_mode_set(*CTX_data_main(&C),
+                                           *scene,
+                                           sd->paint,
+                                           paint_mode,
+                                           mask_role ? PAINT_LAYER_TARGET_MASK :
+                                                       PAINT_LAYER_TARGET_CONTENT);
 
   /* The row must be the active one: the image effect resolves its targets through it, and the
    * operator also activates the object mask editing target. */
@@ -1599,19 +1672,20 @@ bool curve_patch_layer_activate(bContext &C, Material &ma, MaterialPaintLayer &r
   bool maps_reset = false;
   const auto reset_maps = [&](const Span<int> channels) {
     for (const int channel : channels) {
-      PaintLayersTarget target;
-      target.material = &ma;
-      target.layer = &row;
-      target.channel = channel;
-      target.mode = PaintLayersTargetMode::Content;
-      maps_reset |= BKE_paint_layers_target_content_reset(target);
+      maps_reset |= curve_patch_layer_row_map_reset(ma, row, channel);
     }
   };
   const auto publish_document = [&](CurvePatchDocument &doc) {
     curve_patch_publish_document(*row.curve_patch, *ob, view_context->depsgraph, doc);
   };
-  CurvePatchSession *session = curve_patch_start_from_layer(
-      C, *ob, *sd, publish_document, *view_context, reset_maps, bend_text_row != nullptr);
+  CurvePatchSession *session = curve_patch_start_from_layer(C,
+                                                            *ob,
+                                                            *sd,
+                                                            publish_document,
+                                                            *view_context,
+                                                            reset_maps,
+                                                            bend_text_row != nullptr,
+                                                            mask_role);
   if (session == nullptr) {
     /* Nothing was published; the destructor restores the previous brush. A session that failed
      * after the maps were reset leaves them empty, so the row must not look up to date. */
@@ -1653,7 +1727,7 @@ static bool curve_patch_layer_active_effect_get(bContext &C,
   if (r_ma == nullptr) {
     return false;
   }
-  r_row = BKE_paint_layers_active_layer_get(*r_ma);
+  r_row = BKE_paint_layers_active_curve_patch_row_get(*r_ma);
   return r_row != nullptr && r_row->source == MA_PAINT_LAYER_SOURCE_CURVE_PATCH &&
          r_row->curve_patch != nullptr;
 }
@@ -1732,7 +1806,7 @@ bool curve_patch_layer_enter_active_2d_row(bContext &C)
   if (ma == nullptr) {
     return false;
   }
-  MaterialPaintLayer *row = BKE_paint_layers_active_layer_get(*ma);
+  MaterialPaintLayer *row = BKE_paint_layers_active_curve_patch_row_get(*ma);
   if (row == nullptr || row->source != MA_PAINT_LAYER_SOURCE_CURVE_PATCH ||
       row->curve_patch == nullptr || row->curve_patch->vectors == nullptr ||
       (row->flag & MA_PAINT_LAYER_ENABLED) == 0 ||
@@ -3039,7 +3113,7 @@ static MaterialPaintLayerCurvePatch *curve_patch_layer_active_payload(bContext *
   if (ma == nullptr) {
     return nullptr;
   }
-  MaterialPaintLayer *row = BKE_paint_layers_active_layer_get(*ma);
+  MaterialPaintLayer *row = BKE_paint_layers_active_curve_patch_row_get(*ma);
   if (row == nullptr || row->source != MA_PAINT_LAYER_SOURCE_CURVE_PATCH ||
       row->curve_patch == nullptr || row->curve_patch->vectors == nullptr)
   {
@@ -3314,7 +3388,7 @@ static CurvePatchLayerTarget curve_patch_layer_target_get(bContext *C)
   if (target.material == nullptr) {
     return target;
   }
-  MaterialPaintLayer *row = BKE_paint_layers_active_layer_get(*target.material);
+  MaterialPaintLayer *row = BKE_paint_layers_active_curve_patch_row_get(*target.material);
   if (row == nullptr || row->source != MA_PAINT_LAYER_SOURCE_CURVE_PATCH ||
       row->curve_patch == nullptr)
   {

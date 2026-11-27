@@ -21,6 +21,7 @@
 #include "BLI_span.hh"
 #include "BLI_string.h"
 #include "BLI_utildefines.h"
+#include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
 #include "BKE_context.hh"
@@ -1234,6 +1235,8 @@ void operatortypes_register()
   WM_operatortype_append(PAINT_OT_text_decal_edit_text);
   WM_operatortype_append(PAINT_OT_text_decal_rebake);
   WM_operatortype_append(PAINT_OT_text_decal_size_step);
+  WM_operatortype_append(PAINT_OT_text_decal_bend_curve_new);
+  WM_operatortype_append(PAINT_OT_text_decal_bend_curve_edit);
 }
 
 /** \} */
@@ -1296,12 +1299,43 @@ static MaterialPaintLayer *text_decal_active_row_find(const bContext &C,
   return row;
 }
 
+/**
+ * The Text Decal the Layer tab shows, found without requiring a paint mode. The bend operators use
+ * it: the panel is drawn in Object Mode too, and the operators enter the mode/editor they need.
+ */
+static MaterialPaintLayer *text_decal_row_find_any_mode(const bContext &C,
+                                                        Object **r_object,
+                                                        Material **r_material)
+{
+  *r_object = nullptr;
+  *r_material = nullptr;
+  Object *ob = CTX_data_active_object(&C);
+  if (ob == nullptr) {
+    return nullptr;
+  }
+  Material *ma = BKE_paint_layers_active_material_get(ob);
+  if (ma == nullptr || !ID_IS_EDITABLE(&ma->id)) {
+    return nullptr;
+  }
+  MaterialPaintLayer *row = text_decal_shown_row_get(C, *ma);
+  if (row == nullptr || row->source != MA_PAINT_LAYER_SOURCE_TEXT ||
+      row->text_decal == nullptr)
+  {
+    return nullptr;
+  }
+  *r_object = ob;
+  *r_material = ma;
+  return row;
+}
+
 static bool text_decal_place_poll(bContext *C)
 {
   Object *ob = nullptr;
   Material *ma = nullptr;
   MaterialPaintLayer *row = text_decal_active_row_find(*C, &ob, &ma);
-  return row != nullptr && BKE_paint_layers_projection_applies(*ma, *row);
+  /* A bent Text Decal takes its place from its curve, not from the view. */
+  return row != nullptr && BKE_paint_layers_projection_applies(*ma, *row) &&
+         !BKE_paint_layers_text_decal_position_locked(*ma, *row);
 }
 
 static wmOperatorStatus text_decal_place_from_view_exec(bContext *C, wmOperator *op)
@@ -1443,7 +1477,7 @@ static wmOperatorStatus text_decal_rebake_exec(bContext *C, wmOperator *op)
   /* The refresh follows the hash; the re-bake forces the raster out again. */
   BKE_paint_layers_text_decal_invalidate(*ma);
   BKE_paint_layers_text_decal_refresh(
-      *CTX_data_main(C), *ma, CTX_data_ensure_evaluated_depsgraph(C));
+      *CTX_data_main(C), *ma, CTX_data_ensure_evaluated_depsgraph(C), ob);
   decal_done_notify(C, *ma);
   return OPERATOR_FINISHED;
 }
@@ -1458,6 +1492,96 @@ void PAINT_OT_text_decal_rebake(wmOperatorType *ot)
 
   ot->exec = text_decal_rebake_exec;
   ot->poll = text_decal_rebake_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+static bool text_decal_bend_curve_new_poll(bContext *C)
+{
+  Object *ob = nullptr;
+  Material *ma = nullptr;
+  /* New Curve re-seeds an existing bend as well, so the button stays available whenever a Text
+   * Decal is shown. The panel is drawn outside a paint mode too, hence the mode-free lookup. */
+  return text_decal_row_find_any_mode(*C, &ob, &ma) != nullptr;
+}
+
+static wmOperatorStatus text_decal_bend_curve_new_exec(bContext *C, wmOperator *op)
+{
+  Object *ob = nullptr;
+  Material *ma = nullptr;
+  MaterialPaintLayer *row = text_decal_row_find_any_mode(*C, &ob, &ma);
+  if (row == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No Text Decal to bend");
+    return OPERATOR_CANCELLED;
+  }
+  MaterialPaintLayer *effect =
+      ed::sculpt_paint::ED_paint_layers_curve_patch_bend_row_add(*C, *ob, *ma, *row);
+  if (effect == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "Could not create a Curve Patch effect for the bend");
+    return OPERATOR_CANCELLED;
+  }
+  /* The row changed wholesale: the next scene update re-bakes the raster along the new curve. */
+  decal_done_notify(C, *ma);
+  /* Open the curve at once, so its two points show where the text will run and the user can start
+   * shaping them. A failed entry keeps the effect: Edit Curve can try again. */
+  ed::sculpt_paint::curve_patch_layer_activate(*C, *ma, *effect);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_text_decal_bend_curve_new(wmOperatorType *ot)
+{
+  ot->name = "New Bend Curve";
+  ot->description =
+      "Add a Curve Patch effect holding a curve across the decal's frame and bend the Text Decal "
+      "along it; edit the curve with the Sculpt Mode curve tool";
+  ot->idname = "PAINT_OT_text_decal_bend_curve_new";
+
+  ot->exec = text_decal_bend_curve_new_exec;
+  ot->poll = text_decal_bend_curve_new_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+static bool text_decal_bend_curve_edit_poll(bContext *C)
+{
+  Object *ob = nullptr;
+  Material *ma = nullptr;
+  const MaterialPaintLayer *row = text_decal_row_find_any_mode(*C, &ob, &ma);
+  return row != nullptr && !BLI_uuid_is_nil(row->text_decal->bend_curve_row);
+}
+
+static wmOperatorStatus text_decal_bend_curve_edit_exec(bContext *C, wmOperator *op)
+{
+  Object *ob = nullptr;
+  Material *ma = nullptr;
+  MaterialPaintLayer *row = text_decal_row_find_any_mode(*C, &ob, &ma);
+  if (row == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No Text Decal to bend");
+    return OPERATOR_CANCELLED;
+  }
+  MaterialPaintLayer *bend_row = BKE_paint_layers_text_decal_bend_row_get(*ma, *row);
+  if (bend_row == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "The bend names no Curve Patch effect");
+    return OPERATOR_CANCELLED;
+  }
+  /* The row's tool is the one that edits its container: the Sculpt Mode curve tool, so the curve
+   * is shaped on the model, in the decal's own area. */
+  if (!ed::sculpt_paint::curve_patch_layer_activate(*C, *ma, *bend_row)) {
+    BKE_report(op->reports, RPT_ERROR, "Could not open the bend curve for editing");
+    return OPERATOR_CANCELLED;
+  }
+  decal_done_notify(C, *ma);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_text_decal_bend_curve_edit(wmOperatorType *ot)
+{
+  ot->name = "Edit Bend Curve";
+  ot->description =
+      "Open the Curve Patch effect that carries this Text Decal's bend curve in its Sculpt Mode "
+      "editing tool";
+  ot->idname = "PAINT_OT_text_decal_bend_curve_edit";
+
+  ot->exec = text_decal_bend_curve_edit_exec;
+  ot->poll = text_decal_bend_curve_edit_poll;
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }
 
@@ -1480,7 +1604,7 @@ static wmOperatorStatus text_decal_size_step_exec(bContext *C, wmOperator *op)
    * the size just chosen rather than the previous one until the next edit. */
   BKE_paint_layers_text_decal_invalidate(*ma);
   BKE_paint_layers_text_decal_refresh(
-      *CTX_data_main(C), *ma, CTX_data_ensure_evaluated_depsgraph(C));
+      *CTX_data_main(C), *ma, CTX_data_ensure_evaluated_depsgraph(C), ob);
   BKE_paint_layers_tag_value_edited(*ma);
   decal_done_notify(C, *ma);
   return OPERATOR_FINISHED;

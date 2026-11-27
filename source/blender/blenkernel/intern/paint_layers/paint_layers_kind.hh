@@ -81,6 +81,12 @@ enum class PaintLayerDependencyKind : uint8_t {
    * row's parameter schema.
    */
   DefinitionTree = 8,
+  /**
+   * The mesh object whose space a Text Decal's 3D bend curve is written in. A user of the object,
+   * never a map to paint: its transform changes where the projected curve lands, so it invalidates
+   * pixels, not the shape of the generated graph.
+   */
+  TextDecalBendObject = 9,
 };
 
 /** What a change to the dependency invalidates. */
@@ -1518,6 +1524,16 @@ inline void paint_layer_dependencies(MaterialPaintLayer &row,
                              -1};
     fn(dep);
   }
+  /* The object the 3D bend curve is written in: a pinned user, so the text does not have to
+   * re-guess "the first mesh that uses the material" on every refresh. Its transform reaches the
+   * projected curve, so it invalidates pixels; it does not change the generated graph. */
+  if (row.text_decal != nullptr && row.text_decal->bend_painted_object != nullptr) {
+    PaintLayerDependency dep{reinterpret_cast<ID **>(&row.text_decal->bend_painted_object),
+                             PaintLayerDependencyKind::TextDecalBendObject,
+                             PAINT_LAYER_DEP_PIXELS | PAINT_LAYER_DEP_OWNERSHIP,
+                             -1};
+    fn(dep);
+  }
   if (row.text_decal != nullptr && row.text_decal->coverage != nullptr) {
     /* Topology too: the generated graph samples the map, so a new one rebuilds the row. */
     PaintLayerDependency dep{reinterpret_cast<ID **>(&row.text_decal->coverage),
@@ -1527,7 +1543,9 @@ inline void paint_layer_dependencies(MaterialPaintLayer &row,
                              -1};
     fn(dep);
   }
-  /* The bake cache: the colour maps by channel, then the shared coverage map. */
+  /* The bend curve is a row marker (#MaterialPaintLayerText::bend_curve_row), not a pointer: the
+   * curve row owns its own container, so the text row walks no user on it. The bake cache follows:
+   * the colour maps by channel, then the shared coverage map. */
   if (row.bake != nullptr) {
     for (int i = 0; i < PAINT_MATERIAL_CHANNEL_NUM; i++) {
       PaintLayerDependency dep{reinterpret_cast<ID **>(&row.bake->images[i]),
@@ -1603,6 +1621,7 @@ inline LibraryForeachIDCallbackFlag paint_layer_dependency_foreach_flag(const Pa
     case PaintLayerDependencyKind::ProjectionObject:
     case PaintLayerDependencyKind::TextDecalObject:
     case PaintLayerDependencyKind::TextDecalCoverage:
+    case PaintLayerDependencyKind::TextDecalBendObject:
     case PaintLayerDependencyKind::DefinitionTree:
       return IDWALK_CB_USER;
   }

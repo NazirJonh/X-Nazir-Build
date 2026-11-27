@@ -983,6 +983,8 @@ MaterialPaintLayer *BKE_paint_layers_curve_patch_effect_add(Material &ma,
  * and the Base Color map exists (at the payload's resolved size) before the first raster.
  *
  * \param bmain: the database the effect's Base Color map is created in.
+ * \param text_decal_size: the first raster's side in pixels, clamped to the payload range; zero
+ * keeps #MA_PAINT_LAYER_TEXT_SIZE_DEFAULT.
  * \return the new effect, or null when \a owner is not a row of \a ma's stack or \a text_object is
  * not a Text object. A folder takes one, like any correction.
  */
@@ -990,7 +992,8 @@ MaterialPaintLayer *BKE_paint_layers_text_decal_effect_add(Material &ma,
                                                            MaterialPaintLayer *owner,
                                                            const char *name,
                                                            Main &bmain,
-                                                           Object &text_object);
+                                                           Object &text_object,
+                                                           int text_decal_size = 0);
 
 /**
  * Add a Text Decal to \a layer's mask stack: an item whose single Base Color map holds the text's
@@ -999,12 +1002,15 @@ MaterialPaintLayer *BKE_paint_layers_text_decal_effect_add(Material &ma,
  *
  * \return the new item, or null when \a layer is not a row of \a ma's stack, has no base mask, or
  * \a text_object is not a Text object.
+ * \param text_decal_size: the first raster's side in pixels, clamped to the payload range; zero
+ * keeps #MA_PAINT_LAYER_TEXT_SIZE_DEFAULT.
  */
 MaterialPaintLayer *BKE_paint_layers_text_decal_mask_add(Material &ma,
                                                          MaterialPaintLayer *layer,
                                                          const char *name,
                                                          Main &bmain,
-                                                         Object &text_object);
+                                                         Object &text_object,
+                                                         int text_decal_size = 0);
 
 /**
  * Point \a row's Text Decal at \a new_object instead. The old object loses the row's user, the new
@@ -1017,6 +1023,101 @@ MaterialPaintLayer *BKE_paint_layers_text_decal_mask_add(Material &ma,
 bool BKE_paint_layers_text_decal_object_set(Material &ma,
                                             MaterialPaintLayer &row,
                                             Object *new_object);
+
+/**
+ * The Curve Patch effect row (of \a text_row's owner) whose control curve the Text Decal
+ * \a text_row follows, or null when it follows none: the marker #MaterialPaintLayerText::
+ * bend_curve_row is nil, names no row of \a ma, names a row of another owner, or names a row that
+ * holds no Curve Patch container. The row is resolved through its marker on every call, so a
+ * re-order, a delete or an undo never leaves a dangling pointer behind.
+ */
+MaterialPaintLayer *BKE_paint_layers_text_decal_bend_row_get(Material &ma,
+                                                             const MaterialPaintLayer &text_row);
+/** The const twin, for a reader that only looks the curve row up. */
+const MaterialPaintLayer *BKE_paint_layers_text_decal_bend_row_get(
+    const Material &ma, const MaterialPaintLayer &text_row);
+
+/**
+ * The Text Decal row whose bend names the Curve Patch row \a curve_row (by its marker), or null
+ * when no Text Decal of \a ma bends along it. The editors ask this to edit the curve with the
+ * curve-only tool: such a row is a container, not a paint canvas.
+ */
+const MaterialPaintLayer *BKE_paint_layers_text_decal_bend_owner_get(
+    const Material &ma, const MaterialPaintLayer &curve_row);
+
+/**
+ * Put \a text_row's own Space and mapping in step with its bend curve: \a canvas selects the Canvas
+ * text read at raw material UV (2D curve), otherwise the Projected text read through its frame (3D
+ * curve). The projection payload is kept across Canvas, so a trip back restores the authored frame.
+ * Invalidates the raster and tags the material.
+ */
+void BKE_paint_layers_text_decal_bend_space_sync(Material &ma,
+                                                 MaterialPaintLayer &text_row,
+                                                 bool canvas);
+
+/**
+ * Project a point of the painted object's space into the raster UV of \a text_row's Text Decal,
+ * through the frame, aspect fit and 2D mapping the coverage map read uses. Used for the legacy
+ * layout where a 2D bend curve of a Projected decal was stored in this raster space; the current
+ * 2D Space is the layered material's UV and converts through the mesh instead.
+ */
+bool BKE_paint_layers_text_decal_bend_uv_from_point(const Material &ma,
+                                                    const MaterialPaintLayer &text_row,
+                                                    const Object *painted_object,
+                                                    const float p[3],
+                                                    float r_uv[2]);
+/** The inverse of #BKE_paint_layers_text_decal_bend_uv_from_point. */
+bool BKE_paint_layers_text_decal_bend_point_from_uv(const Material &ma,
+                                                    const MaterialPaintLayer &text_row,
+                                                    const Object *painted_object,
+                                                    const float uv[2],
+                                                    float r_p[3]);
+
+/**
+ * Point \a text_row's bend at the Curve Patch row \a new_row (by its marker) instead. The bind is
+ * by marker, so the curve row itself is not referenced: a deleted row simply stops resolving. A
+ * separate pinned painted object (#BKE_paint_layers_text_decal_bend_painted_object_set) remembers
+ * the mesh whose space a 3D curve is written in. The row is tagged edited, and the next scene
+ * update re-bakes the raster, bent or straight.
+ *
+ * \return false when \a text_row is not a Text Decal row of \a ma. A nil \a new_row clears the
+ * bind and is accepted.
+ */
+bool BKE_paint_layers_text_decal_bend_row_set(Material &ma,
+                                              MaterialPaintLayer &text_row,
+                                              const bUUID &new_row);
+
+/**
+ * Pin the mesh object whose space the bend curve of \a text_row is written in. Binding a curve (or
+ * editing it) pins the object the operator works on, so a later refresh with no editor context
+ * uses that object instead of scanning \a Main for "the first mesh that uses the material".
+ *
+ * \return false when \a text_row is not a Text Decal row of \a ma, the material is not editable, or
+ * \a object is not a mesh. A null \a object clears the pin and releases its user.
+ */
+bool BKE_paint_layers_text_decal_bend_painted_object_set(Material &ma,
+                                                         MaterialPaintLayer &text_row,
+                                                         Object *object);
+
+/**
+ * Switch the bend of \a text_row on or off without touching its curve or the row that carries it,
+ * so the user can compare the bent and the straight raster on the spot. The row is tagged edited,
+ * and the next scene update re-bakes the raster.
+ *
+ * \return false when \a text_row is not a Text Decal row of \a ma or the flag is unchanged.
+ */
+bool BKE_paint_layers_text_decal_bend_enabled_set(Material &ma,
+                                                  MaterialPaintLayer &text_row,
+                                                  bool enabled);
+
+/**
+ * True when \a row is a Text Decal whose place on the surface is decided by its bend curve: the
+ * bend is enabled and its row resolves to a curve stored in object space (an older file). A curve
+ * in the raster's own UV only bends the text inside the raster, so the frame still places the
+ * decal and this answers false. The editors lock the frame controls while this holds.
+ */
+bool BKE_paint_layers_text_decal_position_locked(const Material &ma,
+                                                 const MaterialPaintLayer &row);
 
 /**
  * Remove the content correction \a effect from its owner, letting go of its maps. The active
@@ -1852,6 +1953,14 @@ bool BKE_paint_layers_mapping_set_scale_lock(Material &ma, MaterialPaintLayer *l
 bool BKE_paint_layers_mapping_set_rotation(Material &ma, MaterialPaintLayer *layer, float rotation);
 
 /**
+ * Reset \a layer's mapping to the raw material UV: UV space, zero offset, unit scale, no rotation
+ * and Clip wrap. The projection payload is deliberately left in place, so a caller that reads a
+ * Canvas text can keep the frame it authored for the trip back to Projected. Value-only; tags the
+ * material and, when the read changes shape, the row as edited.
+ */
+bool BKE_paint_layers_mapping_reset_raw_uv(Material &ma, MaterialPaintLayer *layer);
+
+/**
  * Where the middle of \a layer's tile lands on the canvas: the inverse of the sample transform
  * read at the middle of the map. It is the tile's position as the user sees it -- the gizmo's
  * anchor ring -- and the one point the tile-holding edits keep still. Read-only: the offset is
@@ -2057,6 +2166,10 @@ constexpr float PAINT_LAYER_PROJECTION_EDGE_SOFT = 0.005f;
 /** The facing limit a new frame gets, in degrees from the axis direction. */
 constexpr float PAINT_LAYER_PROJECTION_ANGLE_DEFAULT = 80.0f;
 
+/** The depth slab a Decal preset (and a new Text Decal) gets, in metres: content moved a little
+ * off the surface is not clipped at the frame. */
+constexpr float PAINT_LAYER_PROJECTION_DEPTH_DECAL_DEFAULT = 2.5f;
+
 /** Degrees below the facing limit where the weight is still full: the smooth band that keeps the
  * interior of the decal crisp while the rim fades out. */
 constexpr float PAINT_LAYER_PROJECTION_ANGLE_BAND = 10.0f;
@@ -2156,6 +2269,27 @@ inline float BKE_paint_layers_projection_polar_v(const float polar)
 {
   return polar * PAINT_LAYER_PROJECTION_INV_PI;
 }
+
+/**
+ * The Planar frame-space position of \a p: `q = R^-1 (p - center) / (size * 0.5)`, with the size
+ * normalized as #BKE_paint_layers_projection_size_normalize does. The composite bake and the Text
+ * Decal bend both read a frame through this one place, so a 3D point maps to the same UV the
+ * shader would give it.
+ *
+ * \param inv_rot: the inverse of the frame's rotation matrix, `transpose(eul_to_mat3(rotation))`.
+ */
+void BKE_paint_layers_projection_frame_position(const float center[3],
+                                                const float size[3],
+                                                const float inv_rot[3][3],
+                                                const float p[3],
+                                                float r_q[3]);
+
+/**
+ * The Planar UV of a frame-space position \a q, on the two axes the frame's \a axis reads: X reads
+ * Y/Z, Y reads X/Z and Z reads X/Y, `uv = 0.5 + 0.5 * q` on each. The caller scales the result by
+ * the map's tiling, as the generated graph's Tiling input does.
+ */
+void BKE_paint_layers_projection_planar_uv(int8_t axis, const float q[3], float r_uv[2]);
 
 /**
  * Where the six faces of a Cube row sit in its atlas: the size of one cell and the origin of each
@@ -2342,10 +2476,37 @@ bool BKE_paint_layers_projection_set_center(Material &ma,
                                             MaterialPaintLayer *layer,
                                             const float center[3]);
 
-/** Set the frame extents, normalized per axis. Value-only. */
+/** Set the frame extents, normalized per axis. Value-only.
+ *
+ * The array is applied as given, even while Lock Size is on: a caller that knows which axis the
+ * user changed uses #BKE_paint_layers_projection_set_size_axis, so a programmatic write of all
+ * three axes never silently rewrites the other footprint axis. */
 bool BKE_paint_layers_projection_set_size(Material &ma,
                                           MaterialPaintLayer *layer,
                                           const float size[3]);
+
+/**
+ * Set one footprint axis of the frame, normalized. \a axis is 0 for X and 1 for Y. While Lock
+ * Size is on both footprint axes take \a value; otherwise only \a axis moves. This is the explicit
+ * "the user changed this axis" entry: the caller names the lead axis instead of the setter guessing
+ * it from an epsilon comparison. Value-only.
+ */
+bool BKE_paint_layers_projection_set_size_axis(Material &ma,
+                                               MaterialPaintLayer *layer,
+                                               int axis,
+                                               float value);
+
+/** Set the frame's depth extent (the Z axis of #projection_size), normalized. Value-only. */
+bool BKE_paint_layers_projection_set_depth_size(Material &ma,
+                                                MaterialPaintLayer *layer,
+                                                float depth);
+
+/** Whether the two footprint extents are edited together (Lock Size). */
+bool BKE_paint_layers_projection_size_lock_get(const MaterialPaintLayer &layer);
+/** Turn Lock Size on or off; on takes the current X for both footprint axes. */
+bool BKE_paint_layers_projection_set_size_lock(Material &ma,
+                                               MaterialPaintLayer *layer,
+                                               bool lock);
 
 /**
  * Wrapper for scripts: accepts XYZ Euler radians in \a rotation, converts to normal+roll and stores
@@ -2565,10 +2726,16 @@ ePaintLayerProjectionPreset BKE_paint_layers_projection_preset_get(
  *                   shape keys and modifiers reach the raster. A live text edit (the object's
  *                   EditFont) is read from the original, because that is where the edit buffer
  *                   lives; every other field is still the evaluated one.
+ * \param painted_object: the mesh the decal is painted on, when the caller has it (an editor
+ *                   operator passes the active object). A 3D bend curve with a projection
+ *                   controller is projected through this object's space; null lets the refresh
+ *                   pick the first mesh of \a bmain that uses \a ma, so a scene update with no
+ *                   context still resolves it.
  */
 void BKE_paint_layers_text_decal_refresh(Main &bmain,
                                          Material &ma,
-                                         const Depsgraph *depsgraph = nullptr);
+                                         const Depsgraph *depsgraph = nullptr,
+                                         const Object *painted_object = nullptr);
 
 /**
  * Re-render the rasters of the materials in \a bmain whose Text Decals changed since the last

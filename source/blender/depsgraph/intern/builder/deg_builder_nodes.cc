@@ -2194,11 +2194,19 @@ void DepsgraphNodeBuilder::build_material(Material *material)
      * when no view layer shows it. When the object is also in the view layer, `build_object` merges
      * the two builds (linked state raised to direct, base index kept), as it does for a parent. */
     const auto build_text_object = [&](const MaterialPaintLayer &row) {
-      if (row.source == MA_PAINT_LAYER_SOURCE_TEXT && row.text_decal != nullptr &&
-          row.text_decal->text_object != nullptr)
-      {
+      if (row.source != MA_PAINT_LAYER_SOURCE_TEXT || row.text_decal == nullptr) {
+        return;
+      }
+      if (row.text_decal->text_object != nullptr) {
         build_object(-1, row.text_decal->text_object, DEG_ID_LINKED_INDIRECTLY, true);
       }
+      /* The 3D bend curve lives in the space of the mesh the decal is painted on; its transform
+       * reaches the raster too, so build it when the row pinned one. */
+      if (row.text_decal->bend_painted_object != nullptr) {
+        build_object(-1, row.text_decal->bend_painted_object, DEG_ID_LINKED_INDIRECTLY, true);
+      }
+      /* The bend curve is a Curve Patch row of the same material, so its container is already a
+       * node of this graph: no separate ID is built here. */
     };
     /* A Curve Patch row reads the control curve of each curve that names an external Curves object
      * from it (an effect of a row, or an item of its mask). The object is normally not assigned

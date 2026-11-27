@@ -16,6 +16,7 @@
 
 #include "DNA_paint_vector_types.h"
 
+#include "BLI_index_range.hh"
 #include "BLI_listbase_iterator.hh"
 #include "BLI_math_vector.h"
 #include "BLI_resource_scope.hh"
@@ -142,6 +143,29 @@ bool BKE_paint_vector_item_curve_geometry_is_valid(const PaintVectorItem &item)
   return item.type == PAINT_VECTOR_ITEM_CURVE_PATCH &&
          item.curve_patch_geometry.runtime != nullptr &&
          item.curve_patch_geometry.attribute_storage.runtime != nullptr;
+}
+
+const bke::CurvesGeometry *BKE_paint_vector_item_curve_geometry_get(const PaintVectorItem &item)
+{
+  if (!BKE_paint_vector_item_curve_geometry_is_valid(item)) {
+    return nullptr;
+  }
+  return &item.curve_patch_geometry.wrap();
+}
+
+const PaintVectorItem *BKE_paint_vector_curve_patch_item_get(const PaintVector &pv)
+{
+  if (pv.items_num > 0 && pv.active_item >= 0 && pv.active_item < pv.items_num &&
+      pv.items[pv.active_item].type == PAINT_VECTOR_ITEM_CURVE_PATCH)
+  {
+    return &pv.items[pv.active_item];
+  }
+  for (const int i : IndexRange(pv.items_num)) {
+    if (pv.items[i].type == PAINT_VECTOR_ITEM_CURVE_PATCH) {
+      return &pv.items[i];
+    }
+  }
+  return nullptr;
 }
 
 void BKE_paint_vector_items_clear(PaintVector &pv)

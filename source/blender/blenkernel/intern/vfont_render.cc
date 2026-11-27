@@ -41,34 +41,14 @@
 #include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
 
+#include "vfont_render_bend.hh"
+#include "vfont_render_intern.hh"
+
 namespace blender {
 
 /* -------------------------------------------------------------------- */
 /** \name Fonts and Layout Metrics
  * \{ */
-
-/**
- * A vector font used by the raster, with the metrics its layout units are based on. The
- * layout unit of #CharTrans::offset is a fraction of the font's bounding box: the glyph
- * extraction scales outline coordinates and advances by `1 / bbox height`
- * (`blf_character_to_curves`). The em box of the font spans `em_ratio` layout units.
- */
-struct RenderFont {
-  const VFont *vfont = nullptr;
-  /** The BLF identifier, or -1 when the font could not be loaded. */
-  int blf_id = -1;
-  /** ascent/descent of the em box in layout units, for glyphs without cached bounds. */
-  float ascent = 0.0f;
-  float descent = 0.0f;
-  /**
-   * BLF pixels per layout unit, per unit of BLF size (sizes scale linearly). Sampling the
-   * FreeType line height at a reference size is exact for fonts without a line gap and
-   * only slightly under-sizes the glyphs otherwise.
-   */
-  float px_per_unit_per_size = 0.0f;
-  /** The size currently set in BLF, to skip redundant size changes per character. */
-  float size_set = -1.0f;
-};
 
 /* The size the font metrics are sampled at. Arbitrary, only the ratio matters. */
 constexpr float FONT_METRICS_REFERENCE_SIZE = 64.0f;
@@ -77,7 +57,7 @@ constexpr float FONT_METRICS_REFERENCE_SIZE = 64.0f;
  * The per-character styles of the live text. In Edit Mode `strinfo` lags behind the edit buffer
  * until the mode ends, so the raster has to read the styles from the same buffer the layout did.
  */
-static const CharInfo *vfont_render_charinfo(const Curve &cu)
+const CharInfo *vfont_render_charinfo(const Curve &cu)
 {
   return cu.editfont != nullptr ? cu.editfont->textbufinfo : cu.strinfo;
 }
@@ -110,7 +90,7 @@ static int vfont_render_font_load(const VFont *vfont)
  * resolve to their own font file and fall back to the regular one. No synthetic bold or
  * italic, the 3D text does not fake them either.
  */
-static VFont *vfont_render_font_from_charinfo(const Curve &cu, const CharInfo &info)
+VFont *vfont_render_font_from_charinfo(const Curve &cu, const CharInfo &info)
 {
   switch (int(info.flag & (CU_CHINFO_BOLD | CU_CHINFO_ITALIC))) {
     case CU_CHINFO_BOLD:
@@ -125,7 +105,7 @@ static VFont *vfont_render_font_from_charinfo(const Curve &cu, const CharInfo &i
 }
 
 /** The already collected font of \a vfont, or null. */
-static RenderFont *render_font_find(Vector<RenderFont> &fonts, const VFont *vfont)
+RenderFont *render_font_find(Vector<RenderFont> &fonts, const VFont *vfont)
 {
   for (RenderFont &font : fonts) {
     if (font.vfont == vfont) {
@@ -171,7 +151,7 @@ static void vfont_render_font_measure(RenderFont &font)
  * The glyph of a character, from the cache the layout has filled. Null when the character
  * does not exist in the font or the font has no data.
  */
-static const VChar *vfont_render_char_find(const VFontData *vfd, const char32_t charcode)
+const VChar *vfont_render_char_find(const VFontData *vfd, const char32_t charcode)
 {
   if (vfd == nullptr) {
     return nullptr;
@@ -183,7 +163,7 @@ static const VChar *vfont_render_char_find(const VFontData *vfd, const char32_t 
 }
 
 /** Set the BLF size that renders one layout unit every \a px_per_unit pixels. */
-static void vfont_render_font_size_set(RenderFont &font, const float px_per_unit)
+void vfont_render_font_size_set(RenderFont &font, const float px_per_unit)
 {
   if (font.px_per_unit_per_size <= 0.0f) {
     return;
@@ -205,30 +185,25 @@ static void vfont_render_font_size_set(RenderFont &font, const float px_per_unit
  * First pass: collect the fonts the text uses and the ink bounding box in layout units. The box
  * drives the fit, so it has to be known before any glyph is drawn.
  */
-static bool layout_collect(const Curve &cu,
-                           const char32_t *text,
-                           const int text_len,
-                           const CharTrans *chartrans,
-                           Vector<RenderFont> &r_fonts,
-                           rctf &r_bbox)
+static bool layout_collect(const VFontRenderText &text, Vector<RenderFont> &r_fonts, rctf &r_bbox)
 {
-  const CharInfo *charinfo = vfont_render_charinfo(cu);
+  const CharInfo *charinfo = vfont_render_charinfo(text.cu);
   r_bbox.xmin = r_bbox.ymin = FLT_MAX;
   r_bbox.xmax = r_bbox.ymax = -FLT_MAX;
 
-  for (const int a : IndexRange(text_len)) {
-    const CharTrans &ct = chartrans[a];
-    if ((cu.overflow == CU_OVERFLOW_TRUNCATE) && ct.is_overflow) {
+  for (const int a : IndexRange(text.text_len)) {
+    const CharTrans &ct = text.chartrans[a];
+    if (vfont_render_char_is_truncated(text.cu, ct)) {
       /* The 3D text truncates the layout at this character as well. */
       break;
     }
-    const char32_t charcode = ct.is_smallcaps ? toupper(text[a]) : text[a];
-    if (ELEM(charcode, '\n', '\0')) {
+    const char32_t charcode = vfont_render_char_code(ct, text.text, a);
+    if (vfont_render_char_is_blank(charcode)) {
       continue;
     }
 
     const CharInfo &info = charinfo[a];
-    const VFont *vfont = vfont_render_font_from_charinfo(cu, info);
+    const VFont *vfont = vfont_render_font_from_charinfo(text.cu, info);
     if (vfont == nullptr) {
       continue;
     }
@@ -240,7 +215,7 @@ static bool layout_collect(const Curve &cu,
       vfont_render_font_metrics_fill(*font);
     }
     const VChar *che = vfont_render_char_find(vfont->data, charcode);
-    const float smallcaps_scale = ct.is_smallcaps ? cu.smallcaps_scale : 1.0f;
+    const float smallcaps_scale = ct.is_smallcaps ? text.cu.smallcaps_scale : 1.0f;
     if (che != nullptr) {
       if (che->bounds.xmin < che->bounds.xmax || che->bounds.ymin < che->bounds.ymax) {
         r_bbox.xmin = std::min(r_bbox.xmin, ct.offset.x + che->bounds.xmin * smallcaps_scale);
@@ -260,8 +235,8 @@ static bool layout_collect(const Curve &cu,
 
     if (info.flag & CU_CHINFO_UNDERLINE) {
       /* The underline sits below the ink of most characters, include it in the box. */
-      const float band_top = ct.offset.y + cu.ulpos - 0.05f;
-      r_bbox.ymin = std::min(r_bbox.ymin, band_top - cu.ulheight);
+      const float band_top = ct.offset.y + text.cu.ulpos - 0.05f;
+      r_bbox.ymin = std::min(r_bbox.ymin, band_top - text.cu.ulheight);
     }
   }
 
@@ -330,10 +305,7 @@ static void vfont_render_fill_rect(
 }
 
 /** Draw every glyph of the layout into \a draw_ibuf, white so that its alpha is the coverage. */
-static void glyphs_draw(const Curve &cu,
-                        const char32_t *text,
-                        const int text_len,
-                        const CharTrans *chartrans,
+static void glyphs_draw(const VFontRenderText &text,
                         Vector<RenderFont> &fonts,
                         ImBuf &draw_ibuf,
                         const rctf &bbox,
@@ -341,9 +313,9 @@ static void glyphs_draw(const Curve &cu,
                         const float x_shift,
                         const float y_shift)
 {
-  const CharInfo *charinfo = vfont_render_charinfo(cu);
-  const bool xtrax_contract = cu.spacing < 1.0f;
-  const float xtrax = xtrax_contract ? (cu.spacing - 1.0f) : (0.5f * cu.spacing - 0.5f);
+  const CharInfo *charinfo = vfont_render_charinfo(text.cu);
+  const bool xtrax_contract = text.cu.spacing < 1.0f;
+  const float xtrax = xtrax_contract ? (text.cu.spacing - 1.0f) : (0.5f * text.cu.spacing - 0.5f);
 
   float *draw_buffer = draw_ibuf.float_data_for_write();
   const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
@@ -363,24 +335,24 @@ static void glyphs_draw(const Curve &cu,
   };
 
   char ch_utf8[BLI_UTF8_MAX + 1];
-  for (const int a : IndexRange(text_len)) {
-    const CharTrans &ct = chartrans[a];
-    if ((cu.overflow == CU_OVERFLOW_TRUNCATE) && ct.is_overflow) {
+  for (const int a : IndexRange(text.text_len)) {
+    const CharTrans &ct = text.chartrans[a];
+    if (vfont_render_char_is_truncated(text.cu, ct)) {
       break;
     }
-    const char32_t charcode = ct.is_smallcaps ? toupper(text[a]) : text[a];
-    if (ELEM(charcode, '\n', '\0')) {
+    const char32_t charcode = vfont_render_char_code(ct, text.text, a);
+    if (vfont_render_char_is_blank(charcode)) {
       continue;
     }
 
     const CharInfo &info = charinfo[a];
-    const VFont *vfont = vfont_render_font_from_charinfo(cu, info);
+    const VFont *vfont = vfont_render_font_from_charinfo(text.cu, info);
     RenderFont *font = render_font_find(fonts, vfont);
     if (font == nullptr || font->blf_id == -1 || font->px_per_unit_per_size <= 0.0f) {
       continue;
     }
 
-    vfont_render_font_size_set(*font, ct.is_smallcaps ? scale * cu.smallcaps_scale : scale);
+    vfont_render_font_size_set(*font, ct.is_smallcaps ? scale * text.cu.smallcaps_scale : scale);
     const size_t ch_utf8_len = BLI_str_utf8_from_unicode(uint(charcode), ch_utf8, sizeof(ch_utf8));
     if (ch_utf8_len == 0) {
       continue;
@@ -393,23 +365,23 @@ static void glyphs_draw(const Curve &cu,
        * the character origin to its advance, just below the baseline. */
       const VChar *che = vfont_render_char_find(vfont->data, charcode);
       const float twidth = (che != nullptr ? che->width : 0.0f) *
-                           (ct.is_smallcaps ? cu.smallcaps_scale : 1.0f) *
+                           (ct.is_smallcaps ? text.cu.smallcaps_scale : 1.0f) *
                            (1.0f + info.kern / 40.0f);
       bool continues = false;
-      if (a + 1 < text_len) {
-        const CharTrans &ct_next = chartrans[a + 1];
+      if (a + 1 < text.text_len) {
+        const CharTrans &ct_next = text.chartrans[a + 1];
         const CharInfo &info_next = charinfo[a + 1];
-        continues = (text[a + 1] != '\n') &&
-                    ((text[a + 1] != ' ') || (info_next.flag & CU_CHINFO_UNDERLINE)) &&
+        continues = (text.text[a + 1] != '\n') &&
+                    ((text.text[a + 1] != ' ') || (info_next.flag & CU_CHINFO_UNDERLINE)) &&
                     (ct_next.is_wrap == 0);
       }
       const float overlap = continues ? (xtrax_contract ? (xtrax * twidth) : xtrax) : 0.0f;
-      const float band_top = to_pixel_y(ct.offset.y + cu.ulpos - 0.05f);
+      const float band_top = to_pixel_y(ct.offset.y + text.cu.ulpos - 0.05f);
       vfont_render_fill_rect(draw_buffer,
                              draw_ibuf.x,
                              to_pixel_x(ct.offset.x),
                              to_pixel_x(ct.offset.x) + (twidth + overlap) * scale,
-                             band_top - cu.ulheight * scale,
+                             band_top - text.cu.ulheight * scale,
                              band_top);
     }
   }
@@ -423,23 +395,76 @@ static void glyphs_draw(const Curve &cu,
 static ImBuf *stretch_compose(ImBuf *draw_ibuf,
                               const int side,
                               const float padding_px,
-                              const float fit_px)
+                              const float box_px,
+                              const float target_px)
 {
-  if (!IMB_scale(draw_ibuf, int(fit_px), int(fit_px), IMBScaleFilter::Box)) {
+  if (!IMB_scale(draw_ibuf, int(target_px), int(target_px), IMBScaleFilter::Box)) {
     return nullptr;
   }
   ImBuf *ibuf = IMB_allocImBuf(uint(side), uint(side), ImBufFlags::FloatData);
   if (ibuf == nullptr) {
     return nullptr;
   }
-  const int origin = int(padding_px + 2.0f);
+  /* The composed square is centred in the padded box; a multiplier below 1 shrinks it there
+   * instead of pinning it to the corner. */
+  const int origin_x = int(padding_px + 2.0f + std::max(0.0f, (box_px - target_px) * 0.5f));
+  const int origin_y = int(padding_px + 2.0f + std::max(0.0f, (box_px - target_px) * 0.5f));
   for (const int y : IndexRange(draw_ibuf->y)) {
-    memcpy(ibuf->float_data_for_write() + (size_t(origin + y) * side + origin) * 4,
+    memcpy(ibuf->float_data_for_write() + (size_t(origin_y + y) * side + origin_x) * 4,
            draw_ibuf->float_data() + (size_t(y) * draw_ibuf->x) * 4,
            sizeof(float[4]) * draw_ibuf->x);
   }
   return ibuf;
 }
+
+/**
+ * Skew a premultiplied float buffer horizontally: every pixel moves by `shear * (y - origin_y)`,
+ * the 3D text's own shear rule. Bilinear on the inverse mapping; outside the source is transparent.
+ */
+static void vfont_render_shear(ImBuf &ibuf, const float shear, const float origin_y)
+{
+  const int width = ibuf.x;
+  const int height = ibuf.y;
+  const float *src = ibuf.float_data();
+  if (src == nullptr) {
+    return;
+  }
+  float *dst = ibuf.float_data_for_write();
+  if (dst == nullptr) {
+    return;
+  }
+  /* The write may have re-copied the buffer to make it mutable; read from the current one. */
+  src = ibuf.float_data();
+  /* The shear is horizontal, so every output row samples a single source row. Keep that row in a
+   * one-row buffer instead of copying the whole float raster; the copy also keeps `dst` safe when
+   * it aliases `src` (in-place write). */
+  Vector<float> row;
+  row.resize(int64_t(width) * 4);
+  for (const int y : IndexRange(height)) {
+    memcpy(row.data(), src + (size_t(y) * width) * 4, sizeof(float) * size_t(width) * 4);
+    for (const int x : IndexRange(width)) {
+      const float sx = float(x) + 0.5f - shear * (float(y) + 0.5f - origin_y) - 0.5f;
+      float *pixel = dst + (size_t(y) * width + x) * 4;
+      if (sx <= -0.5f || sx >= float(width) - 0.5f) {
+        pixel[0] = pixel[1] = pixel[2] = pixel[3] = 0.0f;
+        continue;
+      }
+      const int ix = int(std::floor(sx));
+      const float tx = sx - float(ix);
+      const auto texel = [&](const int cx) -> const float * {
+        const int cx_clamped = std::clamp(cx, 0, width - 1);
+        return row.data() + size_t(cx_clamped) * 4;
+      };
+      const float *p0 = texel(ix);
+      const float *p1 = texel(ix + 1);
+      for (const int c : IndexRange(4)) {
+        pixel[c] = p0[c] + (p1[c] - p0[c]) * tx;
+      }
+    }
+  }
+}
+
+/** \} */
 
 ImBuf *BKE_vfont_object_render(const Object &text_object_eval, const VFontRenderParams &params)
 {
@@ -488,9 +513,10 @@ ImBuf *BKE_vfont_object_render(const Object &text_object_eval, const VFontRender
     return nullptr;
   }
 
+  const VFontRenderText text_ctx{*cu, text, text_len, chartrans};
   Vector<RenderFont> fonts;
   rctf bbox;
-  if (!layout_collect(*cu, text, text_len, chartrans, fonts, bbox)) {
+  if (!layout_collect(text_ctx, fonts, bbox)) {
     return nullptr;
   }
 
@@ -508,9 +534,30 @@ ImBuf *BKE_vfont_object_render(const Object &text_object_eval, const VFontRender
   const float fit_px = std::max(float(side) - 2.0f * padding_px - 2.0f * SAFETY_PX, 8.0f);
   const float extent_x = bbox.xmax - bbox.xmin;
   const float extent_y = bbox.ymax - bbox.ymin;
-  const float scale = fit_px / std::max(extent_x, std::max(extent_y, 1e-6f));
+  const float auto_fit_scale = fit_px / std::max(extent_x, std::max(extent_y, 1e-6f));
+  /* The caller's size multiplier scales the automatic fit, so the decal can both shrink and grow
+   * its text without touching the source Text object. Zero reads as 1.0 for files written before
+   * the field existed. */
+  const float fit_multiplier = (params.fit_multiplier > 0.0f) ? params.fit_multiplier : 1.0f;
+  const float draw_scale = auto_fit_scale * fit_multiplier;
+
+  /* The bend: a usable curve in the bend params turns the drawing into per-glyph placements
+   * along it, drawn straight into the square -- the curve is in the raster's own UV space, so
+   * no fit maps the result anywhere. A container without a usable curve (no Curve Patch item,
+   * a single point, a zero length) rasterizes straight, exactly as before. */
+  ImBuf *bent_ibuf = nullptr;
+  VFontRenderBendParams bend = params.bend;
+  if (!bend.glyph_px_explicit) {
+    bend.glyph_px = draw_scale;
+  }
+  if (vfont_render_bend_try(text_ctx, fonts, bend, side, &bent_ibuf)) {
+    return bent_ibuf;
+  }
 
   const bool stretch = params.fit == VFontRenderFit::Stretch;
+  /* Stretch draws at the aspect-filling scale and applies the multiplier when it composes the
+   * square, so the anisotropic fill keeps both extents equal. */
+  const float straight_scale = stretch ? auto_fit_scale : draw_scale;
   float x_shift = padding_px + SAFETY_PX;
   float y_shift = padding_px + SAFETY_PX;
   ImBuf *ibuf = nullptr;
@@ -518,8 +565,8 @@ ImBuf *BKE_vfont_object_render(const Object &text_object_eval, const VFontRender
   if (stretch) {
     /* BLF cannot scale the glyphs anisotropically: draw at a uniform scale into an extent-sized
      * buffer, then resample it. */
-    const int temp_side_x = int(std::ceil(extent_x * scale)) + int(2.0f * SAFETY_PX);
-    const int temp_side_y = int(std::ceil(extent_y * scale)) + int(2.0f * SAFETY_PX);
+    const int temp_side_x = int(std::ceil(extent_x * straight_scale)) + int(2.0f * SAFETY_PX);
+    const int temp_side_y = int(std::ceil(extent_y * straight_scale)) + int(2.0f * SAFETY_PX);
     draw_ibuf = IMB_allocImBuf(
         uint(std::max(temp_side_x, 2)), uint(std::max(temp_side_y, 2)), ImBufFlags::FloatData);
     if (draw_ibuf == nullptr) {
@@ -532,15 +579,25 @@ ImBuf *BKE_vfont_object_render(const Object &text_object_eval, const VFontRender
       return nullptr;
     }
     draw_ibuf = ibuf;
-    x_shift += (fit_px - extent_x * scale) * 0.5f;
-    y_shift += (fit_px - extent_y * scale) * 0.5f;
+    x_shift += (fit_px - extent_x * straight_scale) * 0.5f;
+    y_shift += (fit_px - extent_y * straight_scale) * 0.5f;
   }
 
-  glyphs_draw(
-      *cu, text, text_len, chartrans, fonts, *draw_ibuf, bbox, scale, x_shift, y_shift);
+  glyphs_draw(text_ctx, fonts, *draw_ibuf, bbox, straight_scale, x_shift, y_shift);
+
+  /* Shear skews the glyph outlines by their layout Y in the 3D text (`BKE_vfont_to_curve` adds
+   * `shear * y` to every curve point); BLF cannot skew, so the straight raster is skewed after the
+   * glyphs are drawn. The pivot is the layout origin, which `y_shift` maps to the buffer. */
+  if (text_ctx.cu.shear != 0.0f) {
+    vfont_render_shear(*draw_ibuf, text_ctx.cu.shear, y_shift);
+  }
 
   if (stretch) {
-    ImBuf *composed = stretch_compose(draw_ibuf, side, padding_px, fit_px);
+    /* The composed square never exceeds the padded box: a multiplier above 1 cannot grow past the
+     * raster, while one below 1 shrinks the text inside it. */
+    const float target_px = std::clamp(
+        fit_px * fit_multiplier, 8.0f, std::max(fit_px, 8.0f));
+    ImBuf *composed = stretch_compose(draw_ibuf, side, padding_px, fit_px, target_px);
     IMB_freeImBuf(draw_ibuf);
     return composed;
   }

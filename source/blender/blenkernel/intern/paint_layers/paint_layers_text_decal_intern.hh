@@ -69,6 +69,14 @@ struct TextDecalRuntime {
   int8_t present = -1;
   /** The original Text objects whose live edit holds a raster back; the wake timer tags them. */
   Vector<Object *> editing_sources;
+  /**
+   * The session UID of the legacy "first mesh that uses the material" a projected bend falls back
+   * to when its row has no pinned object. The scan is O(objects x slots), so a positive answer is
+   * kept across scene updates; the object is looked up by UID again, never held as a pointer, so a
+   * deleted object cannot dangle. Zero means "not cached", so the scan still runs until a mesh
+   * with the material exists.
+   */
+  uint32_t painted_object_uid = 0;
 };
 
 /** The Text Decal runtime of every material, by #ID::session_uid. Hold the mutex around it. */

@@ -73,6 +73,43 @@ void BKE_paint_layers_projection_size_effective(const MaterialPaintLayer &layer,
   }
 }
 
+void BKE_paint_layers_projection_frame_position(const float center[3],
+                                                const float size[3],
+                                                const float inv_rot[3][3],
+                                                const float p[3],
+                                                float r_q[3])
+{
+  /* `q = R^-1 (p - center) / (size * 0.5)`, the inverse of the frame the generated graph reads the
+   * point through. The size normalizes each axis so a stored zero still divides to one. */
+  float delta[3];
+  sub_v3_v3v3(delta, p, center);
+  float local[3];
+  mul_v3_m3v3(local, inv_rot, delta);
+  for (int i = 0; i < 3; i++) {
+    const float half_extent = BKE_paint_layers_projection_size_normalize(size[i]) * 0.5f;
+    r_q[i] = (half_extent != 0.0f) ? local[i] / half_extent : 0.0f;
+  }
+}
+
+void BKE_paint_layers_projection_planar_uv(const int8_t axis, const float q[3], float r_uv[2])
+{
+  /* The two footprint axes of the projection direction, each mapped from `-1..1` to `0..1`. */
+  switch (axis) {
+    case MA_PAINT_LAYER_PROJECTION_AXIS_X:
+      r_uv[0] = 0.5f + 0.5f * q[1];
+      r_uv[1] = 0.5f + 0.5f * q[2];
+      break;
+    case MA_PAINT_LAYER_PROJECTION_AXIS_Y:
+      r_uv[0] = 0.5f + 0.5f * q[0];
+      r_uv[1] = 0.5f + 0.5f * q[2];
+      break;
+    default:
+      r_uv[0] = 0.5f + 0.5f * q[0];
+      r_uv[1] = 0.5f + 0.5f * q[1];
+      break;
+  }
+}
+
 float BKE_paint_layers_projection_angle_normalize(const float angle)
 {
   /* The stored limit is kept in `(0, 180]` by the setter and the RNA range. A value outside it
@@ -427,7 +464,8 @@ MaterialPaintLayerProjection *BKE_paint_layers_projection_ensure(MaterialPaintLa
   /* A frame starts as the decal it is meant to be: clipped to the frame, limited in depth, fitted
    * to the source image and faded out past the facing limit. */
   projection->flag = MA_PAINT_LAYER_PROJECTION_CLIP | MA_PAINT_LAYER_PROJECTION_DEPTH |
-                     MA_PAINT_LAYER_PROJECTION_FIT_ASPECT | MA_PAINT_LAYER_PROJECTION_FACING;
+                     MA_PAINT_LAYER_PROJECTION_FIT_ASPECT | MA_PAINT_LAYER_PROJECTION_FACING |
+                     MA_PAINT_LAYER_PROJECTION_SIZE_LOCK;
   layer.projection = projection;
   return projection;
 }
@@ -750,7 +788,74 @@ bool BKE_paint_layers_projection_set_size(Material &ma,
     if (!std::isfinite(size[i])) {
       return false;
     }
+  }
+  /* Apply the array verbatim. Lock Size is a user gesture, not a property of the data: only the
+   * caller that knows which axis the user moved may join the axes, through
+   * #BKE_paint_layers_projection_set_size_axis. A programmatic write of all three axes therefore
+   * means exactly what it says. */
+  for (int i = 0; i < 3; i++) {
     layer->projection->size[i] = BKE_paint_layers_projection_size_normalize(size[i]);
+  }
+  BKE_paint_layers_tag_value_edited(ma);
+  return true;
+}
+
+bool BKE_paint_layers_projection_set_size_axis(Material &ma,
+                                               MaterialPaintLayer *layer,
+                                               const int axis,
+                                               const float value)
+{
+  if (!paint_layer_owned(ma, layer) || layer->projection == nullptr) {
+    return false;
+  }
+  if (axis < 0 || axis > 1 || !std::isfinite(value)) {
+    return false;
+  }
+  const float resolved = BKE_paint_layers_projection_size_normalize(value);
+  layer->projection->size[axis] = resolved;
+  if ((layer->projection->flag & MA_PAINT_LAYER_PROJECTION_SIZE_LOCK) != 0) {
+    /* The named axis leads and the other footprint axis follows it. */
+    layer->projection->size[1 - axis] = resolved;
+  }
+  BKE_paint_layers_tag_value_edited(ma);
+  return true;
+}
+
+bool BKE_paint_layers_projection_set_depth_size(Material &ma,
+                                                MaterialPaintLayer *layer,
+                                                const float depth)
+{
+  if (!paint_layer_owned(ma, layer) || layer->projection == nullptr) {
+    return false;
+  }
+  if (!std::isfinite(depth)) {
+    return false;
+  }
+  layer->projection->size[2] = BKE_paint_layers_projection_size_normalize(depth);
+  BKE_paint_layers_tag_value_edited(ma);
+  return true;
+}
+
+bool BKE_paint_layers_projection_size_lock_get(const MaterialPaintLayer &layer)
+{
+  return (layer.projection != nullptr) &&
+         ((layer.projection->flag & MA_PAINT_LAYER_PROJECTION_SIZE_LOCK) != 0);
+}
+
+bool BKE_paint_layers_projection_set_size_lock(Material &ma,
+                                               MaterialPaintLayer *layer,
+                                               const bool lock)
+{
+  if (!paint_layer_owned(ma, layer) || layer->projection == nullptr) {
+    return false;
+  }
+  if (lock) {
+    /* Joining the axes takes the current X for both, the way the mapping lock takes its X. */
+    layer->projection->size[1] = layer->projection->size[0];
+    layer->projection->flag |= MA_PAINT_LAYER_PROJECTION_SIZE_LOCK;
+  }
+  else {
+    layer->projection->flag &= ~MA_PAINT_LAYER_PROJECTION_SIZE_LOCK;
   }
   BKE_paint_layers_tag_value_edited(ma);
   return true;
@@ -1126,8 +1231,12 @@ bool BKE_paint_layers_projection_apply_preset(Material &ma,
   switch (preset) {
     case PAINT_LAYER_PROJ_PRESET_DECAL: {
       new_flag |= MA_PAINT_LAYER_PROJECTION_CLIP | MA_PAINT_LAYER_PROJECTION_DEPTH |
-                  MA_PAINT_LAYER_PROJECTION_FIT_ASPECT | MA_PAINT_LAYER_PROJECTION_FACING;
+                  MA_PAINT_LAYER_PROJECTION_FIT_ASPECT | MA_PAINT_LAYER_PROJECTION_FACING |
+                  MA_PAINT_LAYER_PROJECTION_SIZE_LOCK;
       layer->projection->angle = PAINT_LAYER_PROJECTION_ANGLE_DEFAULT;
+      /* The Decal preset's depth slab is the user-facing default, so content moved off the
+       * surface a little is not clipped at the frame. */
+      layer->projection->size[2] = PAINT_LAYER_PROJECTION_DEPTH_DECAL_DEFAULT;
       break;
     }
     case PAINT_LAYER_PROJ_PRESET_FLAT: {
@@ -1142,7 +1251,11 @@ bool BKE_paint_layers_projection_apply_preset(Material &ma,
       return false;
     }
   }
-  if (new_flag == layer->projection->flag) {
+  const bool flags_changed = new_flag != layer->projection->flag;
+  const bool depth_reset =
+      preset == PAINT_LAYER_PROJ_PRESET_DECAL &&
+      layer->projection->size[2] != PAINT_LAYER_PROJECTION_DEPTH_DECAL_DEFAULT;
+  if (!flags_changed && !depth_reset) {
     return true;
   }
   layer->projection->flag = new_flag;

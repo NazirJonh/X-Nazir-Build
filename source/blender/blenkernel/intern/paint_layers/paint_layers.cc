@@ -1039,6 +1039,9 @@ static void paint_layer_release_users(MaterialPaintLayer &layer)
   if (layer.text_decal != nullptr && layer.text_decal->text_object != nullptr) {
     id_us_min(&layer.text_decal->text_object->id);
   }
+  if (layer.text_decal != nullptr && layer.text_decal->bend_painted_object != nullptr) {
+    id_us_min(&layer.text_decal->bend_painted_object->id);
+  }
   if (layer.text_decal != nullptr && layer.text_decal->coverage != nullptr) {
     id_us_min(&layer.text_decal->coverage->id);
   }
@@ -1615,22 +1618,31 @@ MaterialPaintLayer *BKE_paint_layers_curve_patch_effect_add(Material &ma,
 static void paint_layer_text_decal_setup(Material &ma,
                                          Main &bmain,
                                          MaterialPaintLayer &row,
-                                         Object &text_object)
+                                         Object &text_object,
+                                         const int text_decal_size)
 {
   /* The payload holds no copy of the text or its formatting: the object is the single source of
    * truth, so it is referenced, never duplicated. */
   MaterialPaintLayerText *payload = MEM_new<MaterialPaintLayerText>(__func__);
   payload->text_object = &text_object;
   id_us_plus(&text_object.id);
-  /* Zero reads back as the default size, so a material without one bakes at 1024. The material's
-   * map size may be above the Text Decal cap; the payload stores what it will really bake at. */
-  payload->size = (ma.paint_layers_image_size > 0) ?
-                      std::min(int(ma.paint_layers_image_size),
-                               int(MA_PAINT_LAYER_TEXT_SIZE_MAX)) :
-                      0;
+  /* A Text Decal's bake size is its own: new decals start at 2048 unless the caller asked for
+   * another side, which keeps glyph edges clean at the zooms the decal is usually seen, and step
+   * from there. The material's canvas size does not cap it. */
+  payload->size = (text_decal_size > 0) ?
+                      std::clamp(text_decal_size,
+                                 int(MA_PAINT_LAYER_TEXT_SIZE_MIN),
+                                 int(MA_PAINT_LAYER_TEXT_SIZE_MAX)) :
+                      MA_PAINT_LAYER_TEXT_SIZE_DEFAULT;
   payload->padding = 0.05f;
   payload->fit = MA_PAINT_LAYER_TEXT_FIT_CONTAIN;
+  payload->font_size = 1.0f;
   row.text_decal = payload;
+
+  /* A Text Decal is read through its frame and clipped at it: the raster's text must not wrap
+   * around the frame when a bend curve leaves the unit square, or the glyph order folds over
+   * itself. Clip is the only wrap a decal wants by default. */
+  row.mapping.wrap = MA_PAINT_LAYER_MAPPING_WRAP_CLIP;
 
   /* The text is baked right away, into the maps the refresh creates at the payload's size: the row
    * is created with its content in place, the way the Image Editor and the 3D view show it
@@ -1643,6 +1655,10 @@ static void paint_layer_text_decal_setup(Material &ma,
    * goes through the frame. The space set allocates the projection payload itself. */
   BKE_paint_layers_projection_set_space(ma, &row, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR);
   BKE_paint_layers_projection_ensure(row);
+  /* A Text Decal's depth slab is the Decal preset's default, so moving the curve or the frame a
+   * little off the surface does not clip the text at the frame's plane. */
+  BKE_paint_layers_projection_set_depth_size(
+      ma, &row, PAINT_LAYER_PROJECTION_DEPTH_DECAL_DEFAULT);
 
   /* The Text object is a new ID reference of the material: the depsgraph has to rebuild its
    * relations before the object can be evaluated for the raster. */
@@ -1654,7 +1670,8 @@ MaterialPaintLayer *BKE_paint_layers_text_decal_effect_add(Material &ma,
                                                            MaterialPaintLayer *owner,
                                                            const char *name,
                                                            Main &bmain,
-                                                           Object &text_object)
+                                                           Object &text_object,
+                                                           const int text_decal_size)
 {
   if (text_object.type != OB_FONT) {
     return nullptr;
@@ -1678,7 +1695,7 @@ MaterialPaintLayer *BKE_paint_layers_text_decal_effect_add(Material &ma,
     copy_v4_v4(base->value, white);
   }
 
-  paint_layer_text_decal_setup(ma, bmain, *effect, text_object);
+  paint_layer_text_decal_setup(ma, bmain, *effect, text_object, text_decal_size);
   return effect;
 }
 
@@ -1686,7 +1703,8 @@ MaterialPaintLayer *BKE_paint_layers_text_decal_mask_add(Material &ma,
                                                          MaterialPaintLayer *layer,
                                                          const char *name,
                                                          Main &bmain,
-                                                         Object &text_object)
+                                                         Object &text_object,
+                                                         const int text_decal_size)
 {
   /* Lays over the base mask like any mask correction, so there has to be one; making it is the
    * caller's call (the Add policy does, white). */
@@ -1715,7 +1733,7 @@ MaterialPaintLayer *BKE_paint_layers_text_decal_mask_add(Material &ma,
     return nullptr;
   }
   record->value[0] = record->value[1] = record->value[2] = record->value[3] = 1.0f;
-  paint_layer_text_decal_setup(ma, bmain, *item, text_object);
+  paint_layer_text_decal_setup(ma, bmain, *item, text_object, text_decal_size);
   return item;
 }
 
@@ -1747,6 +1765,208 @@ bool BKE_paint_layers_text_decal_object_set(Material &ma,
    * from the new object (the runtime hash no longer matches). */
   BKE_paint_layers_tag_edited(ma);
   return true;
+}
+
+/** The row whose effects or mask hold \a text_row: its bend curve must come from that same owner. */
+static MaterialPaintLayer *text_decal_owner_row(Material &ma, const MaterialPaintLayer &text_row)
+{
+  if (text_row.role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+    return BKE_paint_layers_mask_item_owner(ma, text_row);
+  }
+  return BKE_paint_layers_correction_owner(ma, text_row);
+}
+
+const MaterialPaintLayer *BKE_paint_layers_text_decal_bend_row_get(
+    const Material &ma, const MaterialPaintLayer &text_row)
+{
+  if (text_row.text_decal == nullptr || text_row.source != MA_PAINT_LAYER_SOURCE_TEXT) {
+    return nullptr;
+  }
+  const bUUID &marker = text_row.text_decal->bend_curve_row;
+  if (BLI_uuid_is_nil(marker)) {
+    return nullptr;
+  }
+  /* The bind is by marker, so the row is looked up on every read: a re-order, a delete or an undo
+   * simply stops resolving, never leaving a dangling pointer behind. */
+  const MaterialPaintLayer *owner = (text_row.role == MA_PAINT_LAYER_ROLE_MASK_ITEM) ?
+                                        BKE_paint_layers_mask_item_owner(ma, text_row) :
+                                        BKE_paint_layers_correction_owner(ma, text_row);
+  if (owner == nullptr) {
+    return nullptr;
+  }
+  for (const MaterialPaintLayer &effect : owner->effects) {
+    if (effect.curve_patch != nullptr && BLI_uuid_equal(effect.marker, marker)) {
+      return &effect;
+    }
+  }
+  return nullptr;
+}
+
+MaterialPaintLayer *BKE_paint_layers_text_decal_bend_row_get(Material &ma,
+                                                             const MaterialPaintLayer &text_row)
+{
+  /* The read answers a row of this same mutable stack, so aliasing it back is safe. */
+  return const_cast<MaterialPaintLayer *>(
+      BKE_paint_layers_text_decal_bend_row_get(static_cast<const Material &>(ma), text_row));
+}
+
+const MaterialPaintLayer *BKE_paint_layers_text_decal_bend_owner_get(
+    const Material &ma, const MaterialPaintLayer &curve_row)
+{
+  const MaterialPaintLayer *found = nullptr;
+  const auto row_matches = [&](const MaterialPaintLayer &row) {
+    return row.source == MA_PAINT_LAYER_SOURCE_TEXT && row.text_decal != nullptr &&
+           !BLI_uuid_is_nil(row.text_decal->bend_curve_row) &&
+           BLI_uuid_equal(row.text_decal->bend_curve_row, curve_row.marker);
+  };
+  BKE_paint_layers_foreach(
+      ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
+        for (const MaterialPaintLayer &effect : layer.effects) {
+          if (row_matches(effect)) {
+            found = &effect;
+            return false;
+          }
+        }
+        for (const MaterialPaintLayer &item : layer.mask_stack) {
+          if (row_matches(item)) {
+            found = &item;
+            return false;
+          }
+        }
+        return true;
+      });
+  return found;
+}
+
+bool BKE_paint_layers_text_decal_bend_row_set(Material &ma,
+                                              MaterialPaintLayer &text_row,
+                                              const bUUID &new_row)
+{
+  MaterialPaintLayer *owner = text_decal_owner_row(ma, text_row);
+  if (text_row.text_decal == nullptr || text_row.source != MA_PAINT_LAYER_SOURCE_TEXT ||
+      owner == nullptr)
+  {
+    return false;
+  }
+  if (!ID_IS_EDITABLE(&ma.id)) {
+    return false;
+  }
+  const MaterialPaintLayer *bound_curve = nullptr;
+  if (!BLI_uuid_is_nil(new_row)) {
+    for (const MaterialPaintLayer &effect : owner->effects) {
+      if (effect.curve_patch != nullptr && BLI_uuid_equal(effect.marker, new_row)) {
+        bound_curve = &effect;
+        break;
+      }
+    }
+    if (bound_curve == nullptr) {
+      return false;
+    }
+  }
+  if (BLI_uuid_equal(text_row.text_decal->bend_curve_row, new_row)) {
+    return true;
+  }
+  if (bound_curve != nullptr) {
+    /* The curve's own Space is the source of truth, so binding it also puts the decal in the Space
+     * that reads it: a 2D curve is canvas (mesh) UV and the text becomes Canvas, a 3D curve is
+     * object space and the text becomes Projected. The user sees the bend as soon as an effect is
+     * picked, instead of a still-straight text under a curve authored in another space. */
+    BKE_paint_layers_text_decal_bend_space_sync(
+        ma,
+        text_row,
+        bound_curve->curve_patch->stored_space == MA_CURVE_PATCH_SPACE_2D);
+  }
+  /* No user is taken: the marker only names the row, and a deleted row stops resolving. */
+  text_row.text_decal->bend_curve_row = new_row;
+  /* Unbinding leaves the pinned painted object with nothing to place; release it. A later bind
+   * pins the object the operator works on again. */
+  if (bound_curve == nullptr) {
+    BKE_paint_layers_text_decal_bend_painted_object_set(ma, text_row, nullptr);
+  }
+  /* The layout changed wholesale: the row is rebuilt, and the next refresh re-bakes the raster
+   * from the same text, bent along the new curve or straight again. */
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
+bool BKE_paint_layers_text_decal_bend_painted_object_set(Material &ma,
+                                                         MaterialPaintLayer &text_row,
+                                                         Object *object)
+{
+  if (text_row.text_decal == nullptr || text_row.source != MA_PAINT_LAYER_SOURCE_TEXT ||
+      text_decal_owner_row(ma, text_row) == nullptr)
+  {
+    return false;
+  }
+  if (!ID_IS_EDITABLE(&ma.id)) {
+    return false;
+  }
+  if (object != nullptr && object->type != OB_MESH) {
+    return false;
+  }
+  if (text_row.text_decal->bend_painted_object == object) {
+    return false;
+  }
+  if (text_row.text_decal->bend_painted_object != nullptr) {
+    id_us_min(&text_row.text_decal->bend_painted_object->id);
+  }
+  text_row.text_decal->bend_painted_object = object;
+  if (object != nullptr) {
+    id_us_plus(&object->id);
+  }
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
+bool BKE_paint_layers_text_decal_bend_enabled_set(Material &ma,
+                                                  MaterialPaintLayer &text_row,
+                                                  const bool enabled)
+{
+  if (text_row.text_decal == nullptr || text_row.source != MA_PAINT_LAYER_SOURCE_TEXT ||
+      text_decal_owner_row(ma, text_row) == nullptr)
+  {
+    return false;
+  }
+  if (!ID_IS_EDITABLE(&ma.id)) {
+    return false;
+  }
+  if ((text_row.text_decal->bend_enabled != 0) == enabled) {
+    return false;
+  }
+  text_row.text_decal->bend_enabled = enabled ? 1 : 0;
+  if (enabled) {
+    /* Turning the bend on is also the moment the decal has to read the curve in its own Space: a
+     * file or a binding made while the toggle was off may still hold the other one. */
+    const MaterialPaintLayer *curve_row = BKE_paint_layers_text_decal_bend_row_get(ma, text_row);
+    if (curve_row != nullptr && curve_row->curve_patch != nullptr) {
+      BKE_paint_layers_text_decal_bend_space_sync(
+          ma,
+          text_row,
+          curve_row->curve_patch->stored_space == MA_CURVE_PATCH_SPACE_2D);
+    }
+  }
+  /* The flag is part of the raster's identity: the next refresh lays the text along the curve or
+   * straight again, keeping the curve and its row untouched. */
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
+bool BKE_paint_layers_text_decal_position_locked(const Material &ma,
+                                                 const MaterialPaintLayer &row)
+{
+  if (row.source != MA_PAINT_LAYER_SOURCE_TEXT || row.text_decal == nullptr ||
+      row.text_decal->bend_enabled == 0)
+  {
+    return false;
+  }
+  const MaterialPaintLayer *bend_row = BKE_paint_layers_text_decal_bend_row_get(ma, row);
+  if (bend_row == nullptr || bend_row->curve_patch == nullptr) {
+    return false;
+  }
+  /* A curve stored in the raster's own UV only bends the text inside the raster: the projection
+   * frame still places that raster on the surface, so the frame controls stay live. Only a legacy
+   * object-space curve decides where on the surface the text sits. */
+  return bend_row->curve_patch->stored_space != MA_CURVE_PATCH_SPACE_2D;
 }
 
 int BKE_paint_layers_text_decal_size_get(const MaterialPaintLayerText &payload)
@@ -4096,6 +4316,24 @@ bool BKE_paint_layers_mapping_set_rotation(Material &ma,
   }
   const bool remapped_before = BKE_paint_layers_mapping_remaps(ma, *layer);
   layer->mapping.rotation = rotation;
+  mapping_tag_value_edit(ma, *layer, remapped_before);
+  return true;
+}
+
+bool BKE_paint_layers_mapping_reset_raw_uv(Material &ma, MaterialPaintLayer *layer)
+{
+  if (!paint_layer_owned(ma, layer)) {
+    return false;
+  }
+  const bool remapped_before = BKE_paint_layers_mapping_remaps(ma, *layer);
+  /* Keep the projection payload: a Canvas Text Decal restores the frame it authored when it goes
+   * back to Projected. Only the read the mapping applies is reset. */
+  layer->mapping.space = MA_PAINT_LAYER_MAPPING_SPACE_UV;
+  zero_v2(layer->mapping.offset);
+  layer->mapping.scale[0] = 1.0f;
+  layer->mapping.scale[1] = 1.0f;
+  layer->mapping.rotation = 0.0f;
+  layer->mapping.wrap = MA_PAINT_LAYER_MAPPING_WRAP_CLIP;
   mapping_tag_value_edit(ma, *layer, remapped_before);
   return true;
 }

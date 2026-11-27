@@ -37,6 +37,8 @@
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_object_mask.hh"
 #include "BKE_paint_layers_source_graph.hh"
+#include "BKE_paint_vector.hh"
+#include "BKE_vfont_render.hh"
 
 #include "RNA_define.hh"
 #include "RNA_enum_types.hh"
@@ -1408,6 +1410,292 @@ static void rna_MaterialPaintLayerText_text_object_set(PointerRNA *ptr,
     return;
   }
   WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+}
+
+/** The owner whose effects carry the text's bend curve: the row the Text Decal belongs to. */
+static MaterialPaintLayer *rna_MaterialPaintLayerText_owner_get(Material &ma,
+                                                                MaterialPaintLayer &text_row)
+{
+  if (text_row.role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+    return BKE_paint_layers_mask_item_owner(ma, text_row);
+  }
+  return BKE_paint_layers_correction_owner(ma, text_row);
+}
+
+/**
+ * The Curve Patch rows of the text's owner, in stack order: the candidates the bend marker may
+ * name. Shared by the enum getter, setter and itemf, so an index always means the same row.
+ */
+static void rna_MaterialPaintLayerText_bend_rows_get(Material &ma,
+                                                     MaterialPaintLayer &text_row,
+                                                     Vector<MaterialPaintLayer *> &r_rows)
+{
+  MaterialPaintLayer *owner = rna_MaterialPaintLayerText_owner_get(ma, text_row);
+  if (owner == nullptr) {
+    return;
+  }
+  /* Both spaces are offered: binding a 2D curve makes the text Canvas, a 3D curve makes it
+   * Projected, so either one follows immediately. */
+  for (MaterialPaintLayer &effect : owner->effects) {
+    if (effect.curve_patch != nullptr) {
+      r_rows.append(&effect);
+    }
+  }
+}
+
+/** Intern a dynamic enum string so its pointer outlives the item array RNA frees. The pool lives
+ * for the process because the popup reads the labels after the callback returns; the recursive
+ * node-based set keeps every stored string's address stable. Identifiers are marker-based now, so
+ * the pool grows with the rows ever created, not with their stack order. The cost is bounded in
+ * practice: one entry holds a short marker name (roughly 40 bytes) plus the set node (roughly
+ * another 64), so thousands of rows are a few hundred KiB; only a session that keeps creating
+ * millions of rows would make it noticeable. */
+static const char *rna_MaterialPaintLayerText_string_intern(const std::string &text)
+{
+  static std::unordered_set<std::string> pool;
+  static std::mutex mutex;
+  std::lock_guard<std::mutex> mutex_lock(mutex);
+  return pool.insert(text).first->c_str();
+}
+
+/** The decal's Size: a multiplier of the automatic fit. Fields written before it existed read
+ * zero; they mean the same as an explicit 1.0, so the panel never shows an out-of-range 0. */
+static float rna_MaterialPaintLayerText_font_size_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayerText *payload = static_cast<const MaterialPaintLayerText *>(ptr->data);
+  return (payload != nullptr && payload->font_size > 0.0f) ? payload->font_size : 1.0f;
+}
+
+static void rna_MaterialPaintLayerText_font_size_set(PointerRNA *ptr, float value)
+{
+  MaterialPaintLayerText *payload = static_cast<MaterialPaintLayerText *>(ptr->data);
+  if (payload != nullptr) {
+    payload->font_size = std::clamp(value, 0.05f, 4.0f);
+  }
+}
+
+/** Whether the text is laid along the chosen Curve Patch effect's curve. */
+static bool rna_MaterialPaintLayerText_bend_enabled_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayerText *payload = static_cast<const MaterialPaintLayerText *>(ptr->data);
+  return payload != nullptr && payload->bend_enabled != 0;
+}
+
+static void rna_MaterialPaintLayerText_bend_enabled_set(PointerRNA *ptr, bool value)
+{
+  MaterialPaintLayerText *payload = static_cast<MaterialPaintLayerText *>(ptr->data);
+  Material *ma = rna_MaterialPaintLayerText_material_get(ptr);
+  if (payload == nullptr || ma == nullptr) {
+    return;
+  }
+  MaterialPaintLayer *owner = rna_MaterialPaintLayerText_row_find(*ma, *payload);
+  if (owner == nullptr) {
+    return;
+  }
+  if (!BKE_paint_layers_text_decal_bend_enabled_set(*ma, *owner, value)) {
+    return;
+  }
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+}
+
+/** The index of the marker's row in the owner's Curve Patch rows, plus one; zero for none. */
+static int rna_MaterialPaintLayerText_bend_curve_row_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayerText *payload = static_cast<const MaterialPaintLayerText *>(ptr->data);
+  Material *ma = rna_MaterialPaintLayerText_material_get(ptr);
+  if (payload == nullptr || ma == nullptr || BLI_uuid_is_nil(payload->bend_curve_row)) {
+    return 0;
+  }
+  MaterialPaintLayer *owner = rna_MaterialPaintLayerText_row_find(*ma, *payload);
+  if (owner == nullptr) {
+    return 0;
+  }
+  Vector<MaterialPaintLayer *> rows;
+  rna_MaterialPaintLayerText_bend_rows_get(*ma, *owner, rows);
+  for (const int i : rows.index_range()) {
+    if (BLI_uuid_equal(rows[i]->marker, payload->bend_curve_row)) {
+      return i + 1;
+    }
+  }
+  return 0;
+}
+
+static void rna_MaterialPaintLayerText_bend_curve_row_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayerText *payload = static_cast<MaterialPaintLayerText *>(ptr->data);
+  Material *ma = rna_MaterialPaintLayerText_material_get(ptr);
+  if (payload == nullptr || ma == nullptr) {
+    return;
+  }
+  MaterialPaintLayer *owner = rna_MaterialPaintLayerText_row_find(*ma, *payload);
+  if (owner == nullptr) {
+    return;
+  }
+  bUUID marker = BLI_uuid_nil();
+  if (value > 0) {
+    Vector<MaterialPaintLayer *> rows;
+    rna_MaterialPaintLayerText_bend_rows_get(*ma, *owner, rows);
+    if (value > int(rows.size())) {
+      return;
+    }
+    marker = rows[value - 1]->marker;
+  }
+  if (!BKE_paint_layers_text_decal_bend_row_set(*ma, *owner, marker)) {
+    return;
+  }
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+}
+
+static int rna_MaterialPaintLayerText_space_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayerText *payload = static_cast<const MaterialPaintLayerText *>(ptr->data);
+  return payload != nullptr ? payload->space : MA_PAINT_LAYER_TEXT_SPACE_PROJECTED;
+}
+
+/**
+ * Switching a Text Decal between the projected decal and the UV canvas also re-points the row's
+ * mapping: the canvas text is read at raw UV, the projected one through its Planar frame.
+ */
+static void rna_MaterialPaintLayerText_space_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayerText *payload = static_cast<MaterialPaintLayerText *>(ptr->data);
+  Material *ma = rna_MaterialPaintLayerText_material_get(ptr);
+  if (payload == nullptr || ma == nullptr ||
+      (value != MA_PAINT_LAYER_TEXT_SPACE_PROJECTED &&
+       value != MA_PAINT_LAYER_TEXT_SPACE_CANVAS))
+  {
+    return;
+  }
+  payload->space = int8_t(value);
+  MaterialPaintLayer *row = rna_MaterialPaintLayerText_row_find(*ma, *payload);
+  if (row == nullptr) {
+    return;
+  }
+  if (value == MA_PAINT_LAYER_TEXT_SPACE_CANVAS) {
+    /* The canvas text is written and read at raw UV: a mapping left from the projected decal
+     * (offset, scale, rotation) would shift the coverage under the curve in the Image Editor. The
+     * projection payload is kept, so switching back to Projected restores its frame. The mapping
+     * space alone decides the read; a projection payload in UV space is ignored by every reader
+     * (#BKE_paint_layers_projection_applies answers false). */
+    BKE_paint_layers_mapping_reset_raw_uv(*ma, row);
+  }
+  else {
+    BKE_paint_layers_projection_set_space(
+        *ma, row, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR);
+  }
+  BKE_paint_layers_text_decal_invalidate(*ma);
+  ma->paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
+  BKE_paint_layers_tag_edited(*ma);
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+}
+
+/**
+ * A Text Decal's Space and its bend curve's Space are one choice. When a bend is bound, this update
+ * moves the curve to the matching Space through the editors' switch, which re-binds the curve to
+ * the surface and re-syncs the decal: the user changes either control and sees the same result.
+ */
+static void rna_MaterialPaintLayerText_space_update(bContext *C, PointerRNA *ptr)
+{
+  MaterialPaintLayerText *payload = static_cast<MaterialPaintLayerText *>(ptr->data);
+  Material *ma = rna_MaterialPaintLayerText_material_get(ptr);
+  if (payload == nullptr || ma == nullptr) {
+    return;
+  }
+  MaterialPaintLayer *text_row = rna_MaterialPaintLayerText_row_find(*ma, *payload);
+  if (text_row == nullptr) {
+    return;
+  }
+  /* The switch ends a live session, converts the curve through the mesh and enters a mode, so it
+   * belongs to an interactive edit only. A script that runs with a context but no window (a
+   * background handler, a render) still tags the material below, without the editor side effects. */
+  const bool interactive = C != nullptr && CTX_wm_window(C) != nullptr && !G.is_rendering;
+  if (interactive) {
+    /* The Space switch speaks about the object on screen; pin it as the painted space of a later
+     * 3D bend instead of leaving the refresh to pick a mesh by itself. Only a bound bend needs the
+     * space, so a straight decal takes no object user. */
+    Object *ob = CTX_data_active_object(C);
+    if (ob != nullptr && ob->type == OB_MESH && !BLI_uuid_is_nil(payload->bend_curve_row) &&
+        BKE_object_material_slot_find_index(ob, ma) != 0)
+    {
+      BKE_paint_layers_text_decal_bend_painted_object_set(*ma, *text_row, ob);
+    }
+  }
+  if (interactive) {
+    MaterialPaintLayer *curve_row = const_cast<MaterialPaintLayer *>(
+        BKE_paint_layers_text_decal_bend_row_get(*ma, *text_row));
+    if (curve_row != nullptr && curve_row->curve_patch != nullptr) {
+      const int16_t wanted = (payload->space == MA_PAINT_LAYER_TEXT_SPACE_CANVAS) ?
+                                 MA_CURVE_PATCH_SPACE_2D :
+                                 MA_CURVE_PATCH_SPACE_3D;
+      if (curve_row->curve_patch->space != wanted) {
+        curve_row->curve_patch->space = wanted;
+        /* Ends any live session of the old Space, converts the curve through the mesh and syncs
+         * the decal's own Space and mapping back to the value just set. */
+        if (!ED_curve_patch_layer_space_switch(*C, *ma, *curve_row)) {
+          /* The switch was refused (no mesh, no UV, a point off the layout): the curve stayed in
+           * its stored Space, so put the decal back in the matching one rather than leave it
+           * reading a curve authored for the other. */
+          BKE_paint_layers_text_decal_bend_space_sync(
+              *ma,
+              *text_row,
+              curve_row->curve_patch->stored_space == MA_CURVE_PATCH_SPACE_2D);
+        }
+      }
+    }
+  }
+  BKE_paint_layers_tag_value_edited(*ma);
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+}
+
+/** The Curve Patch effects of this Text Decal's owner, as the bend marker's menu. */
+static const EnumPropertyItem *rna_MaterialPaintLayerText_bend_curve_row_itemf(
+    bContext * /*C*/, PointerRNA *ptr, PropertyRNA * /*prop*/, bool *r_free)
+{
+  *r_free = true;
+  EnumPropertyItem *items = nullptr;
+  int items_num = 0;
+  EnumPropertyItem none = {};
+  none.value = 0;
+  none.identifier = "NONE";
+  none.name = N_("None");
+  none.description = N_("Keep the text straight");
+  RNA_enum_item_add(&items, &items_num, &none);
+
+  const MaterialPaintLayerText *payload = static_cast<const MaterialPaintLayerText *>(ptr->data);
+  Material *ma = rna_MaterialPaintLayerText_material_get(ptr);
+  if (payload != nullptr && ma != nullptr) {
+    MaterialPaintLayer *owner = rna_MaterialPaintLayerText_row_find(*ma, *payload);
+    if (owner != nullptr) {
+      Vector<MaterialPaintLayer *> rows;
+      rna_MaterialPaintLayerText_bend_rows_get(*ma, *owner, rows);
+      for (const int i : rows.index_range()) {
+        EnumPropertyItem item = {};
+        /* The stored value is the row's stack index, which changes on a re-order; the identifier
+         * is built from the row marker instead, so a script or a keyframed enum string keeps
+         * naming the same effect. (The enum value itself is not stable for keyframing; scripts
+         * should assign by identifier.) */
+        char marker_str[64];
+        std::string identity;
+        if (BLI_uuid_is_nil(rows[i]->marker)) {
+          /* A row without a marker has no stable identity of its own; keep it distinct and note
+           * the fallback rather than emitting a duplicate enum identifier. */
+          identity = fmt::format("unnamed-{}", i + 1);
+        }
+        else {
+          BLI_uuid_format(marker_str, rows[i]->marker);
+          identity = marker_str;
+        }
+        item.value = i + 1;
+        item.identifier = rna_MaterialPaintLayerText_string_intern(
+            fmt::format("CURVE_PATCH_{}", identity));
+        item.name = rna_MaterialPaintLayerText_string_intern(rows[i]->name);
+        item.description = N_("Lay the text along this Curve Patch effect's curve");
+        RNA_enum_item_add(&items, &items_num, &item);
+      }
+    }
+  }
+  RNA_enum_item_end(&items, &items_num);
+  return items;
 }
 
 /** The size the raster really bakes at, so a payload that stores 0 reads as the default. */
@@ -7904,6 +8192,53 @@ static const EnumPropertyItem rna_enum_material_paint_layer_text_fit_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/* Values match #eMaterialPaintLayerTextBendMode. */
+static const EnumPropertyItem rna_enum_material_paint_layer_text_bend_mode_items[] = {
+    {MA_PAINT_LAYER_TEXT_BEND_FIT,
+     "FIT",
+     0,
+     "Fit",
+     "The text is stretched along the curve to fill it from the offset to its end; the glyph "
+     "height follows the Font Size"},
+    {MA_PAINT_LAYER_TEXT_BEND_CLIP,
+     "CLIP",
+     0,
+     "Clip",
+     "The glyphs keep their shape at the Font Size; glyphs past the curve's end are dropped"},
+    {MA_PAINT_LAYER_TEXT_BEND_CLAMP,
+     "CLAMP",
+     0,
+     "Clamp",
+     "The glyphs keep their shape at the Font Size; glyphs past the curve's end pile up at the "
+     "end point"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* Values match #eMaterialPaintLayerTextSpace. */
+static const EnumPropertyItem rna_enum_material_paint_layer_text_space_items[] = {
+    {MA_PAINT_LAYER_TEXT_SPACE_PROJECTED,
+     "PROJECTED",
+     0,
+     "Projected",
+     "Project the square raster through the row's frame onto the surface (a decal)"},
+    {MA_PAINT_LAYER_TEXT_SPACE_CANVAS,
+     "CANVAS",
+     0,
+     "Canvas",
+     "Paint the text into the material's UV canvas across its UDIM tiles; the bend curve is read "
+     "in the same UV the Image Editor's composite shows"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/**
+ * The base of the bend row enum: "None" is the only fixed value, the itemf adds the owner's Curve
+ * Patch effects after it, by index.
+ */
+static const EnumPropertyItem rna_enum_material_paint_layer_text_bend_row_items[] = {
+    {0, "NONE", 0, "None", "Keep the text straight"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 static void rna_def_material_paint_layer_text(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -7932,7 +8267,7 @@ static void rna_def_material_paint_layer_text(BlenderRNA *brna)
                            "whenever the text or its formatting changes");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
-  /* Zero reads back as the default (1024) through #BKE_paint_layers_text_decal_size_get; the
+  /* Zero reads back as the default (2048) through #BKE_paint_layers_text_decal_size_get; the
    * bake resizes the map on the next scene update. */
   prop = RNA_def_property(srna, "size", PROP_INT, PROP_PIXEL);
   RNA_def_property_int_funcs(prop, "rna_MaterialPaintLayerText_size_get", nullptr, nullptr);
@@ -7959,6 +8294,103 @@ static void rna_def_material_paint_layer_text(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Fit", "How the text's bounds map onto the square raster");
   RNA_def_property_update(
       prop, NC_MATERIAL | ND_SHADING, "rna_MaterialPaintLayerText_update");
+
+  /* Where the raster lives: a projected decal on the surface, or the material's UV canvas across
+   * its UDIM tiles. The setter also re-points the row's mapping space. */
+  prop = RNA_def_property(srna, "space", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_text_space_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayerText_space_get",
+                              "rna_MaterialPaintLayerText_space_set",
+                              nullptr);
+  RNA_def_property_ui_text(prop,
+                           "Space",
+                           "Project the text as a square decal, or paint it into the material's UV "
+                           "canvas across UDIM tiles");
+  /* The update needs the context: moving a bound bend curve between Spaces converts its points
+   * through the mesh, which the editors' switch owns. */
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_MATERIAL | ND_SHADING, "rna_MaterialPaintLayerText_space_update");
+
+  prop = RNA_def_property(srna, "bend_font_size_uv", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "bend_font_size_uv");
+  RNA_def_property_range(prop, 0.001f, 1.0f);
+  RNA_def_property_ui_text(prop,
+                           "Bend Font Size (UV)",
+                           "Base em height of a canvas text as a fraction of one UDIM tile; the "
+                           "decal's Size multiplies it");
+  RNA_def_property_update(
+      prop, NC_MATERIAL | ND_SHADING, "rna_MaterialPaintLayerText_update");
+
+  prop = RNA_def_property(srna, "font_size", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayerText_font_size_get",
+                               "rna_MaterialPaintLayerText_font_size_set",
+                               nullptr);
+  RNA_def_property_range(prop, 0.05f, 4.0f);
+  RNA_def_property_float_default(prop, 1.0f);
+  RNA_def_property_ui_text(
+      prop,
+      "Font Size",
+      "Size of the decal text relative to the automatic fit: 1.0 keeps it as fitted, 0.5 halves "
+      "it, 2.0 doubles it. Changes only this decal, never the source Text object");
+  RNA_def_property_update(
+      prop, NC_MATERIAL | ND_SHADING, "rna_MaterialPaintLayerText_update");
+
+  /* The toggle keeps the curve and its row, so the straight raster comes back at once. */
+  prop = RNA_def_property(srna, "bend_enabled", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_MaterialPaintLayerText_bend_enabled_get",
+                                 "rna_MaterialPaintLayerText_bend_enabled_set");
+  RNA_def_property_ui_text(prop,
+                           "Bend Curve Patch",
+                           "Lay the text along the chosen Curve Patch effect's curve; the curve "
+                           "and its row stay when this is off, so the straight raster comes back "
+                           "at once");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  /* The bind is by row marker, never by container pointer: a re-order, a delete or an undo
+   * simply stops resolving, and the text rasterizes straight. */
+  prop = RNA_def_property(srna, "bend_curve_row", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_text_bend_row_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayerText_bend_curve_row_get",
+                              "rna_MaterialPaintLayerText_bend_curve_row_set",
+                              "rna_MaterialPaintLayerText_bend_curve_row_itemf");
+  RNA_def_property_ui_text(
+      prop,
+      "Curve Patch Effect",
+      "The Curve Patch effect (of this Text Decal's owner) whose curve the text bends along. A "
+      "2D curve is read in the raster's own UV; a 3D curve is projected through the decal's "
+      "frame. The identifier is stable across re-orders; the numeric value is the stack index and "
+      "is not meant for keyframing");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "bend_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "bend_mode");
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_text_bend_mode_items);
+  RNA_def_property_ui_text(prop, "Bend Mode", "How the text is laid along the bend curve");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_MaterialPaintLayerText_update");
+
+  prop = RNA_def_property(srna, "bend_offset", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "bend_offset");
+  RNA_def_property_range(prop, 0.0f, VFONT_RENDER_BEND_OFFSET_MAX);
+  RNA_def_property_ui_text(prop,
+                           "Offset",
+                           "Where along the curve the text starts, as a fraction of its arc "
+                           "length; what is left of it stays empty");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_MaterialPaintLayerText_update");
+
+  prop = RNA_def_property(srna, "bend_baseline", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "bend_baseline");
+  RNA_def_property_range(prop, -1.0f, 1.0f);
+  RNA_def_property_ui_text(prop,
+                           "Baseline",
+                           "Perpendicular shift of the baseline off the curve, as a fraction of "
+                           "the raster side: positive lifts the text to the curve's left of the "
+                           "direction it is drawn in, negative drops it to the right");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_MaterialPaintLayerText_update");
 }
 
 static const EnumPropertyItem rna_material_paint_layer_material_scope_items[] = {

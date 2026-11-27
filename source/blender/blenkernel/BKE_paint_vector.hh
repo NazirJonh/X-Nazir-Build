@@ -26,6 +26,7 @@ struct PaintVectorPoint;
 struct PaintVectorSpline;
 
 namespace bke {
+class CurvesGeometry;
 struct CurvePatchParams;
 }  // namespace bke
 
@@ -79,6 +80,14 @@ bool BKE_paint_vector_item_remove(PaintVector &pv, int index);
 bool BKE_paint_vector_item_swap(PaintVector &pv, int a, int b);
 
 /**
+ * The one Curve Patch item a consumer reads the document's curve from: the active item when it is
+ * a Curve Patch item, else the first Curve Patch item the container holds. Null when it holds
+ * none. Every reader has to agree on this pick -- two readers choosing differently would draw one
+ * curve and cache another.
+ */
+const PaintVectorItem *BKE_paint_vector_curve_patch_item_get(const PaintVector &pv);
+
+/**
  * Allocate (or reallocate) the item's flat point array and return it. Any previous array is freed
  * first, so calling this again on the same item does not leak.
  */
@@ -112,6 +121,13 @@ void BKE_paint_vector_style_copy(PaintShapeSettings &dst, const PaintShapeSettin
  * bytes, or data left behind by an old write-time view).
  */
 bool BKE_paint_vector_item_curve_geometry_is_valid(const PaintVectorItem &item);
+
+/**
+ * The embedded Curve Patch geometry of \a item for reading, or null when the item is not a Curve
+ * Patch item or its geometry is not valid. The pointer is owned by the container and is
+ * invalidated by its next edit, like any other attribute view.
+ */
+const bke::CurvesGeometry *BKE_paint_vector_item_curve_geometry_get(const PaintVectorItem &item);
 
 /**
  * The field-by-field conversion between the DNA #PaintVectorCurveParams mirror and

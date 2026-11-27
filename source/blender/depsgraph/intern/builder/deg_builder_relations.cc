@@ -3306,9 +3306,24 @@ void DepsgraphRelationBuilder::build_material(Material *material, ID *owner)
      * refresh runs on every update. The target is `MATERIAL_UPDATE`, which only owners' SHADING
      * and the editors depend on, never a node a geometry can be reached from. */
     const auto relate_text_decal = [&](const MaterialPaintLayer &row) {
-      if (row.source != MA_PAINT_LAYER_SOURCE_TEXT || row.text_decal == nullptr ||
-          row.text_decal->text_object == nullptr)
-      {
+      if (row.source != MA_PAINT_LAYER_SOURCE_TEXT || row.text_decal == nullptr) {
+        return;
+      }
+      const OperationKey material_update_key(
+          &material->id, NodeType::SHADING, OperationCode::MATERIAL_UPDATE);
+      /* A 3D bend curve is carried by a Curve Patch row of this same material, so its parameters
+       * are already part of the material's own update. The mesh the curve is written in, though, is
+       * an external object: its TRANSFORM places the curve and must be ordered before the raster.
+       * The refresh runs after the whole evaluation anyway, so the relation only tightens the
+       * order; RELATION_CHECK_BEFORE_ADD drops it where it could close a loop. */
+      if (Object *painted = row.text_decal->bend_painted_object) {
+        build_object(painted);
+        add_relation(ComponentKey(&painted->id, NodeType::TRANSFORM),
+                     material_update_key,
+                     "Text Decal Painted Object Transform -> Layered Material",
+                     RELATION_CHECK_BEFORE_ADD);
+      }
+      if (row.text_decal->text_object == nullptr) {
         return;
       }
       Object *text_object = row.text_decal->text_object;
@@ -3316,8 +3331,6 @@ void DepsgraphRelationBuilder::build_material(Material *material, ID *owner)
       if (text_decal_object_uses_material(*text_object, *material)) {
         return;
       }
-      const OperationKey material_update_key(
-          &material->id, NodeType::SHADING, OperationCode::MATERIAL_UPDATE);
       add_relation(ComponentKey(&text_object->id, NodeType::GEOMETRY),
                    material_update_key,
                    "Text Decal Object -> Layered Material",

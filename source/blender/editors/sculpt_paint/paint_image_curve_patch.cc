@@ -370,7 +370,7 @@ void image_curve_patch_session_commit(bContext *C, ImageCurvePatchSession *sessi
   if (session == nullptr) {
     return;
   }
-  if (session->tiles != nullptr) {
+  if (session->tiles != nullptr && !session->is_bend_curve_only) {
     /* Restore first, then re-stamp at final quality, and only then hand the captured tiles to the
      * undo system: the restore invalidates every tile, the final stamp re-validates exactly the
      * ones it touches, and the history entry ends up describing precisely what the canvas keeps.
@@ -393,7 +393,7 @@ void image_curve_patch_session_commit(bContext *C, ImageCurvePatchSession *sessi
   MEM_delete(session);
 }
 
-void image_curve_patch_session_cancel(bContext * /*C*/, ImageCurvePatchSession *session)
+void image_curve_patch_session_cancel(bContext *C, ImageCurvePatchSession *session)
 {
   BLI_assert(session == g_active_session);
   if (session == nullptr) {
@@ -403,8 +403,15 @@ void image_curve_patch_session_cancel(bContext * /*C*/, ImageCurvePatchSession *
    * the undo stack for this session, so there is nothing to discard either. A layer session
    * writes nothing back either way -- the container keeps the curves it had before the session
    * (see #curve_patch_layer_cancel_session_2d, which also notifies the stack). */
-  curve_patch_restore_to_anchor(*session);
+  if (!session->is_bend_curve_only) {
+    curve_patch_restore_to_anchor(*session);
+  }
   if (session->is_layer) {
+    if (session->is_bend_curve_only && C != nullptr) {
+      /* A bend session writes its container on every edit, so the cancel has to put the curves it
+       * opened with back. */
+      curve_patch_layer_restore_session_2d(*C, *session);
+    }
     curve_patch_layer_cancel_session_2d(*session);
   }
   g_active_session = nullptr;
@@ -446,6 +453,11 @@ static CurvePatchLiveInputs image_curve_patch_live_inputs_capture(ImageCurvePatc
 
 bool image_curve_patch_session_sync_live_brush(bContext *C, ImageCurvePatchSession *session)
 {
+  /* A curve-only session edits a container, never a canvas: no live brush reaches pixels, so
+   * there is nothing to re-stamp. */
+  if (session != nullptr && session->is_bend_curve_only) {
+    return false;
+  }
   /* The watchdog reads the ACTIVE patch's parameters: a session whose active patch is gone (its
    * container emptied or re-ordered under it) has nothing to compare, and reading it would
    * dereference past the patch vector. */
@@ -501,6 +513,12 @@ void image_curve_patch_session_restore_and_restamp(bContext *C, ImageCurvePatchS
   if (session == nullptr) {
     return;
   }
+  /* The bend curve is a container: there are no pixels to restore, rebuild or stamp. Write the
+   * live curve back and refresh the decal so the text follows the drag. */
+  if (session->is_bend_curve_only) {
+    curve_patch_layer_live_update_2d(*C, *session);
+    return;
+  }
   curve_patch_restore_to_anchor(*session);
   image_curve_patch_geometry_rebuild(C, *session);
   image_curve_patch_raster_draw(C, *session);
@@ -539,6 +557,15 @@ void image_curve_patch_region_to_uv(bContext *C, const int region_mval[2], float
       &region->v2d, float(region_mval[0]), float(region_mval[1]), &r_uv[0], &r_uv[1]);
 }
 
+float2 image_curve_patch_editor_uv_origin(const SpaceImage *sima)
+{
+  if (sima == nullptr) {
+    return float2(0.0f);
+  }
+  /* Legacy tile numbers (0, 1) and a non-tiled image both answer the UV origin. */
+  return BKE_image_get_tile_uv_origin(sima->iuser.tile);
+}
+
 bool ED_image_curve_patch_overlay_geometry_get(const ARegion *region,
                                                bke::CurvesGeometry &r_geometry)
 {
@@ -561,7 +588,11 @@ bool ED_image_curve_patch_overlay_geometry_get(const ARegion *region,
        * two skip #View2D::rotation entirely (they exist for callers that genuinely want the
        * axis-aligned rect, e.g. scrollers), so the overlay's points stayed screen-locked instead
        * of turning with the canvas once #SpaceImage::rotation was non-zero. */
-      ui::view2d_view_to_region_fl(v2d, co.x, co.y, &region_x, &region_y);
+      ui::view2d_view_to_region_fl(v2d,
+                                   co.x - session->editor_uv_origin.x,
+                                   co.y - session->editor_uv_origin.y,
+                                   &region_x,
+                                   &region_y);
       co = float3(region_x, region_y, 0.0f);
     }
   };
@@ -577,12 +608,15 @@ bool ED_image_curve_patch_overlay_geometry_get(const ARegion *region,
 }
 
 /** Project \a r_geometry (canvas UV) into region pixels, rotation included. */
-static void image_curve_patch_project_to_region(const View2D &v2d, bke::CurvesGeometry &r_geometry)
+static void image_curve_patch_project_to_region(const View2D &v2d,
+                                                const float2 uv_origin,
+                                                bke::CurvesGeometry &r_geometry)
 {
   const auto project_coords = [&](MutableSpan<float3> coords) {
     for (float3 &co : coords) {
       float region_x, region_y;
-      ui::view2d_view_to_region_fl(&v2d, co.x, co.y, &region_x, &region_y);
+      ui::view2d_view_to_region_fl(
+          &v2d, co.x - uv_origin.x, co.y - uv_origin.y, &region_x, &region_y);
       co = float3(region_x, region_y, 0.0f);
     }
   };
@@ -642,7 +676,7 @@ static bool image_curve_patch_passive_overlay_get(const ARegion *region,
       active_curve = r_data.splines.size();
     }
     r_projected.append(src);
-    image_curve_patch_project_to_region(region->v2d, r_projected.last());
+    image_curve_patch_project_to_region(region->v2d, float2(0.0f), r_projected.last());
     r_data.splines.append(&r_projected.last());
   }
   if (!r_data.splines.is_empty()) {
@@ -687,7 +721,7 @@ bool ED_image_curve_patch_overlay_data_get(const ARegion *region,
       continue;
     }
     r_projected.append(src);
-    image_curve_patch_project_to_region(region->v2d, r_projected.last());
+    image_curve_patch_project_to_region(region->v2d, session->editor_uv_origin, r_projected.last());
     r_data.splines.append(&r_projected.last());
   }
   /* The active index points into the FILLED list: under solo the active curve is the only entry,

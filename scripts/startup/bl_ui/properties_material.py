@@ -1418,6 +1418,9 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
         row_size = layout.row(align=True)
         row_size.prop(row, "projection_size", index=0, text="Size X")
         row_size.prop(row, "projection_size", index=1, text="Y")
+        row_size.prop(row, "projection_size_lock",
+                      text="",
+                      icon='LOCKED' if row.projection_size_lock else 'UNLOCKED')
         layout.prop(row, "projection_roll", text="Roll")
         if not is_decal:
             # A volume kind bounds all three axes by the clip itself and has no single projection
@@ -1813,7 +1816,6 @@ class LAYER_MATERIAL_PT_mapping_mirror(LayerMaterialButtonsPanel, Panel):
 _TEXT_DECAL_FORMATTING_PROPS = (
     "body",
     "font",
-    "size",
     "space_character",
     "space_word",
     "space_line",
@@ -1831,9 +1833,11 @@ _TEXT_DECAL_FORMATTING_PROPS = (
 class LAYER_MATERIAL_PT_text_decal(LayerMaterialButtonsPanel, Panel):
     """The source, the formatting and the bake of the active Text Decal effect.
 
-    A Text Decal reads its content from a Text object: the object's own formatting (fonts, size,
+    A Text Decal reads its content from a Text object: the object's own formatting (fonts,
     alignment, text boxes, per-character styles) is the single source of truth, so the panel draws
-    the object's data in place and re-bakes follow whatever the object changes.
+    the object's data in place and re-bakes follow whatever the object changes. The object's Font
+    Size is not shown: the raster fits the layout itself, so the decal draws its own Size in its
+    place (1.0 = the fitted size, smaller/larger scales it).
     """
 
     bl_idname = "LAYER_MATERIAL_PT_text_decal"
@@ -1870,6 +1874,11 @@ class LAYER_MATERIAL_PT_text_decal(LayerMaterialButtonsPanel, Panel):
         col.use_property_split = False
         col.operator("paint.text_decal_edit_text", text="Edit Text", icon='EDITMODE_HLT')
 
+        col = layout.column(align=True)
+        col.use_property_split = True
+        col.label(text="Placement")
+        col.prop(payload, "space", expand=True)
+
         text_object = payload.text_object
         if text_object is not None and text_object.data is not None:
             # The object's own formatting is the single source of truth: no copy of it lives on
@@ -1880,6 +1889,10 @@ class LAYER_MATERIAL_PT_text_decal(LayerMaterialButtonsPanel, Panel):
             col.label(text="Formatting")
             for prop_name in _TEXT_DECAL_FORMATTING_PROPS:
                 col.prop(body, prop_name)
+                if prop_name == "font":
+                    # The source object's own size is fit-normalized by the decal raster, so it
+                    # never controlled the text height here. The decal's local Size replaces it.
+                    col.prop(payload, "font_size", text="Font Size")
 
         col = layout.column(align=True)
         col.use_property_split = True
@@ -1893,8 +1906,38 @@ class LAYER_MATERIAL_PT_text_decal(LayerMaterialButtonsPanel, Panel):
         down.direction = 'DOWN'
         up = size_row.operator("paint.text_decal_size_step", text="", icon='TRIA_UP')
         up.direction = 'UP'
-        col.prop(payload, "padding")
-        col.prop(payload, "fit")
+        if payload.space != 'CANVAS':
+            col.prop(payload, "padding")
+            col.prop(payload, "fit")
+
+        # The bend: the text's baseline follows a Curve Patch effect's curve -- 2D in the raster's
+        # own UV, or 3D projected through the decal's frame. Without a usable curve every option
+        # below is inert, so they grey out; the toggle keeps the curve and only turns the bend off.
+        col = layout.column(align=True)
+        col.use_property_split = True
+        col.label(text="Bend")
+        col.prop(payload, "bend_enabled", text="Bend Curve Patch")
+        col.prop(payload, "bend_curve_row", text="Curve Patch Effect")
+        has_curve = payload.bend_curve_row != 0
+        bent = payload.bend_enabled and has_curve
+        buttons = col.row(align=True)
+        new_sub = buttons.row(align=True)
+        new_sub.operator("paint.text_decal_bend_curve_new", text="New Curve", icon='CURVE_BEZCURVE')
+        edit_sub = buttons.row(align=True)
+        edit_sub.enabled = has_curve
+        edit_sub.operator("paint.text_decal_bend_curve_edit", text="Edit Curve", icon='EDITMODE_HLT')
+        bend_col = col.column()
+        # `active` rather than `enabled`: the options grey out without a curve but stay
+        # clickable, so their last values remain readable and copyable while the bend is off.
+        bend_col.active = bent
+        bend_col.prop(payload, "bend_mode")
+        bend_col.prop(payload, "bend_offset")
+        bend_col.prop(payload, "bend_baseline")
+        if payload.bend_enabled and not has_curve:
+            hint = col.column(align=True)
+            hint.enabled = False
+            hint.label(text="Add a Curve Patch effect or press New Curve", icon='INFO')
+
         col.use_property_split = False
         row = col.row(align=True)
         row.operator("paint.text_decal_place_from_view", text="Place from View", icon='VIEW_CAMERA')

@@ -653,6 +653,11 @@ void curve_patch_restore_and_restamp(const Scene &scene,
                                      CurvePatchSession &session,
                                      ReportList *reports)
 {
+  /* A bend curve has no canvas: nothing is restored and nothing is stamped. The live preview is
+   * the Text Decal itself, refreshed by the context wrapper below. */
+  if (session.is_bend_curve_only) {
+    return;
+  }
   /* The document lives on the primary's object (the session's owner), so every session-level step
    * below resolves through it. */
   CurvePatchObjectTarget &primary = session.primary_target();
@@ -727,6 +732,12 @@ void curve_patch_restore_and_restamp(const Scene &scene,
 
 void curve_patch_restore_and_restamp(bContext &C, CurvePatchSession &session)
 {
+  if (session.is_bend_curve_only) {
+    /* Write the live curve into the row and re-rasterize the Text Decal at once, so the text
+     * follows the point being dragged instead of waiting for the commit. */
+    curve_patch_layer_live_update(C, session);
+    return;
+  }
   ToolSettings *tool_settings = CTX_data_tool_settings(&C);
   curve_patch_restore_and_restamp(*CTX_data_scene(&C),
                                   *CTX_data_depsgraph_pointer(&C),
@@ -1531,7 +1542,8 @@ CurvePatchSession *curve_patch_start_from_layer(
     Sculpt &sd,
     const FunctionRef<void(CurvePatchDocument &)> publish_document,
     const ViewContext &vc,
-    const FunctionRef<void(Span<int>)> prepare_canvas)
+    const FunctionRef<void(Span<int>)> prepare_canvas,
+    const bool curve_only)
 {
   if (ob.runtime->sculpt_session == nullptr) {
     BKE_report(CTX_wm_reports(&C), RPT_WARNING, "Curve Patch: the object has no Sculpt session");
@@ -1564,6 +1576,7 @@ CurvePatchSession *curve_patch_start_from_layer(
   curve_patch_prepare_brush_for_headless(sd.paint, *brush);
 
   CurvePatchSession *session = MEM_new<CurvePatchSession>(__func__);
+  session->is_bend_curve_only = curve_only;
   /* The document is the one \a publish_document fills: the owned container's items for the vector
    * source (frozen parameters straight from DNA), the curve object's evaluated splines for the
    * object source. A publish drops the curves it cannot use; what remains must stamp. */

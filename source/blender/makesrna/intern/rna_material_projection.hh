@@ -19,6 +19,7 @@
 #include "BKE_paint_layers_gradient.hh"
 
 #include <cfloat>
+#include <cmath>
 
 #include "BLI_math_constants.h"
 #include "BLI_math_vector.h"
@@ -372,7 +373,42 @@ static void rna_MaterialPaintLayer_projection_size_set(PointerRNA *ptr, const fl
 {
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
   if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    if (layer->projection != nullptr && BKE_paint_layers_projection_size_lock_get(*layer)) {
+      /* RNA is the user-gesture path, so it is the one place that may read the "axis that moved"
+       * from an epsilon comparison: a field edit changes one component, and the setter names it.
+       * A script writing all three axes with both footprint axes moved keeps the historical X
+       * lead. The public BKE setter stays deterministic. */
+      constexpr float eps = 1e-6f;
+      const float old_x = BKE_paint_layers_projection_size_normalize(layer->projection->size[0]);
+      const float old_y = BKE_paint_layers_projection_size_normalize(layer->projection->size[1]);
+      const float new_x = BKE_paint_layers_projection_size_normalize(value[0]);
+      const float new_y = BKE_paint_layers_projection_size_normalize(value[1]);
+      const bool x_changed = fabsf(new_x - old_x) > eps;
+      const bool y_changed = fabsf(new_y - old_y) > eps;
+      if (x_changed || y_changed) {
+        const int axis = (y_changed && !x_changed) ? 1 : 0;
+        BKE_paint_layers_projection_set_size_axis(*ma, layer, axis, value[axis]);
+        if (layer->projection->size[2] != BKE_paint_layers_projection_size_normalize(value[2])) {
+          BKE_paint_layers_projection_set_depth_size(*ma, layer, value[2]);
+        }
+        return;
+      }
+    }
     BKE_paint_layers_projection_set_size(*ma, layer, value);
+  }
+}
+
+static bool rna_MaterialPaintLayer_projection_size_lock_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return BKE_paint_layers_projection_size_lock_get(*layer);
+}
+
+static void rna_MaterialPaintLayer_projection_size_lock_set(PointerRNA *ptr, bool value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_projection_set_size_lock(*ma, layer, value);
   }
 }
 
@@ -439,10 +475,7 @@ static void rna_MaterialPaintLayer_projection_depth_size_set(PointerRNA *ptr, fl
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
   if (Material *ma = rna_paint_layer_material(ptr, layer)) {
     if (layer->projection != nullptr) {
-      float size[3];
-      copy_v3_v3(size, layer->projection->size);
-      size[2] = value;
-      BKE_paint_layers_projection_set_size(*ma, layer, size);
+      BKE_paint_layers_projection_set_depth_size(*ma, layer, value);
     }
   }
 }
@@ -881,7 +914,7 @@ void rna_def_material_paint_layer_projection(StructRNA *srna)
   RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_projection_editable");
   RNA_def_property_range(prop, -FLT_MAX, FLT_MAX);
   {
-    static const float projection_size_default[3] = {1.0f, 1.0f, 1.0f};
+    static const float projection_size_default[3] = {1.0f, 1.0f, 2.5f};
     RNA_def_property_float_array_default(prop, projection_size_default);
   }
   RNA_def_property_ui_text(prop,
@@ -889,6 +922,18 @@ void rna_def_material_paint_layer_projection(StructRNA *srna)
                            "Full extents of the projection frame in the controller's space, so "
                            "the controller's own scale multiplies them");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "projection_size_lock", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_MaterialPaintLayer_projection_size_lock_get",
+                                 "rna_MaterialPaintLayer_projection_size_lock_set");
+  RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_projection_editable");
+  RNA_def_property_ui_text(prop,
+                           "Lock Size",
+                           "Edit both footprint extents together: the changed axis leads and the "
+                           "other takes its value");
+  RNA_def_property_ui_icon(prop, ICON_UNLOCKED, 1);
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING_DRAW, "rna_Material_update");
 
   prop = RNA_def_property(srna, "projection_rotation", PROP_FLOAT, PROP_EULER);
   RNA_def_property_array(prop, 3);

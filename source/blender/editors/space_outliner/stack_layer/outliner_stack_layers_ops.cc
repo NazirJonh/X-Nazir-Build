@@ -532,7 +532,7 @@ void OUTLINER_OT_stack_layer_add(wmOperatorType *ot)
   /* The Add dialog's options for a kind whose source data-block it may make itself. */
   RNA_def_boolean(ot->srna,
                   "create_source",
-                  false,
+                  true,
                   "Create Source Object",
                   "Make the source object at the world origin instead of naming an existing one");
   RNA_def_boolean(ot->srna,

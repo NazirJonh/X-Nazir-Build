@@ -839,9 +839,38 @@ enum eMaterialPaintLayerTextFit : int8_t {
   MA_PAINT_LAYER_TEXT_FIT_STRETCH = 1,
 };
 
+/** #MaterialPaintLayerText::bend_mode: how the text is laid along the bend curve. */
+enum eMaterialPaintLayerTextBendMode : int8_t {
+  /**
+   * The text spans the curve: the advances and the glyph widths stretch along the curve so the
+   * whole text fills it from #MaterialPaintLayerText::bend_offset to its end. The glyph height
+   * stays the text's Font Size, and nothing ever clips or overlaps. The #fit option is not
+   * read in this mode (the curve decides where the text sits).
+   */
+  MA_PAINT_LAYER_TEXT_BEND_FIT = 0,
+  /**
+   * The glyphs keep their own shape at the text's Font Size, the advances map onto the curve one
+   * to one, and glyphs past the curve's end are dropped. #fit and #padding are not read.
+   */
+  MA_PAINT_LAYER_TEXT_BEND_CLIP = 1,
+  /**
+   * The glyphs keep their own shape at the text's Font Size, and glyphs past the curve's end
+   * pile up at the end point -- the behavior the 3D text's Text-on-Curve has.
+   */
+  MA_PAINT_LAYER_TEXT_BEND_CLAMP = 2,
+};
+
+/** #MaterialPaintLayerText::space -- where the Text Decal's raster is placed. */
+enum eMaterialPaintLayerTextSpace : int8_t {
+  /** The square raster is projected through the row's frame (a decal on the surface). */
+  MA_PAINT_LAYER_TEXT_SPACE_PROJECTED = 0,
+  /** The text is painted into the material's UV canvas, across its UDIM tiles. */
+  MA_PAINT_LAYER_TEXT_SPACE_CANVAS = 1,
+};
+
 /** The raster side a Text Decal bakes at when #MaterialPaintLayerText::size does not name one. */
 enum {
-  MA_PAINT_LAYER_TEXT_SIZE_DEFAULT = 1024,
+  MA_PAINT_LAYER_TEXT_SIZE_DEFAULT = 2048,
   /** The smallest and largest raster side a Text Decal may bake at. */
   MA_PAINT_LAYER_TEXT_SIZE_MIN = 256,
   /**
@@ -875,16 +904,76 @@ struct MaterialPaintLayerText {
    */
   struct Image *coverage = nullptr;
   /**
+   * The marker of the Curve Patch effect row (of the same owner) whose control curve the text's
+   * baseline follows when #bend_enabled is set; nil -- or a disabled bend -- keeps the text
+   * straight. The binding is by row, not by container, so the curve's space (2D raster UV or 3D
+   * object space) is read from that row's payload -- a bare container would carry none -- and
+   * deleting the row leaves nothing behind: the text just rasterizes straight again. The row is
+   * resolved through #BKE_paint_layers_text_decal_bend_row_get, never through the pointer, because
+   * the row can be added, removed or re-ordered without touching this field.
+   */
+  bUUID bend_curve_row = {};
+  /**
    * The square side in pixels the text is rasterized at. 0 reads back as the default
    * (#MA_PAINT_LAYER_TEXT_SIZE_DEFAULT). The text is fitted into it with #padding.
    */
   int size = 0;
   /** Padding around the text's bounds as a fraction of the raster side, 0..0.5. */
   float padding = 0.05f;
+  /**
+   * Where along the curve the text starts, as a fraction of its arc length, 0..0.99: the last
+   * sliver is never a start point, so the Fit mode always has a positive span left to lay the
+   * text over. The text does not wrap around a cyclic curve; it ends at the curve's end like on
+   * an open one.
+   */
+  float bend_offset = 0.0f;
+  /**
+   * Perpendicular shift of the baseline off the curve, as a fraction of the raster side:
+   * positive lifts the text to the curve's left of the direction it is drawn in, negative
+   * drops it to the right. The line offsets of a multi-line text add to it.
+   */
+  float bend_baseline = 0.0f;
   /** #eMaterialPaintLayerTextFit. */
   int8_t fit = MA_PAINT_LAYER_TEXT_FIT_CONTAIN;
-  /* Two 8-byte pointers + int + float + int8 = 25 bytes; padded to 32 for DNA alignment. */
-  char _pad[7] = {};
+  /** #eMaterialPaintLayerTextBendMode. */
+  int8_t bend_mode = MA_PAINT_LAYER_TEXT_BEND_FIT;
+  /**
+   * Where the raster lives: projected through the decal's frame (#MA_PAINT_LAYER_TEXT_SPACE_PROJECTED)
+   * or painted into the material's UV canvas (#MA_PAINT_LAYER_TEXT_SPACE_CANVAS). The canvas mode's
+   * curve is in the canvas UV itself, so it matches the Image Editor's composite and may span UDIM
+   * tiles; the projected mode keeps the square decal frame.
+   */
+  int8_t space = MA_PAINT_LAYER_TEXT_SPACE_PROJECTED;
+  /**
+   * Whether the text bends along the curve of #bend_curve_row. Zero keeps it straight, so the curve
+   * and its row stay and only the bend's effect is switched off -- the quick A/B toggle. Zero is
+   * also what every file written before the flag existed reads back as.
+   */
+  int8_t bend_enabled = 0;
+  /**
+   * Base em height of the text in canvas UV: the Font Size a canvas-space decal is laid at, as a
+   * fraction of one UDIM tile (0.1 = 10% of the tile). Read only in
+   * #MA_PAINT_LAYER_TEXT_SPACE_CANVAS, where the straight fit scale of the projected raster does
+   * not apply. The decal's #font_size multiplies it, so the user-facing Size control scales it.
+   */
+  float bend_font_size_uv = 0.1f;
+  /**
+   * The mesh object the bend curve's 3D coordinates are written in. Pinned when the bend is bound
+   * (or its curve is edited), so a refresh with no editor context does not have to guess "the first
+   * mesh that uses this material": with several slots that guess is arbitrary and the text would
+   * jump when the scene is reordered. A user of the object, reported through the row's
+   * dependencies. Null in files written before the pin existed; the refresh then falls back to its
+   * deterministic scan, and the next bind or edit fills the pin.
+   */
+  struct Object *bend_painted_object = nullptr;
+  /**
+   * Size of the text relative to the automatic fit: `1.0` keeps the decal exactly as it fitted
+   * before (the ink box filling the square for Projected, the bend's canvas size for Canvas);
+   * `0.5` halves it and `2.0` doubles it. Never touches the source Text object.
+   */
+  float font_size = 1.0f;
+  /** Explicit tail padding: the struct holds pointers, so DNA keeps its size 8-byte aligned. */
+  char _pad[4] = {};
 };
 
 /** #MaterialPaintLayerCurvePatch::space -- where the effect's control curves live and which
@@ -1619,6 +1708,12 @@ enum eMaterialPaintLayerProjectionFlag : int16_t {
    * frame and every earlier file -- keeps the inline size.
    */
   MA_PAINT_LAYER_PROJECTION_SIZE_FROM_CONTROLLER = 1 << 6,
+  /**
+   * Edit the frame's two footprint extents (X and Y) together: the axis the user changes leads and
+   * the other takes the same value, the way the mapping's Lock Scale works. Zero -- a new frame and
+   * every earlier file -- keeps the axes independent.
+   */
+  MA_PAINT_LAYER_PROJECTION_SIZE_LOCK = 1 << 7,
 };
 
 /**
@@ -1652,7 +1747,8 @@ struct MaterialPaintLayerProjection {
   int8_t cube_layout = MA_PAINT_LAYER_PROJECTION_CUBE_CROSS_4X3;
   /** #eMaterialPaintLayerProjectionFlag. */
   int16_t flag = MA_PAINT_LAYER_PROJECTION_CLIP | MA_PAINT_LAYER_PROJECTION_DEPTH |
-                 MA_PAINT_LAYER_PROJECTION_FIT_ASPECT | MA_PAINT_LAYER_PROJECTION_FACING;
+                 MA_PAINT_LAYER_PROJECTION_FIT_ASPECT | MA_PAINT_LAYER_PROJECTION_FACING |
+                 MA_PAINT_LAYER_PROJECTION_SIZE_LOCK;
   /**
    * Facing limit in degrees: the facing weight is full this far below the limit and reaches zero
    * at the limit itself, measured from the axis direction. Kept in `(0, 180]`; a value

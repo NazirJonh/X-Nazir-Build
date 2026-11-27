@@ -23,6 +23,7 @@
 
 #include "DNA_ID.h"
 #include "DNA_material_types.h"
+#include "DNA_paint_vector_types.h"
 
 #include "BKE_colorband.hh"
 #include "BKE_colortools.hh"
@@ -2879,6 +2880,11 @@ void paint_layer_text_decal_copy(MaterialPaintLayer &dst,
   if (take_object_user && payload->text_object != nullptr) {
     id_us_plus(&payload->text_object->id);
   }
+  if (take_object_user && payload->bend_painted_object != nullptr) {
+    id_us_plus(&payload->bend_painted_object->id);
+  }
+  /* The bend curve is a row marker, not a pointer: the copied payload follows the same Curve Patch
+   * row of its owner, and the row owns its own container, so no user is taken here. */
 }
 
 uint64_t paint_layer_payload_hash(const MaterialPaintLayer &row)

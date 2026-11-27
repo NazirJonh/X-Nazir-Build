@@ -68,6 +68,11 @@ bool PaintLayerRowProjectionTarget::resolve(const bContext &C)
   if (layer == nullptr || !BKE_paint_layers_projection_applies(*ma, *layer)) {
     return false;
   }
+  /* The gizmo and the Place, Move and Flip operators all resolve here: a bent Text Decal takes its
+   * place from its curve, so none of them may move it. */
+  if (BKE_paint_layers_text_decal_position_locked(*ma, *layer)) {
+    return false;
+  }
 
   material_ = ma;
   object_ = ob;

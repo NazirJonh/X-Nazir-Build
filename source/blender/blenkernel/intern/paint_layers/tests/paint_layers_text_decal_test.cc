@@ -10,6 +10,7 @@
 #include "testing/testing.h"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 
 #include "MEM_guardedalloc.h"
@@ -30,13 +31,16 @@
 #include "BKE_paint_layers_edit.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_vfont.hh"
+#include "BKE_vfont_render.hh"
 
 #include "../paint_layers_intern.hh"
 
 #include "BLF_api.hh"
 
 #include "BLI_listbase.h"
+#include "BLI_math_vector_types.hh"
 
+#include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
 
 #include "DNA_ID.h"
@@ -50,6 +54,20 @@
 namespace blender::bke::tests {
 
 namespace {
+
+/* The number of pixels whose alpha is at least half-opaque, in a float raster. */
+int imbuf_alpha_count(const ImBuf &ibuf)
+{
+  const float *pixels = ibuf.float_data();
+  if (pixels == nullptr) {
+    return 0;
+  }
+  int count = 0;
+  for (const int i : IndexRange(size_t(ibuf.x) * ibuf.y)) {
+    count += int(pixels[i * 4 + 3] >= 0.5f);
+  }
+  return count;
+}
 
 /* The number of pixels whose alpha is at least half-opaque, in the map's byte buffer. */
 int image_alpha_count(Image &image)
@@ -253,6 +271,9 @@ class PaintLayersTextDecal : public bke::BlenderGTestBase {
     params.anchor = &layer;
     params.bmain = bmain;
     params.text_object = &text_object;
+    /* The tests bake real rasters; ask for the smallest side before the Add bakes its first one,
+     * instead of resizing after the default 2048 bake (#MA_PAINT_LAYER_TEXT_SIZE_DEFAULT). */
+    params.text_decal_size = MA_PAINT_LAYER_TEXT_SIZE_MIN;
     return BKE_paint_layers_add_with_policy(*ma, params);
   }
 
@@ -280,8 +301,9 @@ TEST_F(PaintLayersTextDecal, AddCreatesPayloadAndTakesObjectUser)
   EXPECT_EQ(effect->source, MA_PAINT_LAYER_SOURCE_TEXT);
   EXPECT_EQ(effect->text_decal->text_object, text);
   EXPECT_EQ(text->id.us, 1) << "the effect is the object's single user";
-  /* The bake options start from the material's size and the payload defaults. */
-  EXPECT_EQ(effect->text_decal->size, 256);
+  /* The fixture pins the smallest raster; the payload default is covered by
+   * #SizeGetDefaultsAndClamps. */
+  EXPECT_EQ(effect->text_decal->size, MA_PAINT_LAYER_TEXT_SIZE_MIN);
   EXPECT_EQ(effect->text_decal->padding, 0.05f);
   EXPECT_EQ(effect->text_decal->fit, MA_PAINT_LAYER_TEXT_FIT_CONTAIN);
 
@@ -515,7 +537,7 @@ TEST_F(PaintLayersTextDecal, SizeChangeRecreatesMap)
   ASSERT_NE(image, nullptr);
   int width = 0, height = 0;
   BKE_image_get_size(image, nullptr, &width, &height);
-  EXPECT_EQ(width, 256);
+  EXPECT_EQ(width, MA_PAINT_LAYER_TEXT_SIZE_MIN);
 
   /* The map follows the payload's size, not the material's, and is resized in place so the
    * generated tree keeps naming it. */
@@ -537,7 +559,7 @@ TEST_F(PaintLayersTextDecal, SizeChangeRecreatesMap)
 TEST_F(PaintLayersTextDecal, SizeGetDefaultsAndClamps)
 {
   MaterialPaintLayerText payload;
-  EXPECT_EQ(BKE_paint_layers_text_decal_size_get(payload), 1024);
+  EXPECT_EQ(BKE_paint_layers_text_decal_size_get(payload), MA_PAINT_LAYER_TEXT_SIZE_DEFAULT);
   payload.size = 8;
   EXPECT_EQ(BKE_paint_layers_text_decal_size_get(payload), 256);
   payload.size = 999999;
@@ -557,7 +579,7 @@ TEST_F(PaintLayersTextDecal, SizeStepMovesByPowersOfTwo)
   payload.size = 256;
   EXPECT_EQ(BKE_paint_layers_text_decal_size_step(payload, -1), 256) << "held at the floor";
   payload.size = 0;
-  EXPECT_EQ(BKE_paint_layers_text_decal_size_step(payload, 1), 2048) << "0 reads as 1024";
+  EXPECT_EQ(BKE_paint_layers_text_decal_size_step(payload, 1), 4096) << "0 reads as the default";
 }
 
 TEST_F(PaintLayersTextDecal, ProjectionSupportFollowsTheMap)
@@ -897,6 +919,43 @@ TEST_F(PaintLayersTextDecal, EditModeRefreshWaitsForTypingToStop)
   MEM_delete(editfont->textbufinfo);
   MEM_delete(editfont->textbuf);
   MEM_delete(editfont);
+}
+
+TEST_F(PaintLayersTextDecal, BendRendersAndFallsBackOnDegenerateCurve)
+{
+  Object *text = add_text_object("Text");
+  Curve *curve = id_cast<Curve *>(text->data);
+  if (curve->fsize <= 0.0f) {
+    curve->fsize = 1.0f;
+  }
+
+  /* All three modes draw ink for a two-point polyline; the mode only changes where the glyphs go,
+   * not whether the bent raster replaces the straight one. */
+  const std::array<float2, 2> points = {float2{0.1f, 0.5f}, float2{0.9f, 0.5f}};
+  for (const VFontRenderBendMode mode : {VFontRenderBendMode::Fit,
+                                         VFontRenderBendMode::Clip,
+                                         VFontRenderBendMode::Clamp})
+  {
+    VFontRenderParams params;
+    params.side = 64;
+    params.bend.points = points;
+    params.bend.mode = mode;
+    ImBuf *raster = BKE_vfont_object_render(*text, params);
+    ASSERT_NE(raster, nullptr);
+    EXPECT_GT(imbuf_alpha_count(*raster), 0) << "bend mode " << int(mode);
+    IMB_freeImBuf(raster);
+  }
+
+  /* A single point cannot form a polyline: the bend is refused and the straight raster returned,
+   * not a null one. */
+  const std::array<float2, 1> one_point = {float2{0.5f, 0.5f}};
+  VFontRenderParams params;
+  params.side = 64;
+  params.bend.points = one_point;
+  ImBuf *raster = BKE_vfont_object_render(*text, params);
+  ASSERT_NE(raster, nullptr);
+  EXPECT_GT(imbuf_alpha_count(*raster), 0);
+  IMB_freeImBuf(raster);
 }
 
 }  // namespace blender::bke::tests

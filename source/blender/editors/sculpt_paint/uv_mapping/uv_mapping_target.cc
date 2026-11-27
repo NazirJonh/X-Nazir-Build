@@ -103,7 +103,10 @@ bool PaintLayerRowMappingTarget::resolve(const bContext &C)
   }
 
   MaterialPaintLayer *layer = mapping_shown_row_get(C, *ma);
-  if (layer == nullptr || !mapping_is_edited(*ma, *layer)) {
+  /* A bent Text Decal takes its place from its curve: the mapping gizmo must not move it. */
+  if (layer == nullptr || !mapping_is_edited(*ma, *layer) ||
+      BKE_paint_layers_text_decal_position_locked(*ma, *layer))
+  {
     return false;
   }
 

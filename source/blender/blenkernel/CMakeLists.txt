@@ -412,6 +412,9 @@ set(SRC
   intern/vfont.cc
   intern/vfont_curve.cc
   intern/vfont_render.cc
+  intern/vfont_render_bend.cc
+  intern/vfont_render_bend.hh
+  intern/vfont_render_intern.hh
   intern/vfontdata_freetype.cc
   intern/viewer_path.cc
   intern/volume.cc

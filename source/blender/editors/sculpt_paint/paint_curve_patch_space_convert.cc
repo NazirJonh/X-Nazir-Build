@@ -26,6 +26,7 @@
 #include "BKE_bvhutils.hh"
 #include "BKE_curves.hh"
 #include "BKE_mesh.hh"
+#include "BKE_paint_layers_gradient_surface.hh"
 
 #include "GEO_reverse_uv_sampler.hh"
 
@@ -50,8 +51,13 @@ bool curve_patch_space_convert(const Mesh &mesh,
   r_failed_points_num = 0;
 
   const bke::AttributeAccessor attributes = mesh.attributes();
-  const VArraySpan<float2> uv_map = *attributes.lookup<float2>(mesh.active_or_default_uv_map_name(),
-                                                               bke::AttrDomain::Corner);
+  /* Bind through the UV the layered material itself reads, so a 2D curve lands on the surface the
+   * canvas composite shows even when the editable active UV map is another one. This is the same
+   * `default_uv_map_name()` the shader's Texture Coordinate.UV node reads (see
+   * #BKE_paint_layers_gradient_uv_map_name and `paint_material_composite_projection.cc`), so the
+   * 3D -> 2D trip and the projected composite share one map by construction. */
+  const VArraySpan<float2> uv_map = *attributes.lookup<float2>(
+      BKE_paint_layers_gradient_uv_map_name(mesh), bke::AttrDomain::Corner);
   const Span<float3> positions = mesh.vert_positions();
   const Span<int> corner_verts = mesh.corner_verts();
   const Span<int3> corner_tris = mesh.corner_tris();

@@ -49,6 +49,7 @@ set(SRC
   paint_curve_patch_effect_image.cc
   paint_curve_patch_effect_mask.cc
   paint_curve_patch_effect_relief.cc
+  paint_curve_patch_bend.cc
   paint_curve_patch_layer.cc
   paint_curve_patch_layer_object_restamp.cc
   paint_curve_patch_layer_object_source.cc

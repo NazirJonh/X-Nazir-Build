@@ -257,6 +257,9 @@ void PAINT_OT_text_decal_edit_text(wmOperatorType *ot);
 void PAINT_OT_text_decal_rebake(wmOperatorType *ot);
 /** Halve or double the active Text Decal's raster size and re-bake it. */
 void PAINT_OT_text_decal_size_step(wmOperatorType *ot);
+void PAINT_OT_text_decal_bend_curve_new(wmOperatorType *ot);
+/** Open the active Text Decal's bend Curve Patch effect in its editing tool. */
+void PAINT_OT_text_decal_bend_curve_edit(wmOperatorType *ot);
 
 /** The operator-type registration of the decal module, so #paint_ops.cc registers the module with
  * one call instead of naming its operators. */

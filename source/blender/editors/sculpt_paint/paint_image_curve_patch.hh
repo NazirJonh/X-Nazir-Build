@@ -51,6 +51,7 @@ struct Image;
 struct MTex;
 struct ReportList;
 struct Scene;
+struct SpaceImage;
 struct View2D;
 
 namespace ed::sculpt_paint {
@@ -224,6 +225,24 @@ struct ImageCurvePatchSession {
    * #layer_brush_restore on BOTH exits.
    */
   bool is_layer = false;
+  /**
+   * True when the layer session edits a Text Decal's bend curve rather than a Curve Patch effect
+   * that lays stamps. The document still follows the container, but no pixel is ever written: the
+   * restamp is skipped and the commit stores the curve alone, so the decal's coverage map -- which
+   * the bent raster owns -- is never restored or painted over. See #curve_patch_layer_activate_2d.
+   */
+  bool is_bend_curve_only = false;
+  /**
+   * UV origin of the tile the Image Editor currently displays. The session's curves are in global
+   * UV (so a canvas text or a 2D Curve Patch knows its UDIM tiles); the editor's region is one
+   * tile, so the overlay and the cursor convert through this origin. Updated on every modal event
+   * as the user changes the active tile.
+   */
+  float2 editor_uv_origin = {0.0f, 0.0f};
+  /** The canonical curves as the bend session opened them: a cancel writes these back, because a
+   * bend session writes the live curve into the container on every edit. Index-parallel to
+   * #uv_curves. Empty for a session that is not a bend curve. */
+  Vector<bke::CurvesGeometry> initial_uv_curves;
   /** The row this session edits, addressed by marker (never by raw pointer: the Outliner can
    * delete the row mid-session, and a dangling pointer on the commit path would crash). Null /
    * zero for an anchor session. */
@@ -371,6 +390,12 @@ bool image_curve_patch_session_sync_live_brush(bContext *C, ImageCurvePatchSessi
  * whole canonical curve into region pixels for the overlay.
  */
 void image_curve_patch_region_to_uv(bContext *C, const int region_mval[2], float r_uv[2]);
+
+/**
+ * The global-UV origin of the UDIM tile the Image Editor displays: `(0,0)` for a single image, the
+ * tile's corner otherwise. The session's curves are global UV; the editor's region is one tile.
+ */
+float2 image_curve_patch_editor_uv_origin(const SpaceImage *sima);
 
 /* \} */
 

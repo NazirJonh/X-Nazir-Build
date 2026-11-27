@@ -222,6 +222,12 @@ struct PaintLayerAddParams {
    */
   Object *text_object = nullptr;
   /**
+   * The raster side a #PaintLayerAddKind::TextDecalEffect or ::MaskTextDecal starts at, in pixels;
+   * zero keeps #MA_PAINT_LAYER_TEXT_SIZE_DEFAULT. The Add bakes its first raster at this size, so a
+   * caller that wants a small one (a test) never pays for the default 2048 bake.
+   */
+  int text_decal_size = 0;
+  /**
    * The brush a #PaintLayerAddKind::CurvePatchEffect takes its snapshot from, or null for a
    * brush-less effect. The Add policy validates it with
    * #BKE_paint_layers_curve_patch_brush_is_assignable and silently leaves the row brush-less when

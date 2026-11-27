@@ -229,6 +229,27 @@ bool curve_patch_layer_enter_if_sculpting(bContext &C, Material &ma, MaterialPai
 void curve_patch_layer_commit_document(bContext &C, CurvePatchSession &session);
 
 /**
+ * Live half of a bend-curve session: write the document into the row's PaintVector and tag the
+ * Text Decal that bends along it. No pixels are touched and the row is not baked; the material is
+ * tagged and the next scene update runs the refresh, so the text follows the drag without the
+ * modal re-entering the BLF rasterizer. No-op for a session that is not a bend curve.
+ */
+void curve_patch_layer_live_update(bContext &C, CurvePatchSession &session);
+
+/**
+ * The 2D counterpart of #curve_patch_layer_live_update: write the canonical UV curves into the
+ * row's container and tag the bending Text Decal while the Image Editor session runs. Like the 3D
+ * path, the raster is rebuilt by the following scene update, never inside the modal event.
+ */
+void curve_patch_layer_live_update_2d(bContext &C, ImageCurvePatchSession &session);
+
+/**
+ * Restore the curves a bend session opened with after a cancel: a live bend session writes the
+ * container on every edit, so the pristine curves have to be put back explicitly.
+ */
+void curve_patch_layer_restore_session_2d(bContext &C, ImageCurvePatchSession &session);
+
+/**
  * The 2D Space counterpart of #curve_patch_layer_commit_document: write the canonical UV curves
  * of the Image Editor session back into the row's PaintVector, tag it changed, request the bake,
  * push the "Curve Patch Layer Edit" memfile step and notify the stack. No-op when the row the
@@ -466,6 +487,21 @@ void curve_patch_document_to_vector(const CurvePatchDocument &doc, PaintVector &
  * items is left alone.
  */
 void ED_paint_layers_curve_patch_row_seed_curve(MaterialPaintLayerCurvePatch &payload);
+
+/**
+ * Add a Curve Patch effect beside the Text Decal \a text_row, born in the 3D Space with one
+ * segment across the decal frame's middle and every channel on but the row's opacity at zero, and
+ * make its container the text's bend curve. The effect is how the curve is edited: the Sculpt Mode
+ * curve tool, with the decal's frame telling where the segment starts. \a painted is the object
+ * whose space the curve is written in.
+ *
+ * \return the new effect, or null when the row has no owner to hang it on or the effect could not
+ * be added or its curve taken as the bend; nothing is left behind in either case.
+ */
+MaterialPaintLayer *ED_paint_layers_curve_patch_bend_row_add(bContext &C,
+                                                            Object &painted,
+                                                            Material &ma,
+                                                            MaterialPaintLayer &text_row);
 
 /**
  * Ensure the row has a map for every channel its bake renders: the enabled records in the

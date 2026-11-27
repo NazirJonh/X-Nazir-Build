@@ -116,7 +116,8 @@ static float2 mval_uv_get(bContext *C, const int mval[2])
   }
   float2 uv(0.0f);
   ED_image_mouse_pos(const_cast<SpaceImage *>(sima), region, mval, uv);
-  return uv;
+  /* The Image Editor shows one UDIM tile; the session's curves are global UV. */
+  return uv + image_curve_patch_editor_uv_origin(sima);
 }
 
 /**
@@ -430,7 +431,8 @@ class ImageScreenAdapter : public CurvePatchScreenAdapter {
     /* #ED_image_point_pos__reverse rather than a plain #ui::view2d_view_to_region_fl: it applies
      * the canvas rotation (view->screen) that the axis-aligned View2D `cur`/`tot` does not know
      * about, matching the inverse used by #mval_uv_get above. */
-    const float uv[2] = {co.x, co.y};
+    const float uv[2] = {co.x - image_curve_patch_editor_uv_origin(sima).x,
+                         co.y - image_curve_patch_editor_uv_origin(sima).y};
     float2 mval(0.0f);
     ED_image_point_pos__reverse(const_cast<SpaceImage *>(sima), region, uv, mval);
     r_mval = mval;
@@ -575,7 +577,9 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
   const bool material_canvas = scene != nullptr &&
                                scene->toolsettings->paint_mode.canvas_source ==
                                    PAINT_CANVAS_SOURCE_MATERIAL;
-  const bool canvas_valid = sima != nullptr && (material_canvas || sima->image == session->image);
+  const bool canvas_valid = sima != nullptr &&
+                            (session->is_bend_curve_only || material_canvas ||
+                             sima->image == session->image);
   const bool context_valid = sima != nullptr && sima->mode == SI_MODE_PAINT && canvas_valid &&
                              CTX_wm_region(C) != nullptr;
   if (!context_valid) {
@@ -583,6 +587,10 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
     curve_patch_edit_teardown(C, op);
     return OPERATOR_FINISHED;
   }
+
+  /* The Image Editor may switch UDIM tiles while the session runs: the session's curves are global
+   * UV, so the overlay and the cursor convert through the tile now displayed. */
+  session->editor_uv_origin = image_curve_patch_editor_uv_origin(sima);
 
   ImageCurvePatchModal *modal = static_cast<ImageCurvePatchModal *>(op->customdata);
   if (modal == nullptr) {

@@ -265,7 +265,17 @@ class PaintCurveCursor : Overlay {
                                            image_patch_projected_,
                                            patch_overlay_,
                                            active_object_orig);
-    if (!image_patch_available &&
+    /* An effect with no enabled channel cannot open a session (no canvas to stamp into), so the
+     * brush never becomes the Curve Patch one; its curves still have to show, as the passive
+     * preview, which is why that preview passes the relevance gate on its own. */
+    bool stack_patch_available = false;
+    if (!image_patch_available && state.is_space_v3d() && state.sculpt_tool_display_paint &&
+        active_object_eval != nullptr)
+    {
+      ED_curve_patch_overlay_data_get_stack(active_object_eval, state.depsgraph, patch_overlay_);
+      stack_patch_available = !patch_overlay_.splines.is_empty();
+    }
+    if (!image_patch_available && !stack_patch_available &&
         !ed::sculpt_paint::ED_paint_curve_overlay_is_relevant(
             brush, state.active_tool_idname, state.is_space_v3d(), state.is_space_image()))
     {

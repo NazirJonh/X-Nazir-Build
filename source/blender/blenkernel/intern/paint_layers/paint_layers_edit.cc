@@ -321,8 +321,12 @@ static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
     }
     /* Numbered among the effects of this one row only, like the corrections are. */
     const std::string name = numbered_effect_name(owner->effects, "Text Decal", params.name);
-    return BKE_paint_layers_text_decal_effect_add(
-        ma, owner, name.c_str(), *params.bmain, *params.text_object);
+    return BKE_paint_layers_text_decal_effect_add(ma,
+                                                  owner,
+                                                  name.c_str(),
+                                                  *params.bmain,
+                                                  *params.text_object,
+                                                  params.text_decal_size);
   }
   if (params.kind == PaintLayerAddKind::MaskTextDecal) {
     /* Aimed at a correction or a mask item, an Add means one more on the row it hangs on. */
@@ -347,7 +351,7 @@ static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
     }
     const std::string name = numbered_effect_name(owner->mask_stack, "Mask Text Decal", params.name);
     MaterialPaintLayer *item = BKE_paint_layers_text_decal_mask_add(
-        ma, owner, name.c_str(), *params.bmain, *params.text_object);
+        ma, owner, name.c_str(), *params.bmain, *params.text_object, params.text_decal_size);
     if (item == nullptr && base_added) {
       /* A refused Add leaves nothing behind, the base mask it made included. */
       BKE_paint_layers_mask_remove(ma, owner);

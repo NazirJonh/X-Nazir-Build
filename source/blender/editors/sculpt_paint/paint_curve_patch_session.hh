@@ -490,6 +490,14 @@ struct CurvePatchSession {
    * restamp that follows must not write the freshly read curves straight back into them. */
   bool layer_object_sync_suspended = false;
 
+  /**
+   * True when the layer session edits a Text Decal's bend curve rather than a Curve Patch effect
+   * that stamps. The document follows the container, but no pixel is ever written: the restamp is
+   * skipped and every edit is written straight back into the container so the decal re-rasterizes
+   * live. The row's maps are emptied when the session opens and never gain a stamp.
+   */
+  bool is_bend_curve_only = false;
+
   /** Whether this session is a Stack Layers effect (#layer_material set). Such a session has no
    * Enter/Esc of its own -- it lives and dies with the row's selection, its curves belong to the
    * container, and its radius is per curve -- so every branch on the effect kind goes through
@@ -865,7 +873,8 @@ CurvePatchSession *curve_patch_start_from_layer(
     Sculpt &sd,
     FunctionRef<void(CurvePatchDocument &)> publish_document,
     const ViewContext &vc,
-    FunctionRef<void(Span<int>)> prepare_canvas);
+    FunctionRef<void(Span<int>)> prepare_canvas,
+    bool curve_only = false);
 
 /**
  * Publish a Curve Patch session from a finished #BRUSH_STROKE_ROLL stroke. Builds the control

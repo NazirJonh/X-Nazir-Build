@@ -1352,6 +1352,53 @@ TEST_F(MeshMapBakeTest, source_objects_are_not_foreign_or_baked)
   }
 }
 
+/**
+ * The panel's RNA query (#Object.mesh_map_bake_target_for) asks the predicate with a null source
+ * set, so the predicate must collect the sources itself and still keep a high-poly source out of
+ * the plan: the same rule the pre-collected sweep uses, just without a shared set.
+ */
+TEST_F(MeshMapBakeTest, object_in_plan_collects_sources_when_none_supplied)
+{
+  Material *ma = add_material("MapsMat");
+  Material *other = add_material("OtherMat");
+
+  Object *low = add_simple_object("Low", add_quad_two_uv("LowQuad"), ma);
+  Object *high = add_simple_object("High", add_quad_two_uv("HighQuad"), ma);
+  Object *unrelated = add_simple_object("Unrelated", add_quad_two_uv("UnrelatedQuad"), other);
+
+  ObjectMeshMapSource *source = BKE_mesh_maps_source_ensure(*low, *ma);
+  ASSERT_NE(source, nullptr);
+  source->high_poly = high;
+
+  /* The low-poly is a target; its high-poly source and an object of another material are not. */
+  EXPECT_TRUE(BKE_mesh_maps_bake_object_in_plan(
+      *bmain, *low, *ma, nullptr, MA_MESH_MAP_BAKE_ALL_OBJECTS, nullptr));
+  EXPECT_FALSE(BKE_mesh_maps_bake_object_in_plan(
+      *bmain, *high, *ma, nullptr, MA_MESH_MAP_BAKE_ALL_OBJECTS, nullptr));
+  EXPECT_FALSE(BKE_mesh_maps_bake_object_in_plan(
+      *bmain, *unrelated, *ma, nullptr, MA_MESH_MAP_BAKE_ALL_OBJECTS, nullptr));
+}
+
+/** The panel's whole-list query resolves every target in one sweep, sources excluded. */
+TEST_F(MeshMapBakeTest, bake_target_objects_lists_the_all_objects_scope)
+{
+  Material *ma = add_material("MapsMat");
+  Material *other = add_material("OtherMat");
+
+  Object *low = add_simple_object("Low", add_quad_two_uv("LowQuad"), ma);
+  Object *high = add_simple_object("High", add_quad_two_uv("HighQuad"), ma);
+  add_simple_object("Unrelated", add_quad_two_uv("UnrelatedQuad"), other);
+
+  ObjectMeshMapSource *source = BKE_mesh_maps_source_ensure(*low, *ma);
+  ASSERT_NE(source, nullptr);
+  source->high_poly = high;
+
+  Vector<Object *> objects;
+  BKE_mesh_maps_bake_target_objects(*bmain, *ma, objects);
+  ASSERT_EQ(objects.size(), 1);
+  EXPECT_EQ(objects[0], low);
+}
+
 TEST_F(MeshMapBakeTest, cage_matches_requires_same_face_and_corner_count)
 {
   Mesh *pair = add_pair_mesh("Pair");

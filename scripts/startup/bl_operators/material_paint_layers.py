@@ -12,11 +12,11 @@ import bpy
 from bpy.types import Operator, PropertyGroup
 
 
-def _context_material(context):
-    """The material the operators act on.
+def context_material(context):
+    """The material the paint-layer and mesh-map operators act on.
 
-    `context.material` only exists in the Properties editor's material contexts; from the
-    Outliner or a viewport the owner is the active object's active material slot."""
+    `context.material` first, then the active object's active material slot.
+    """
     material = getattr(context, "material", None)
     if material is None:
         ob = getattr(context, "object", None)
@@ -25,7 +25,7 @@ def _context_material(context):
 
 
 def _paint_layers_active_layer(context):
-    mat = _context_material(context)
+    mat = context_material(context)
     if mat is None or not mat.is_layered:
         return None
     return mat.paint_layers.active
@@ -48,7 +48,7 @@ class _PaintLayerOperator(Operator):
 
     def _layer(self, context):
         if self.marker:
-            mat = _context_material(context)
+            mat = context_material(context)
             # A marker that names no row must not fall back to the active layer: the caller asked
             # for a specific row, and acting on another one would edit the wrong layer.
             return mat.paint_layers.find(self.marker) if mat is not None else None
@@ -56,7 +56,7 @@ class _PaintLayerOperator(Operator):
 
     @classmethod
     def poll(cls, context):
-        mat = _context_material(context)
+        mat = context_material(context)
         return mat is not None and mat.is_layered
 
 class MATERIAL_OT_paint_layer_node_group_edit(_PaintLayerOperator):
@@ -178,7 +178,7 @@ def _paint_layer_addable_channel_items(context):
     add. Falls back to the full list when no layered material/layer is in context, so the menu is
     never empty-by-accident in a scripted call.
     """
-    mat = _context_material(context)
+    mat = context_material(context)
     layer = mat.paint_layers.active if (mat is not None and mat.is_layered) else None
     if layer is None:
         return _paint_channel_enum_items()
@@ -292,7 +292,7 @@ def _leave_mask_target(context, layer):
 
     Only the active layer's mask is the one a stroke is aimed at, so another layer's mask going away
     leaves the mode alone, as the Outliner's seam does."""
-    material = _context_material(context)
+    material = context_material(context)
     if material is None or material.paint_layers.active is None:
         return
     if material.paint_layers.active.marker != layer.marker:
@@ -417,11 +417,11 @@ class MATERIAL_OT_paint_layer_id_color_remove(Operator):
 
     @classmethod
     def poll(cls, context):
-        mat = _context_material(context)
+        mat = context_material(context)
         return mat is not None and mat.is_layered and mat.paint_layers.active_mask_item is not None
 
     def execute(self, context):
-        item = _context_material(context).paint_layers.active_mask_item
+        item = context_material(context).paint_layers.active_mask_item
         try:
             item.id_color_remove(index=self.index)
         except RuntimeError as ex:
@@ -484,7 +484,7 @@ class MATERIAL_OT_paint_layer_object_mask_refresh_tiles(_PaintLayerOperator):
     bl_options = {'INTERNAL'}
 
     def execute(self, context):
-        mat = _context_material(context)
+        mat = context_material(context)
         layer = self._layer(context)
         if layer is None:
             return {'CANCELLED'}
@@ -737,11 +737,11 @@ class MATERIAL_OT_paint_layers_output_render(Operator):
 
     @classmethod
     def poll(cls, context):
-        mat = _context_material(context)
+        mat = context_material(context)
         return mat is not None and mat.is_layered and mat.library is None
 
     def execute(self, context):
-        mat = _context_material(context)
+        mat = context_material(context)
         out = mat.paint_layers_output
 
         if mat.paint_layers_is_stale:
@@ -1097,7 +1097,7 @@ class MATERIAL_OT_paint_layer_source_material_clear(Operator):
         layer = getattr(context, "material_paint_layer_source_target", None)
         if layer is not None:
             return layer
-        mat = _context_material(context)
+        mat = context_material(context)
         if mat is None or not mat.is_layered:
             return None
         return mat.paint_layers.active
@@ -1138,198 +1138,6 @@ class PAINT_IDF_curve_patch_brush(bpy.types.IDFilter):
         # An effect's own snapshot is private state, never a source.
         return (id.use_paint_sculpt and not id.is_curve_patch_snapshot and
                 curve_patch_brush_supported(id))
-
-
-# Mesh Maps ###################################################################
-
-# The bake operators, the source add/remove wrappers and the helpers the Mesh Maps panel reads.
-# Everything here goes through the layered material's active slot -- the same owner the panel and
-# the C++ bake job pick, so a UI click and a scripted call agree on which material's atlas is
-# touched. There is no automatic STALE recheck in this build: the panel's `Refresh Status` button
-# (see OBJECT_OT_mesh_map_refresh below) is the only path, and a depsgraph handler with a timer is
-# a separate task.
-
-_MESH_MAP_TYPE_ITEMS = (
-    ('AO', "Ambient Occlusion", "Ambient occlusion map"),
-    ('CURVATURE', "Curvature", "Curvature map"),
-    ('NORMAL_WORLD', "Normal (World)", "World-space normal map"),
-    ('NORMAL_OBJECT', "Normal (Object)", "Object-space normal map"),
-    ('ID_OBJECT', "Object ID", "Object index map"),
-    ('ID_MATERIAL', "Material ID", "Material index map"),
-    ('EDGE', "Edge", "Edge/bevel map"),
-)
-_MESH_MAP_LAYER_NAMES = {
-    'AO': "AO Map",
-    'CURVATURE': "Curvature Map",
-    'NORMAL_WORLD': "Normal (World) Map",
-    'NORMAL_OBJECT': "Normal (Object) Map",
-    'ID_OBJECT': "Object ID Map",
-    'ID_MATERIAL': "Material ID Map",
-    'EDGE': "Edge Map",
-}
-
-
-def _mesh_map_owner(context):
-    # The stack owner is the active slot's material, not `context.material`: in the Layer Material
-    # tab that can be the active Material row's source. The bake operator uses the active slot too.
-    ob = context.object
-    mat = ob.active_material if ob is not None else None
-    if mat is None or not mat.is_layered:
-        return None
-    return mat
-
-
-class OBJECT_OT_mesh_map_refresh(Operator):
-    bl_idname = "object.mesh_map_refresh"
-    bl_label = "Refresh Mesh Map Status"
-    bl_description = "Re-check mesh map bake statuses for the active object"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    @classmethod
-    def poll(cls, context):
-        ob = context.object
-        return ob is not None and ob.type == 'MESH'
-
-    def execute(self, context):
-        depsgraph = context.evaluated_depsgraph_get()
-        changed = context.object.mesh_map_states.refresh_all(depsgraph=depsgraph)
-        self.report({'INFO'}, "Changed {} mesh map status(es)".format(changed))
-        return {'FINISHED'}
-
-
-class MATERIAL_OT_mesh_map_add_layer(Operator):
-    bl_idname = "material.mesh_map_add_layer"
-    bl_label = "Add Mesh Map Layer"
-    bl_description = "Add a Mesh Map layer to the material"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    type: bpy.props.EnumProperty(name="Map Type", items=_MESH_MAP_TYPE_ITEMS)
-
-    @classmethod
-    def poll(cls, context):
-        return _mesh_map_owner(context) is not None
-
-    def execute(self, context):
-        mat = _mesh_map_owner(context)
-        layer = mat.paint_layers.new(source='MESH_MAP', name=_MESH_MAP_LAYER_NAMES[self.type])
-        if layer is None:
-            self.report({'ERROR'}, "Cannot add Mesh Map layer")
-            return {'CANCELLED'}
-        layer.mesh_map_type = self.type
-        mat.paint_layers.active = layer
-        return {'FINISHED'}
-
-
-class OBJECT_OT_mesh_map_source_add(Operator):
-    bl_idname = "object.mesh_map_source_add"
-    bl_label = "Use High-poly Source"
-    bl_description = "Give this material a high-poly source object or collection"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    @classmethod
-    def poll(cls, context):
-        return _mesh_map_owner(context) is not None
-
-    def execute(self, context):
-        mat = _mesh_map_owner(context)
-        ob = context.object
-        if mat is None or ob is None:
-            return {'CANCELLED'}
-        if ob.mesh_map_sources.ensure(material=mat) is None:
-            self.report({'ERROR'}, "Cannot create a high-poly source")
-            return {'CANCELLED'}
-        return {'FINISHED'}
-
-
-class OBJECT_OT_mesh_map_source_remove(Operator):
-    bl_idname = "object.mesh_map_source_remove"
-    bl_label = "Remove High-poly Source"
-    bl_description = "Remove this material's high-poly source"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    @classmethod
-    def poll(cls, context):
-        return _mesh_map_owner(context) is not None
-
-    def execute(self, context):
-        mat = _mesh_map_owner(context)
-        ob = context.object
-        if mat is None or ob is None:
-            return {'CANCELLED'}
-        ob.mesh_map_sources.remove(material=mat)
-        return {'FINISHED'}
-
-
-def mesh_map_source_objects(scene, mat):
-    """The objects that are high-poly sources (object, collection members or cage) for \a mat.
-
-    A source is geometry the low-poly samples, never a low-poly to bake: it must not show up in the
-    object list and must not be treated as an owner of the shared atlas.
-    """
-    result = set()
-    if scene is None or mat is None:
-        return result
-    for ob in scene.objects:
-        for source in ob.mesh_map_sources:
-            if source.material != mat:
-                continue
-            if source.high_poly is not None:
-                result.add(source.high_poly)
-            if source.high_poly_collection is not None:
-                for member in source.high_poly_collection.all_objects:
-                    result.add(member)
-            if source.cage is not None:
-                result.add(source.cage)
-    return result
-
-
-def mesh_map_objects_for_material(scene, mat):
-    """The mesh objects of \a scene that use \a mat in one of their slots, sources excluded.
-
-    Exposed for addons and the Mesh Maps panel, so both agree on which objects a "bake all"
-    touches.
-    """
-    if scene is None or mat is None:
-        return []
-    sources = mesh_map_source_objects(scene, mat)
-    result = []
-    for ob in scene.objects:
-        if ob.type != 'MESH' or ob.data is None or ob in sources:
-            continue
-        if any(slot.material == mat for slot in ob.material_slots):
-            result.append(ob)
-    return result
-
-
-def mesh_map_summary_status(ob, mat):
-    """The worst mesh-map status of \a ob for \a mat, and how many states it has."""
-    states = [state for state in ob.mesh_map_states if state.material == mat]
-    if len(states) == 0:
-        return ('NONE', 0)
-    statuses = {state.status for state in states}
-    for candidate in ('BAKING', 'ERROR', 'STALE', 'VALID'):
-        if candidate in statuses:
-            return (candidate, len(states))
-    return ('NONE', len(states))
-
-
-def mesh_map_states_need_refresh(states):
-    """Whether an object with \a states should be re-checked on a geometry change.
-
-    Only VALID or STALE states have something to re-check: NONE was never baked, ERROR stays until an
-    explicit retry, and an in-flight bake owns its status until the worker sets the final one.
-    """
-    return any(state.status in {'VALID', 'STALE'} for state in states)
-
-
-def mesh_map_source_member_count(source):
-    """How many mesh objects a source record resolves to (0 means the source is empty)."""
-    count = 0
-    if source.high_poly is not None:
-        count += 1
-    if source.high_poly_collection is not None:
-        count += sum(1 for ob in source.high_poly_collection.all_objects if ob.type == 'MESH')
-    return count
 
 
 def _decal_master_projector_node(ma, node_name):
@@ -1457,7 +1265,7 @@ class MATERIAL_OT_paint_layer_decal_import_decal_master(Operator):
 
     @classmethod
     def poll(cls, context):
-        ma = _context_material(context)
+        ma = context_material(context)
         if ma is None:
             return False
         return hasattr(ma, "sna_dcl_col") and len(ma.sna_dcl_col) > 0
@@ -1468,7 +1276,7 @@ class MATERIAL_OT_paint_layer_decal_import_decal_master(Operator):
                 if layer.name.rpartition(" · ")[0] == decal_name]
 
     def execute(self, context):
-        ma = _context_material(context)
+        ma = context_material(context)
         if ma is None:
             return {'CANCELLED'}
         ob = context.object
@@ -1648,8 +1456,4 @@ classes = (
     PAINT_OT_brush_layer_source_row_search,
     PAINT_IDF_layer_material,
     PAINT_IDF_curve_patch_brush,
-    OBJECT_OT_mesh_map_refresh,
-    MATERIAL_OT_mesh_map_add_layer,
-    OBJECT_OT_mesh_map_source_add,
-    OBJECT_OT_mesh_map_source_remove,
 )

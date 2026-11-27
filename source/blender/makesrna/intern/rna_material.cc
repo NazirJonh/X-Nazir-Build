@@ -764,6 +764,7 @@ static const EnumPropertyItem rna_material_paint_layer_canvas_size_all_items[] =
 #  include "BKE_material.hh"
 #  include "BKE_mesh.hh"
 #  include "BKE_mesh_maps.hh"
+#  include "BKE_mesh_maps_bake.hh"
 #  include "BKE_mesh_types.hh"
 #  include "BKE_node.hh"
 #  include "BKE_paint.hh"
@@ -7319,6 +7320,38 @@ static MaterialMeshMapSlot *rna_Material_mesh_map_slots_find(Material *ma, int t
   return BKE_mesh_maps_slot_find(*ma, int8_t(type));
 }
 
+static bool rna_Material_mesh_map_type_is_bakeable(Material * /*ma*/, int type)
+{
+  return BKE_mesh_maps_bake_type_is_supported(int8_t(type));
+}
+
+static void rna_Material_mesh_map_bake_target_objects_begin(CollectionPropertyIterator *iter,
+                                                            PointerRNA *ptr)
+{
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  /* The objects are resolved from the whole file, which a property setter is not handed: fall back
+   * to #G_MAIN, guarded the same way other introspection callbacks guard it. */
+  if (ma == nullptr || G_MAIN == nullptr) {
+    iter->valid = false;
+    return;
+  }
+  Vector<Object *> objects;
+  BKE_mesh_maps_bake_target_objects(*G_MAIN, *ma, objects);
+  /* The iterator owns the array and frees it at the end, so the objects outlive this call. */
+  Object **data = MEM_new_array<Object *>(size_t(std::max<int64_t>(objects.size(), 1)), __func__);
+  for (const int64_t i : objects.index_range()) {
+    data[i] = objects[i];
+  }
+  rna_iterator_array_begin(iter, ptr, data, sizeof(Object *), objects.size(), true, nullptr);
+}
+
+static PointerRNA rna_Material_mesh_map_bake_target_objects_get(CollectionPropertyIterator *iter)
+{
+  /* The items are IDs, so each pointer is self-owned rather than a child of the material. */
+  Object *ob = static_cast<Object *>(rna_iterator_array_dereference_get(iter));
+  return RNA_id_pointer_create(&ob->id);
+}
+
 static int rna_MaterialMeshMapSlot_type_get(PointerRNA *ptr)
 {
   return static_cast<const MaterialMeshMapSlot *>(ptr->data)->type;
@@ -10836,6 +10869,37 @@ static void rna_def_material_mesh_maps(BlenderRNA *brna, StructRNA *srna)
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
   parm = RNA_def_pointer(func, "slot", "MaterialMeshMapSlot", "", "The mesh map slot, or none");
   RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(
+      srna, "mesh_map_type_is_bakeable", "rna_Material_mesh_map_type_is_bakeable");
+  RNA_def_function_ui_description(
+      func, "Whether a bake can produce this map type in this build");
+  parm = RNA_def_enum(func,
+                      "type",
+                      rna_enum_material_mesh_map_type_items,
+                      MA_MESH_MAP_AO,
+                      "Type",
+                      "The mesh map type");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_boolean(func, "result", false, "", "Whether the map type can be baked");
+  RNA_def_function_return(func, parm);
+
+  prop = RNA_def_property(srna, "mesh_map_bake_target_objects", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "Object");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_Material_mesh_map_bake_target_objects_begin",
+                                    "rna_iterator_array_next",
+                                    "rna_iterator_array_end",
+                                    "rna_Material_mesh_map_bake_target_objects_get",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_ui_text(
+      prop,
+      "Bake Target Objects",
+      "The objects a 'Bake All Objects' run over this material covers, sources excluded");
 
   /* slot */
   /* `srna` stays the Material: the settings below belong to it, not to the slot. */

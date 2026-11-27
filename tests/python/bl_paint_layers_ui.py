@@ -428,5 +428,73 @@ class PaintLayersMaskUiTest(unittest.TestCase):
         self.assertEqual(paint_mode.layer_target_mode, 'CONTENT')
 
 
+class MeshMapsHelperTest(unittest.TestCase):
+    """The pure Mesh Maps helpers: the summary status and the single type list."""
+
+    def _state(self, mat, status):
+        return SimpleNamespace(material=mat, status=status)
+
+    def test_mesh_map_summary_status_priority_and_count(self):
+        from bl_operators.material_mesh_maps import mesh_map_summary_status
+
+        mat = object()
+
+        empty = SimpleNamespace(mesh_map_states=[])
+        self.assertEqual(mesh_map_summary_status(empty, mat), ('NONE', 0))
+
+        # BAKING outranks ERROR, which outranks STALE, which outranks VALID.
+        ob = SimpleNamespace(mesh_map_states=[
+            self._state(mat, 'VALID'),
+            self._state(mat, 'STALE'),
+            self._state(mat, 'BAKING'),
+        ])
+        self.assertEqual(mesh_map_summary_status(ob, mat), ('BAKING', 3))
+
+        ob = SimpleNamespace(mesh_map_states=[
+            self._state(mat, 'VALID'),
+            self._state(mat, 'ERROR'),
+            self._state(mat, 'STALE'),
+        ])
+        self.assertEqual(mesh_map_summary_status(ob, mat), ('ERROR', 3))
+
+        ob = SimpleNamespace(mesh_map_states=[
+            self._state(mat, 'VALID'),
+            self._state(mat, 'STALE'),
+        ])
+        self.assertEqual(mesh_map_summary_status(ob, mat), ('STALE', 2))
+
+        ob = SimpleNamespace(mesh_map_states=[self._state(mat, 'VALID')])
+        self.assertEqual(mesh_map_summary_status(ob, mat), ('VALID', 1))
+
+        # A state of another material does not count for this one.
+        other = object()
+        ob = SimpleNamespace(mesh_map_states=[
+            self._state(other, 'BAKING'),
+            self._state(mat, 'VALID'),
+        ])
+        self.assertEqual(mesh_map_summary_status(ob, mat), ('VALID', 1))
+
+    def test_mesh_map_type_entries_come_from_the_rna_enum(self):
+        from bl_operators.material_mesh_maps import (
+            _MESH_MAP_TYPE_ENTRIES,
+            mesh_map_layer_name,
+            mesh_map_type_items,
+        )
+
+        rna_ids = [
+            item.identifier
+            for item in bpy.types.MaterialPaintLayer.bl_rna.properties['mesh_map_type'].enum_items
+            if item.identifier != ''
+        ]
+        self.assertEqual([entry[0] for entry in _MESH_MAP_TYPE_ENTRIES], rna_ids)
+        # Without a material the full enum is returned, and every entry is a 3-tuple.
+        self.assertEqual(mesh_map_type_items(None), _MESH_MAP_TYPE_ENTRIES)
+        for entry in _MESH_MAP_TYPE_ENTRIES:
+            self.assertEqual(len(entry), 3)
+        # 'AO' keeps its short historical name; an unknown type falls back to the identifier.
+        self.assertEqual(mesh_map_layer_name('AO'), "AO Map")
+        self.assertEqual(mesh_map_layer_name('NOT_A_TYPE'), "NOT_A_TYPE Map")
+
+
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]] + (sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []))

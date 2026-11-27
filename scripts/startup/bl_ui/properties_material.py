@@ -20,6 +20,7 @@ from bl_ui.properties_paint_common import (
 
 from bl_ui.properties_material_paint_layers import (
     LAYER_MATERIAL_PT_user_settings_presets,
+    LayerMaterialButtonsPanel,
     draw_material_channel_mixer,
     draw_material_channel_set,
     draw_material_color_balance,
@@ -40,11 +41,7 @@ from bl_ui.properties_material_paint_layers import (
     draw_material_update_now,
     material_layer_visible_channels,
 )
-from bl_operators.material_paint_layers import (
-    mesh_map_objects_for_material,
-    mesh_map_source_member_count,
-    mesh_map_summary_status,
-)
+
 # The brush glyph of the New Layered Material button: the same Material Symbols codepoint the Stack
 # Layers rows and Add menu use (`GLYPH_BRUSH` there, pinned by
 # `glyph_constants_stay_in_step_with_space_outliner`).
@@ -648,78 +645,6 @@ class BRUSH_MATERIAL_PT_custom_props(BrushMaterialButtonsPanel, PropertyPanel, P
     bl_idname = "BRUSH_MATERIAL_PT_custom_props"
     _context_path = "material"
     _property_type = bpy.types.Material
-
-
-class LayerMaterialButtonsPanel:
-    """Base for the Layer Material tab, which edits the material of the active paint layer.
-
-    The owner material is reached through the active object's active material slot, so the tab
-    follows whichever stack the object shows; `context.material` in this tab is that same owner
-    (the context path holds exactly one Material). Like #BrushMaterialButtonsPanel, these panels
-    share drawing through module level helpers rather than by subclassing registered panels.
-    """
-    bl_space_type = 'PROPERTIES'
-    bl_region_type = 'WINDOW'
-    bl_context = "layer_material"
-
-    @staticmethod
-    def _owner_material(context):
-        """The layered material that owns the stack, or None."""
-        ob = context.object
-        mat = ob.active_material if ob is not None else None
-        return mat if (mat is not None and mat.is_layered) else None
-
-    @staticmethod
-    def _active_layer(context):
-        """The active row of the owning material, or `(None, None)` when there is none."""
-        owner = LayerMaterialButtonsPanel._owner_material(context)
-        if owner is None:
-            return None, None
-        return owner, owner.paint_layers.active
-
-    @staticmethod
-    def _shown_mask_item(context, owner, layer):
-        """The mask item the tab edits instead of the layer, or None.
-
-        `paint_layers.active` answers the row a mask correction hangs on, so a correction is asked
-        for itself. The base mask is no row of the stack: it is the layer's own mask slot, and is
-        what the tab shows while the brush works in Mask mode.
-        """
-        item = owner.paint_layers.active_mask_item
-        if item is not None:
-            return item
-        if (layer is not None and len(layer.mask_items) and
-                context.tool_settings.paint_mode.layer_target_mode == 'MASK'):
-            return layer.mask_items[0]
-        return None
-
-    @staticmethod
-    def _curve_patch_subject(context):
-        """The row whose Curve Patch panel is shown: the active mask item when it is one, else
-        the active row. A mask Curve Patch hangs on its layer, so `paint_layers.active` answers
-        the layer and the item has to be asked for through the shown mask item."""
-        owner, layer = LayerMaterialButtonsPanel._active_layer(context)
-        if owner is None:
-            return None, None
-        item = LayerMaterialButtonsPanel._shown_mask_item(context, owner, layer)
-        if (item is not None and item.source == 'CURVE_PATCH' and
-                item.curve_patch is not None):
-            return owner, item
-        return owner, layer
-
-    @staticmethod
-    def _object_mask_editing(context):
-        """While the active row's object mask is edited, the tab shows only the Mask panel."""
-        return context.scene.tool_settings.paint_mode.layer_object_mask_edit
-
-    @classmethod
-    def poll(cls, context):
-        # No COMPAT_ENGINES test, for the same reason as the Brush Material tab: the generated tree
-        # feeds the viewport whatever the scene's render engine is.
-        if cls._object_mask_editing(context):
-            return False
-        mat = context.material
-        return mat is not None and not mat.grease_pencil
 
 
 def draw_material_gradient_layer(layout, context, owner, layer, draw_channels=True):
@@ -2292,176 +2217,6 @@ class LAYER_MATERIAL_PT_row_result(LayerMaterialButtonsPanel, Panel):
             layout.label(text="The source row no longer exists", icon='ERROR')
 
 
-# The mesh map types come straight from the RNA enum (#MaterialPaintLayer.mesh_map_type), so a
-# type added in DNA shows up here without touching this file.
-_MESH_MAP_TYPES = tuple(
-    (item.identifier, item.name)
-    for item in bpy.types.MaterialPaintLayer.bl_rna.properties['mesh_map_type'].enum_items
-    if item.identifier != ''
-)
-
-# The status keys come from the RNA enum (#ObjectMeshMapState.status); the label and icon pairs
-# stay a UI mapping of their own.
-_MESH_MAP_STATUS_LABEL_ICON = {
-    'NONE': ("Not baked", 'DOT'),
-    'VALID': ("Valid", 'CHECKMARK'),
-    'STALE': ("Stale", 'FILE_REFRESH'),
-    'BAKING': ("Baking", 'FILE_REFRESH'),
-    'ERROR': ("Error", 'ERROR'),
-}
-_MESH_MAP_STATUS = {
-    item.identifier: _MESH_MAP_STATUS_LABEL_ICON[item.identifier]
-    for item in bpy.types.ObjectMeshMapState.bl_rna.properties['status'].enum_items
-    if item.identifier != ''
-}
-
-
-def _mesh_map_state(context, mat, map_type):
-    for state in context.object.mesh_map_states:
-        if state.material == mat and state.type == map_type:
-            return state
-    return None
-
-
-class LAYER_MATERIAL_PT_mesh_maps(LayerMaterialButtonsPanel, Panel):
-    """Mesh map atlases of the stack's owner material and the active object's bake state.
-
-    Drawn in the Layer Material tab, so the material is the owner (the active slot), never the
-    source material `context.material` may point at; the bake operator bakes the active slot too.
-    A mesh without any UV layer cannot be baked: the map is sampled through the active UV of the
-    mesh, so the panel warns instead of offering a bake that the job would refuse.
-    """
-
-    bl_idname = "LAYER_MATERIAL_PT_mesh_maps"
-    bl_label = "Mesh Maps"
-    bl_options = {'DEFAULT_CLOSED'}
-    # Sits right above Output Texture, after the settings panels.
-    bl_order = 1
-
-    @classmethod
-    def poll(cls, context):
-        if cls._object_mask_editing(context):
-            return False
-        ob = context.object
-        return (
-            cls._owner_material(context) is not None and
-            ob.type == 'MESH' and ob.data is not None
-        )
-
-    def draw(self, context):
-        layout = self.layout
-        layout.use_property_split = True
-        mat = self._owner_material(context)
-        ob = context.object
-
-        # D: reads the mesh's active UV; there is no per-material named-UV layer to pick.
-        if ob.data.uv_layers.active is None:
-            layout.label(text="The object has no UV map", icon='ERROR')
-
-        actions = layout.row(align=True)
-        # The bakes are background wmJobs; a plain button would run the synchronous exec path and
-        # block the UI. Clear is cheap and runs inline.
-        actions.operator_context = 'INVOKE_DEFAULT'
-        bake_all = actions.operator(
-            "object.mesh_map_bake_all", text="Bake All Maps", icon='RENDER_STILL')
-        bake_all.types = set()
-        bake_all.object_scope = 'ACTIVE'
-        bake_all.material_index = 0
-        bake_all_objects = actions.operator(
-            "object.mesh_map_bake_all", text="Bake All Objects")
-        bake_all_objects.types = set()
-        bake_all_objects.object_scope = 'ALL'
-        bake_all_objects.material_index = 0
-        actions.operator_context = 'EXEC_DEFAULT'
-        actions.operator("object.mesh_map_clear", text="Clear").types = set()
-
-        header, settings_layout = layout.panel("mesh_map_settings", default_closed=True)
-        header.label(text="Settings")
-        if settings_layout:
-            settings = mat.mesh_map_settings
-            settings_layout.use_property_split = True
-            col = settings_layout.column(align=True)
-            col.prop(settings, "resolution")
-            col.prop(settings, "samples")
-            col.prop(settings, "use_denoise")
-            col.prop(settings, "margin")
-            col.prop(settings, "ao_distance")
-            col.prop(settings, "edge_radius")
-
-        source = next((item for item in ob.mesh_map_sources if item.material == mat), None)
-        hp_header, hp = layout.panel("mesh_map_highpoly", default_closed=True)
-        hp_header.label(text="High-poly Source")
-        if hp:
-            if source is None:
-                hp.operator("object.mesh_map_source_add", text="Use High-poly Source", icon='ADD')
-            else:
-                hp.prop_search(source, "high_poly", context.scene, "objects", text="Object")
-                hp.prop_search(
-                    source, "high_poly_collection", context.blend_data, "collections",
-                    text="Collection")
-                hp.label(
-                    text="AO is computed per high-poly object; pieces do not occlude each other")
-                hp.prop(source, "cage", text="Cage")
-                hp.prop(source, "cage_extrusion")
-                hp.prop(source, "max_ray_distance")
-                if mesh_map_source_member_count(source) == 0:
-                    hp.label(text="The source resolves to no mesh objects", icon='ERROR')
-                elif source.cage is not None and not source.cage_matches(
-                        depsgraph=context.view_layer.depsgraph):
-                    hp.label(
-                        text="The cage must have the same face count as the low-poly object",
-                        icon='ERROR')
-                hp.operator("object.mesh_map_source_remove", text="Remove", icon='X')
-
-        baking = False
-        for map_type, type_label in _MESH_MAP_TYPES:
-            row = layout.row(align=True)
-            row.label(text=type_label)
-            state = _mesh_map_state(context, mat, map_type)
-            if state is None:
-                status_label, status_icon = _MESH_MAP_STATUS['NONE']
-            else:
-                status_label, status_icon = _MESH_MAP_STATUS[state.status]
-                baking = baking or state.status == 'BAKING'
-            row.label(text=status_label, icon=status_icon)
-            slot = mat.mesh_map_slots.find(type=map_type)
-            image = slot.image if slot is not None else None
-            row.label(text=image.name if image is not None else "\u2014")
-
-            row.operator_context = 'INVOKE_DEFAULT'
-            bake = row.operator("object.mesh_map_bake", text="Bake", icon='RENDER_STILL')
-            bake.type = map_type
-            bake.material_index = 0
-            row.operator_context = 'EXEC_DEFAULT'
-
-            # No "Add Mask" here: a Mesh Map mask needs the mask-correction RNA to accept the
-            # Mesh Map source, which this build does not do yet.
-            row.operator(
-                "material.mesh_map_add_layer", text="Add Layer", icon='ADD').type = map_type
-
-        if baking:
-            layout.label(text="Baking...", icon='FILE_REFRESH')
-
-        objects = mesh_map_objects_for_material(context.scene, mat)
-        if len(objects) > 1:
-            box = layout.box()
-            box.label(text="Objects using this material", icon='OUTLINER_OB_MESH')
-            for other in objects:
-                status, count = mesh_map_summary_status(other, mat)
-                status_label, status_icon = _MESH_MAP_STATUS[status]
-                line = box.row(align=True)
-                line.label(
-                    text="{}: {} ({} map(s))".format(other.name, status_label, count),
-                    icon=status_icon,
-                )
-                # D: bakes through the mesh's active UV, so an object without one is unusable
-                # for the shared atlas.
-                if other.data is not None and other.data.uv_layers.active is None:
-                    line.label(text="no active UV", icon='ERROR')
-
-        layout.operator("object.mesh_map_refresh", text="Refresh Status", icon='FILE_REFRESH')
-
-
 class LAYER_MATERIAL_PT_channels(LayerMaterialButtonsPanel, Panel):
     """The settings of the layered material as a whole; its sections are sub-panels."""
 
@@ -2772,7 +2527,6 @@ classes = (
     LAYER_MATERIAL_PT_object_mask,
     LAYER_MATERIAL_PT_smart_asset_params,
     LAYER_MATERIAL_PT_smart_asset_expose,
-    LAYER_MATERIAL_PT_mesh_maps,
 )
 
 

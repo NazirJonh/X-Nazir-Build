@@ -8,7 +8,9 @@ channels of one stack layer.
 Split out of `properties_material.py` so the panels stay thin and the channel vocabulary lives in
 one place. Most panels still draw from `properties_material.py` (they need the Layer Material tab
 context); this module also registers the User Settings panels, whose options are Preferences
-properties and so belong to no material's tab context.
+properties and so belong to no material's tab context. The tab's base panel class lives here too,
+so a panel split into its own module (`properties_material_mesh_maps.py`) can import it without
+creating an import cycle with `properties_material.py`.
 """
 
 from collections import namedtuple
@@ -26,6 +28,83 @@ from bl_ui.properties_paint_common import (
 )
 
 from bl_ui.utils import PresetPanel
+
+
+class LayerMaterialButtonsPanel:
+    """Base for the Layer Material tab, which edits the material of the active paint layer.
+
+    The owner material is reached through the active object's active material slot, so the tab
+    follows whichever stack the object shows; `context.material` in this tab is that same owner
+    (the context path holds exactly one Material). Like #BrushMaterialButtonsPanel, these panels
+    share drawing through module level helpers rather than by subclassing registered panels.
+    """
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = "layer_material"
+
+    @staticmethod
+    def _owner_material(context):
+        """The layered material that owns the stack, or None.
+
+        Same owner as `bl_operators.material_paint_layers.context_material`; the operator path also
+        falls back to `context.material`, the panel does not need to.
+        """
+        ob = context.object
+        mat = ob.active_material if ob is not None else None
+        return mat if (mat is not None and mat.is_layered) else None
+
+    @staticmethod
+    def _active_layer(context):
+        """The active row of the owning material, or `(None, None)` when there is none."""
+        owner = LayerMaterialButtonsPanel._owner_material(context)
+        if owner is None:
+            return None, None
+        return owner, owner.paint_layers.active
+
+    @staticmethod
+    def _shown_mask_item(context, owner, layer):
+        """The mask item the tab edits instead of the layer, or None.
+
+        `paint_layers.active` answers the row a mask correction hangs on, so a correction is asked
+        for itself. The base mask is no row of the stack: it is the layer's own mask slot, and is
+        what the tab shows while the brush works in Mask mode.
+        """
+        item = owner.paint_layers.active_mask_item
+        if item is not None:
+            return item
+        if (layer is not None and len(layer.mask_items) and
+                context.tool_settings.paint_mode.layer_target_mode == 'MASK'):
+            return layer.mask_items[0]
+        return None
+
+    @staticmethod
+    def _curve_patch_subject(context):
+        """The row whose Curve Patch panel is shown: the active mask item when it is one, else
+        the active row. A mask Curve Patch hangs on its layer, so `paint_layers.active` answers
+        the layer and the item has to be asked for through the shown mask item."""
+        owner, layer = LayerMaterialButtonsPanel._active_layer(context)
+        if owner is None:
+            return None, None
+        item = LayerMaterialButtonsPanel._shown_mask_item(context, owner, layer)
+        if (item is not None and item.source == 'CURVE_PATCH' and
+                item.curve_patch is not None):
+            return owner, item
+        return owner, layer
+
+    @staticmethod
+    def _object_mask_editing(context):
+        """While the active row's object mask is edited, the tab shows only the Mask panel."""
+        return context.scene.tool_settings.paint_mode.layer_object_mask_edit
+
+    @classmethod
+    def poll(cls, context):
+        # No COMPAT_ENGINES test, for the same reason as the Brush Material tab: the generated tree
+        # feeds the viewport whatever the scene's render engine is.
+        if cls._object_mask_editing(context):
+            return False
+        mat = context.material
+        return mat is not None and not mat.grease_pencil
+
 
 # Channel count at which a row is considered heavy: five records weigh 34 generated nodes, six
 # weigh 40, over the AUTO-bake threshold of 36. A row this wide bakes instead of evaluating live.

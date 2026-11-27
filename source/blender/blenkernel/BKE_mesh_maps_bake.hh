@@ -29,6 +29,7 @@
 #include <cstdint>
 
 #include "BLI_function_ref.hh"
+#include "BLI_set.hh"
 #include "BLI_span.hh"
 #include "BLI_string_ref.hh"
 #include "BLI_vector.hh"
@@ -381,6 +382,38 @@ enum eMeshMapBakeObjectScope : int8_t {
 
 /** Whether \a type is one the bake can produce (excludes the reserved Thickness/Position). */
 bool BKE_mesh_maps_bake_type_is_supported(int8_t type);
+
+/**
+ * Whether \a ob is part of the bake plan for \a ma in \a object_scope. This is the one rule the
+ * Python panel and the "bake all" job share, so the two cannot disagree on which objects a run
+ * covers.
+ *
+ * For #MA_MESH_MAP_BAKE_ACTIVE_OBJECT the predicate only accepts \a active_object. For
+ * #MA_MESH_MAP_BAKE_ALL_OBJECTS it requires a mesh that uses \a ma in a slot and is not a resolved
+ * high-poly source of another object using \a ma (a source is an input, never a low-poly to bake).
+ *
+ * \param source_objects: the result of #BKE_mesh_maps_source_collect_for_material, when the caller
+ * already has it for a whole sweep over many objects. nullptr makes the predicate collect the
+ * sources itself for this one call: convenient for a single query, but it scans every object, so a
+ * caller that asks about many objects must collect once and pass the set here instead.
+ */
+bool BKE_mesh_maps_bake_object_in_plan(Main &bmain,
+                                       Object &ob,
+                                       const Material &ma,
+                                       const Object *active_object,
+                                       int8_t object_scope,
+                                       const Set<const Object *> *source_objects);
+
+/**
+ * Append to \a r_objects, in `bmain.objects` order, every object a "bake all" run over \a ma covers
+ * (#MA_MESH_MAP_BAKE_ALL_OBJECTS): a mesh that uses \a ma in a slot and is not a resolved high-poly
+ * source of another object using \a ma. The sources are collected once for the whole sweep, so a
+ * caller that wants the whole list must use this rather than asking the per-object predicate for
+ * each candidate.
+ */
+void BKE_mesh_maps_bake_target_objects(Main &bmain,
+                                       Material &ma,
+                                       Vector<Object *> &r_objects);
 
 /**
  * Append to \a r_pairs the (object, type) pairs a run over \a ma should bake, in a stable order:

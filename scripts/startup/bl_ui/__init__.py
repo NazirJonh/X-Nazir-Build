@@ -41,6 +41,7 @@ _modules = [
     # Supplies panels and draw code to properties_material, so it loads (and registers) first.
     "properties_material_paint_layers",
     "properties_material",
+    "properties_material_mesh_maps",
     "properties_material_gpencil",
     "properties_object",
     "properties_paint_common",

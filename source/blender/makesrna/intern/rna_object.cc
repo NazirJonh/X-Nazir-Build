@@ -2910,6 +2910,30 @@ static bool rna_Object_mesh_map_sources_remove(Object *ob, Material *material)
   return BKE_mesh_maps_source_remove(*ob, *material);
 }
 
+static bool rna_Object_mesh_map_bake_target_for(Object *ob, Main *bmain, Material *material)
+{
+  if (ob == nullptr || material == nullptr) {
+    return false;
+  }
+  /* Fixed to the all-objects scope: it is the one the panel must agree with, and the active-object
+   * scope is already the panel's own "Bake All Maps" button, not this shared rule. */
+  return BKE_mesh_maps_bake_object_in_plan(
+      *bmain, *ob, *material, nullptr, MA_MESH_MAP_BAKE_ALL_OBJECTS, nullptr);
+}
+
+static int rna_ObjectMeshMapSource_resolved_object_count(ID *self_id, ObjectMeshMapSource *source)
+{
+  if (self_id == nullptr || source == nullptr || source->material == nullptr) {
+    return 0;
+  }
+  /* The same resolution the bake performs, so an empty count means the bake has nothing to
+   * sample. */
+  const Object *ob = id_cast<const Object *>(self_id);
+  Vector<Object *> objects;
+  BKE_mesh_maps_source_resolve(*ob, *source->material, objects, nullptr);
+  return int(objects.size());
+}
+
 static PointerRNA rna_ObjectMeshMapSource_material_get(PointerRNA *ptr)
 {
   ObjectMeshMapSource *source = static_cast<ObjectMeshMapSource *>(ptr->data);
@@ -3810,6 +3834,17 @@ static void rna_def_object_mesh_maps(BlenderRNA *brna, StructRNA *srna)
   parm = RNA_def_boolean(func, "result", false, "", "Whether a source was removed");
   RNA_def_function_return(func, parm);
 
+  func = RNA_def_function(srna, "mesh_map_bake_target_for", "rna_Object_mesh_map_bake_target_for");
+  RNA_def_function_ui_description(
+      func,
+      "Whether this object is one of the objects a material bake covers in the all-objects scope");
+  RNA_def_function_flag(func, FUNC_USE_MAIN);
+  parm = RNA_def_pointer(
+      func, "material", "Material", "Material", "The material whose bake is asked about");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_boolean(func, "result", false, "", "Whether the bake covers this object");
+  RNA_def_function_return(func, parm);
+
   srna = RNA_def_struct(brna, "ObjectMeshMapSource", nullptr);
   RNA_def_struct_sdna(srna, "ObjectMeshMapSource");
   RNA_def_struct_ui_text(srna, "Mesh Map Source", "The high-poly source of one material's maps");
@@ -3861,6 +3896,16 @@ static void rna_def_object_mesh_maps(BlenderRNA *brna, StructRNA *srna)
   RNA_def_property_ui_text(prop,
                            "Max Ray Distance",
                            "Maximum cage-to-high-poly ray distance; zero is unlimited");
+
+  func = RNA_def_function(
+      srna, "resolved_object_count", "rna_ObjectMeshMapSource_resolved_object_count");
+  RNA_def_function_ui_description(
+      func,
+      "How many mesh objects this source resolves to, using the same rule the bake samples from");
+  RNA_def_function_flag(func, FUNC_USE_SELF_ID);
+  parm = RNA_def_int(
+      func, "result", 0, 0, INT_MAX, "", "Number of resolved source objects", 0, INT_MAX);
+  RNA_def_function_return(func, parm);
 
   func = RNA_def_function(srna, "cage_matches", "rna_ObjectMeshMapSource_cage_matches");
   RNA_def_function_ui_description(

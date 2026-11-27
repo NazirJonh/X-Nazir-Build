@@ -794,6 +794,48 @@ bool BKE_mesh_maps_bake_type_is_supported(const int8_t type)
   return BKE_mesh_maps_bake_type_renders(type) || BKE_mesh_maps_bake_type_cpu_id(type);
 }
 
+bool BKE_mesh_maps_bake_object_in_plan(Main &bmain,
+                                       Object &ob,
+                                       const Material &ma,
+                                       const Object *active_object,
+                                       const int8_t object_scope,
+                                       const Set<const Object *> *source_objects)
+{
+  if (object_scope == MA_MESH_MAP_BAKE_ACTIVE_OBJECT) {
+    return active_object != nullptr && &ob == active_object;
+  }
+  /* See #BKE_mesh_maps_source_collect_for_material: non-mesh objects have no material count. */
+  if (ob.type != OB_MESH || ob.data == nullptr) {
+    return false;
+  }
+  if (BKE_object_material_index_get(&ob, &ma) < 0) {
+    return false;
+  }
+  /* High-poly sources are never baked as low-poly: they are inputs of other objects' bakes. */
+  if (source_objects != nullptr) {
+    return !source_objects->contains(&ob);
+  }
+  Set<const Object *> local_source_objects;
+  BKE_mesh_maps_source_collect_for_material(bmain, ma, local_source_objects);
+  return !local_source_objects.contains(&ob);
+}
+
+void BKE_mesh_maps_bake_target_objects(Main &bmain,
+                                       Material &ma,
+                                       Vector<Object *> &r_objects)
+{
+  /* Collect the sources once: the predicate must not rescan every object per candidate. */
+  Set<const Object *> source_objects;
+  BKE_mesh_maps_source_collect_for_material(bmain, ma, source_objects);
+  for (Object &ob : bmain.objects) {
+    if (BKE_mesh_maps_bake_object_in_plan(
+            bmain, ob, ma, nullptr, MA_MESH_MAP_BAKE_ALL_OBJECTS, &source_objects))
+    {
+      r_objects.append(&ob);
+    }
+  }
+}
+
 void BKE_mesh_maps_bake_plan_pairs(Main &bmain,
                                    Object *active_object,
                                    Material &ma,
@@ -801,7 +843,19 @@ void BKE_mesh_maps_bake_plan_pairs(Main &bmain,
                                    const uint32_t type_mask,
                                    Vector<MeshMapBakePair> &r_pairs)
 {
-  const auto append_types = [&](Object &ob) {
+  /* Collect once for the whole sweep: the predicate must not rescan every object per candidate. */
+  Set<const Object *> source_objects;
+  const Set<const Object *> *source_objects_ptr = nullptr;
+  if (object_scope != MA_MESH_MAP_BAKE_ACTIVE_OBJECT) {
+    BKE_mesh_maps_source_collect_for_material(bmain, ma, source_objects);
+    source_objects_ptr = &source_objects;
+  }
+  for (Object &ob : bmain.objects) {
+    if (!BKE_mesh_maps_bake_object_in_plan(
+            bmain, ob, ma, active_object, object_scope, source_objects_ptr))
+    {
+      continue;
+    }
     for (int type = 0; type < MA_MESH_MAP_TYPE_NUM; type++) {
       if ((type_mask & (1u << uint(type))) == 0) {
         continue;
@@ -811,29 +865,6 @@ void BKE_mesh_maps_bake_plan_pairs(Main &bmain,
       }
       r_pairs.append(MeshMapBakePair{&ob, &ma, int8_t(type)});
     }
-  };
-
-  if (object_scope == MA_MESH_MAP_BAKE_ACTIVE_OBJECT) {
-    if (active_object != nullptr) {
-      append_types(*active_object);
-    }
-    return;
-  }
-  /* High-poly sources are never baked as low-poly: they are inputs of other objects' bakes. */
-  Set<const Object *> source_objects;
-  BKE_mesh_maps_source_collect_for_material(bmain, ma, source_objects);
-  for (Object &ob : bmain.objects) {
-    /* See #BKE_mesh_maps_source_collect_for_material: non-mesh objects have no material count. */
-    if (ob.type != OB_MESH || ob.data == nullptr) {
-      continue;
-    }
-    if (BKE_object_material_index_get(&ob, &ma) < 0) {
-      continue;
-    }
-    if (source_objects.contains(&ob)) {
-      continue;
-    }
-    append_types(ob);
   }
 }
 

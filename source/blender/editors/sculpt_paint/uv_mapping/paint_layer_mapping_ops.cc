@@ -375,8 +375,9 @@ static wmOperatorStatus layer_mapping_mirror_set_point_modal(bContext *C,
   center[1] = std::clamp(center[1], 0.0f, 1.0f);
   /* Marked before the write: the first bake after the value changes must already see the drag. */
   if (Material *material = data->target.material()) {
-    /* Coarse composites while the point follows the cursor; the finish clears the mark. */
-    ed::material_combined::gradient_interactive_begin(*material, true);
+    /* Coarse composites while the point follows the cursor; the finish clears the mark. Mapping
+     * keeps the coarse octave but not the Gradient rebuild throttle. */
+    ed::material_combined::gradient_interactive_begin(*material, true, false);
   }
   if (!data->target.write_mirror_center(float2(center[0], center[1]))) {
     layer_mapping_mirror_point_finish(C, op, false);

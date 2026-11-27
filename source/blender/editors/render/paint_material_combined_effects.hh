@@ -50,6 +50,10 @@ constexpr int gpu_layer_init = 1;
 constexpr int gpu_layer_has_map = 2;
 constexpr int gpu_layer_alpha_coverage = 4;
 constexpr int gpu_layer_premultiplied = 8;
+/* The row covers by its source's transparency, not by the alpha of its map: a clip of the map read
+ * takes the texel out of the coverage as well. Mirrors COMBINED_LAYER_CLIPS_COVERAGE. */
+constexpr int gpu_layer_clips_coverage = 16;
+static_assert(gpu_layer_clips_coverage == 16, "COMBINED_LAYER_CLIPS_COVERAGE");
 constexpr int gpu_layer_mapped = 32;
 constexpr int gpu_layer_repeat_u = 64;
 constexpr int gpu_layer_repeat_v = 128;
@@ -140,29 +144,31 @@ static_assert(gpu_layer_mirror_u == gpu_effect_result,
               "The effect result flag shares the Mirror U bit by design");
 static_assert((gpu_layer_mirror_v &
                (gpu_layer_init | gpu_layer_has_map | gpu_layer_alpha_coverage |
-                gpu_layer_premultiplied | gpu_layer_mapped | gpu_layer_repeat_u |
-                gpu_layer_repeat_v | gpu_layer_tangent_normal | gpu_layer_normal_directx |
-                gpu_layer_mirror_u | gpu_layer_has_mask | gpu_layer_row_store |
-                gpu_layer_row_use | gpu_layer_empty_base | gpu_layer_tracks_alpha |
-                gpu_layer_adjustment | gpu_layer_slot | gpu_map_nearest)) == 0,
+                gpu_layer_premultiplied | gpu_layer_clips_coverage | gpu_layer_mapped |
+                gpu_layer_repeat_u | gpu_layer_repeat_v | gpu_layer_tangent_normal |
+                gpu_layer_normal_directx | gpu_layer_mirror_u | gpu_layer_has_mask |
+                gpu_layer_row_store | gpu_layer_row_use | gpu_layer_empty_base |
+                gpu_layer_tracks_alpha | gpu_layer_adjustment | gpu_layer_slot |
+                gpu_map_nearest)) == 0,
               "Mirror V overlaps another layer flag");
 static_assert((gpu_layer_mirror_u &
                (gpu_layer_init | gpu_layer_has_map | gpu_layer_alpha_coverage |
-                gpu_layer_premultiplied | gpu_layer_mapped | gpu_layer_repeat_u |
-                gpu_layer_repeat_v | gpu_layer_tangent_normal | gpu_layer_normal_directx |
-                gpu_layer_has_mask | gpu_layer_row_store | gpu_layer_row_use |
-                gpu_layer_empty_base | gpu_layer_tracks_alpha | gpu_layer_adjustment |
-                gpu_layer_slot | gpu_map_nearest)) == 0,
+                gpu_layer_premultiplied | gpu_layer_clips_coverage | gpu_layer_mapped |
+                gpu_layer_repeat_u | gpu_layer_repeat_v | gpu_layer_tangent_normal |
+                gpu_layer_normal_directx | gpu_layer_has_mask | gpu_layer_row_store |
+                gpu_layer_row_use | gpu_layer_empty_base | gpu_layer_tracks_alpha |
+                gpu_layer_adjustment | gpu_layer_slot | gpu_map_nearest)) == 0,
               "Mirror U overlaps another layer flag");
 static_assert((gpu_layer_projected &
                (gpu_layer_init | gpu_layer_has_map | gpu_layer_alpha_coverage |
-                gpu_layer_premultiplied | gpu_layer_mapped | gpu_layer_repeat_u |
-                gpu_layer_repeat_v | gpu_layer_tangent_normal | gpu_layer_normal_directx |
-                gpu_layer_mirror_u | gpu_layer_mirror_v | gpu_layer_has_mask |
-                gpu_layer_row_store | gpu_layer_row_use | gpu_layer_empty_base |
-                gpu_layer_tracks_alpha | gpu_layer_adjustment | gpu_layer_slot |
-                gpu_map_nearest | gpu_layer_map_glossiness | gpu_layer_map_glossiness_alpha |
-                gpu_layer_map_f0 | gpu_layer_map_f0_glossiness_alpha)) == 0,
+                gpu_layer_premultiplied | gpu_layer_clips_coverage | gpu_layer_mapped |
+                gpu_layer_repeat_u | gpu_layer_repeat_v | gpu_layer_tangent_normal |
+                gpu_layer_normal_directx | gpu_layer_mirror_u | gpu_layer_mirror_v |
+                gpu_layer_has_mask | gpu_layer_row_store | gpu_layer_row_use |
+                gpu_layer_empty_base | gpu_layer_tracks_alpha | gpu_layer_adjustment |
+                gpu_layer_slot | gpu_map_nearest | gpu_layer_map_glossiness |
+                gpu_layer_map_glossiness_alpha | gpu_layer_map_f0 |
+                gpu_layer_map_f0_glossiness_alpha)) == 0,
               "Projected overlaps another layer flag");
 
 /**

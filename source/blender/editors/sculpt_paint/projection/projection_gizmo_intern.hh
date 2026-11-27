@@ -103,7 +103,8 @@ struct ProjectionGizmoGroup {
 
   /**
    * Session uid of the material whose previews are shaded at an octave while a handle is dragged
-   * (see #gradient_interactive_begin), or zero. Kept so the mark is cleared by uid when the drag
+   * (see #gradient_interactive_begin), or zero. Projection drags are not throttled: the octave
+   * applies, but the preview rebuilds every step. Kept so the mark is cleared by uid when the drag
    * ends or the group goes away, without dereferencing a material the drag outlived.
    */
   uint32_t drag_material_uid = 0;

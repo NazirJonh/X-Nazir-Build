@@ -435,8 +435,9 @@ void drag_begin(bContext &C, wmGizmo *gz, const wmEvent &event)
   }
   /* The composite previews shade at an octave while the drag lasts and refine when it ends: a full
    * rebuild on every mouse move is what makes a large canvas lag. Coarse: a Decal-space resample
-   * at the canvas costs hundreds of milliseconds a step, so the octave is also capped. */
-  ed::material_combined::gradient_interactive_begin(*target.material(), true);
+   * at the canvas costs hundreds of milliseconds a step, so the octave is also capped. Mapping
+   * drags keep redrawing every step, so no Gradient rebuild throttle. */
+  ed::material_combined::gradient_interactive_begin(*target.material(), true, false);
 }
 
 void drag_apply(bContext &C, wmGizmo *gz, const wmEvent &event)
@@ -450,8 +451,9 @@ void drag_apply(bContext &C, wmGizmo *gz, const wmEvent &event)
     drag_finish(C, gz, false);
     return;
   }
-  /* Re-armed on every step: the mark expires on its own, and a drag held still must not lose it. */
-  ed::material_combined::gradient_interactive_begin(*target.material(), true);
+  /* Re-armed on every step: the mark expires on its own, and a drag held still must not lose it.
+   * No rebuild throttle: only the Gradient handles ask for that. */
+  ed::material_combined::gradient_interactive_begin(*target.material(), true, false);
   const float2 mval(float(event.mval[0]), float(event.mval[1]));
   const float precision = (event.modifier & KM_SHIFT) ? 0.1f : 1.0f;
 

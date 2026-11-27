@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdarg>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -79,6 +80,29 @@
 
 namespace blender::ed::material_combined {
 
+bool preview_trace_enabled()
+{
+  static const bool enabled = []() {
+    const char *env = std::getenv("BLENDER_PBR_PREVIEW_TRACE");
+    return env != nullptr && std::atoi(env) != 0;
+  }();
+  return enabled;
+}
+
+void preview_trace(const char *format, ...)
+{
+  if (!preview_trace_enabled()) {
+    return;
+  }
+  printf("[PREVIEW-TRACE] t=%.3f ", BLI_time_now_seconds());
+  va_list args;
+  va_start(args, format);
+  vprintf(format, args);
+  va_end(args);
+  printf("\n");
+  fflush(stdout);
+}
+
 /* filter_params_0/1/2 pack 3 float4s (12 floats) for shader uniforms; wide enough for all
  * filter payloads including a Color Balance's 3 folded triples. */
 static_assert(PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM >= 3 * 4);
@@ -99,6 +123,8 @@ struct GradientInteractiveMark {
   double stamp = 0.0;
   /** The drag asks for the fixed coarse cap rather than the display's octave alone. */
   bool coarse = false;
+  /** Whether the drag also throttles preview rebuilds; only the Gradient handles do. */
+  bool throttle = true;
 };
 
 static Map<uint32_t, GradientInteractiveMark> &gradient_interactive_marks()
@@ -114,11 +140,16 @@ static constexpr double GRADIENT_INTERACTIVE_TIMEOUT_SECONDS = 60.0;
 /** The times the Gradient preview was last rebuilt, declared here for the release path below. */
 static Map<uint32_t, double> &gradient_preview_last_refresh();
 
-void gradient_interactive_begin(const Material &ma, const bool coarse)
+void gradient_interactive_begin(const Material &ma, const bool coarse, const bool throttle)
 {
   /* Insert or move the mark forward: a drag re-arms its own stamp on every step. */
-  gradient_interactive_marks().add_overwrite(ma.id.session_uid,
-                                             GradientInteractiveMark{BLI_time_now_seconds(), coarse});
+  gradient_interactive_marks().add_overwrite(
+      ma.id.session_uid,
+      GradientInteractiveMark{BLI_time_now_seconds(), coarse, throttle});
+  preview_trace("gradient_interactive_begin uid=%u coarse=%d throttle=%d",
+                ma.id.session_uid,
+                int(coarse),
+                int(throttle));
   if (coarse) {
     /* The 3D viewport reads a Decal row through its bake, whose size the octave above does not
      * reach: the planner needs the drag state of its own. */
@@ -130,6 +161,7 @@ void gradient_interactive_begin(const Material &ma, const bool coarse)
 
 void gradient_interactive_end(const uint32_t material_session_uid)
 {
+  preview_trace("gradient_interactive_end uid=%u", material_session_uid);
   gradient_interactive_marks().remove(material_session_uid);
   if (G_MAIN != nullptr) {
     BKE_paint_layers_bake_drag_set(*G_MAIN, material_session_uid, false);
@@ -199,9 +231,33 @@ bool gradient_preview_refresh_allow(const Material &ma, const double now)
   if (!gradient_interactive_is(ma)) {
     return true;
   }
+  const GradientInteractiveMark *mark = gradient_interactive_marks().lookup_ptr(
+      ma.id.session_uid);
   const double *last = gradient_preview_last_refresh().lookup_ptr(ma.id.session_uid);
   const double last_refresh = (last != nullptr) ? *last : 0.0;
-  if (gradient_preview_refresh_due(now, last_refresh, true)) {
+  if (!mark->throttle) {
+    /* The mark still selects the coarse octave; it just does not skip rebuilds. */
+    preview_trace(
+        "gradient_preview_refresh_allow uid=%u allow now=%.3f last=%.3f delta=%.3f coarse=%d "
+        "throttle=0",
+        ma.id.session_uid,
+        now,
+        last_refresh,
+        now - last_refresh,
+        int(mark->coarse));
+    return true;
+  }
+  const bool due = gradient_preview_refresh_due(now, last_refresh, true);
+  preview_trace(
+      "gradient_preview_refresh_allow uid=%u %s now=%.3f last=%.3f delta=%.3f coarse=%d "
+      "throttle=1",
+      ma.id.session_uid,
+      due ? "allow" : "deny",
+      now,
+      last_refresh,
+      now - last_refresh,
+      int(gradient_interactive_is_coarse(ma)));
+  if (due) {
     return true;
   }
   /* The mouse has stopped and no event will arrive to ask for the frame the drag still owes: arm
@@ -228,6 +284,7 @@ bool gradient_preview_refresh_allow(const Material &ma, const double now)
 
 void gradient_preview_refresh_note(const Material &ma, const double now)
 {
+  preview_trace("gradient_preview_refresh_note uid=%u now=%.3f", ma.id.session_uid, now);
   gradient_preview_last_refresh().add_overwrite(ma.id.session_uid, now);
 }
 
@@ -1018,6 +1075,7 @@ static bool gpu_verify_enabled()
 
 bool gpu_refuse(const char *reason)
 {
+  preview_trace("gpu_combined refuse: %s", reason);
   if (bke::paint_perf::enabled() && reason != gpu_last_reason) {
     printf("[PBR-PERF] gpu_combined refused: %s\n", reason);
     fflush(stdout);
@@ -1255,6 +1313,12 @@ bool combined_preview_gpu_update(const Material &ma,
   const Object *painted_object = context.painted_object;
   const int tile_number = BKE_paint_layers_tile_resolve(
       context.tile_number, nullptr, painted_object);
+  preview_trace("gpu_combined update uid=%u pass=%d canvas=%dx%d tile=%d",
+                ma.id.session_uid,
+                pass,
+                canvas_size.x,
+                canvas_size.y,
+                tile_number);
   if (output == nullptr) {
     return gpu_refuse("no display texture");
   }
@@ -1724,6 +1788,7 @@ bool combined_preview_gpu_update(const Material &ma,
       GPU_finish();
     }
     perf_total.note("pass=%d texture=%dx%d dispatches=%d", pass, size.x, size.y, passes.dispatches);
+    preview_trace("gpu_combined laid uid=%u pass=%d", ma.id.session_uid, pass);
     gpu_report_active();
     return true;
   }
@@ -2057,6 +2122,7 @@ bool combined_preview_gpu_update(const Material &ma,
     GPU_finish();
   }
   perf_total.note("texture=%dx%d dispatches=%d", size.x, size.y, passes.dispatches);
+  preview_trace("gpu_combined laid uid=%u pass=%d", ma.id.session_uid, pass);
   gpu_report_active();
   return true;
 }

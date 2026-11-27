@@ -145,11 +145,12 @@ bool projection_gizmo_place(const bContext *C, wmGizmoGroup *gzgroup)
   }
   /* The material's composite previews shade at an octave for as long as a handle is dragged and
    * refine to the canvas when it ends: a projected map is baked per texel, so a full-resolution
-   * rebuild on every mouse move is what makes a 4K frame lag. Re-armed on every placement, as the
-   * mark is a heartbeat as much as a flag. */
+   * rebuild on every mouse move is what makes a 4K frame lag. The octave stays, but there is no
+   * Gradient rebuild throttle here: a projection drag redraws every step. Re-armed on every
+   * placement, as the mark is a heartbeat as much as a flag. */
   if (const Material *material = ggd->target.material()) {
     if (ggd->drag_gz != nullptr) {
-      ed::material_combined::gradient_interactive_begin(*material);
+      ed::material_combined::gradient_interactive_begin(*material, false, false);
       /* Re-armed with the preview mark: both expire together if the drag's end never arrives. */
       BKE_paint_layers_bake_drag_set(*CTX_data_main(C), material->id.session_uid, true);
       ggd->drag_material_uid = material->id.session_uid;
@@ -215,9 +216,10 @@ void projection_gizmo_invoke_prepare(const bContext *C,
     ggd->cage_surface_init = ggd->surface_height;
     /* The preview octave starts with the press, not with the next placement: the Image Editor may
      * redraw before this region does, and its first rebuild of the drag would otherwise be a full
-     * canvas one. #projection_gizmo_place keeps the mark alive and ends it. */
+     * canvas one. #projection_gizmo_place keeps the mark alive and ends it. The drag is not
+     * throttled: the octave applies, the 3 s Gradient rebuild limit does not. */
     if (const Material *material = ggd->target.material()) {
-      ed::material_combined::gradient_interactive_begin(*material);
+      ed::material_combined::gradient_interactive_begin(*material, false, false);
       /* A projected row with a CPU effect is baked per object: the planner bakes it reduced while
        * the drag lasts and once at full size after it (#gradient_interactive_end ends the mark). */
       BKE_paint_layers_bake_drag_set(*CTX_data_main(C), material->id.session_uid, true);

@@ -39,6 +39,22 @@ class Texture;
 namespace blender::ed::material_combined {
 
 /**
+ * Whether the interactive preview trace is on, from `BLENDER_PBR_PREVIEW_TRACE`.
+ *
+ * Read once into a function-local static, so the check is a branch while off. A diagnostic only:
+ * it changes no decision the preview makes.
+ */
+bool preview_trace_enabled();
+
+/**
+ * `[PREVIEW-TRACE]` line with a timestamp; prints nothing unless #preview_trace_enabled.
+ *
+ * Main thread only: the enabled flag and stdout are read without locking, like the drag marks it
+ * traces. A diagnostic layer, not a general-purpose logger.
+ */
+void preview_trace(const char *format, ...);
+
+/**
  * What the viewport knows about the preview it is about to draw, and nobody else may claim.
  *
  * Default-constructed means "the whole preview at full resolution", which is what every caller
@@ -67,8 +83,14 @@ struct CombinedPreviewRequest {
 };
 
 /**
- * Mark a Gradient handle of one of \a ma's rows as being dragged: the state that decides, for as
- * long as it lasts, that the preview is shaded at an octave rather than at the canvas.
+ * Mark a handle of one of \a ma's rows as being dragged: the state that decides, for as long as it
+ * lasts, that the preview is shaded at an octave rather than at the canvas.
+ *
+ * \param coarse: ask for the fixed coarse cap (see #gradient_interactive_is_coarse), not just the
+ *                display's own octave. Mapping-preview drags want this as well.
+ * \param throttle: whether the drag also limits preview rebuilds to one per
+ *                  #GRADIENT_PREVIEW_REFRESH_SECONDS. Only the Gradient handles do; a mapping
+ *                  gizmo asks for the coarse octave while still redrawing every step.
  *
  * Called on press and again on every step of the drag. The mark is a heartbeat as much as a flag:
  * each call restarts the timestamp the expiry reads, so a drag held still does not fall out of its
@@ -84,7 +106,7 @@ struct CombinedPreviewRequest {
  * cancelled operator with no finish -- cannot pin every preview of that material to a coarse
  * octave for the rest of the session.
  */
-void gradient_interactive_begin(const Material &ma, bool coarse = false);
+void gradient_interactive_begin(const Material &ma, bool coarse = false, bool throttle = true);
 
 /** Clear the mark of \a ma; a preview built under it refines to the canvas on the next redraw. */
 void gradient_interactive_end(uint32_t material_session_uid);

@@ -891,6 +891,11 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
       const int preview_tile = space_image_active_tile_number(*sima);
       if (ImBuf *cached = BKE_paint_material_combined_cache_peek(*ma, r_revision, preview_tile)) {
         /* A skipped step still draws: the previous octave stays valid until the trailing tick. */
+        ed::material_combined::preview_trace(
+            "image_edit combined cached uid=%u tile=%d now=%.3f",
+            ma->id.session_uid,
+            preview_tile,
+            preview_now);
         IMB_refImBuf(cached);
         return cached;
       }
@@ -914,6 +919,11 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
      * rows approximate, exactly as a channel pass does. */
     const std::shared_ptr<const PaintMaterialCompositeSurface> surface =
         sima->runtime != nullptr ? sima->runtime->gradient_surface : nullptr;
+    ed::material_combined::preview_trace(
+        "image_edit combined ensure uid=%u tile=%d now=%.3f",
+        ma->id.session_uid,
+        request.tile_number,
+        preview_now);
     ImBuf *combined = ed::material_combined::combined_preview_ensure(
         *bmain,
         *ma,
@@ -979,6 +989,11 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
   const bool gradient_drag = layered && ed::material_combined::gradient_interactive_is(*ma);
   if (gradient_drag && !ed::material_combined::gradient_preview_refresh_allow(*ma, preview_now)) {
     if (ImBuf *cached = BKE_paint_material_composite_cache_peek(*ma, pass, r_revision)) {
+      ed::material_combined::preview_trace(
+          "image_edit channel cached uid=%u pass=%d now=%.3f",
+          ma->id.session_uid,
+          pass,
+          preview_now);
       IMB_refImBuf(cached);
       return cached;
     }
@@ -1049,6 +1064,8 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
           previous_output);
     }
   }
+  ed::material_combined::preview_trace(
+      "image_edit channel ensure uid=%u pass=%d now=%.3f", ma->id.session_uid, pass, preview_now);
   ImBuf *ibuf = BKE_paint_material_composite_cache_ensure(
       *ma,
       pass,

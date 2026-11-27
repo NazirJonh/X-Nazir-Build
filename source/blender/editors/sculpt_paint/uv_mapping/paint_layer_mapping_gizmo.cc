@@ -81,6 +81,40 @@ enum class MappingHandle {
   MirrorCenter,
 };
 
+/** #MappingHandle for the preview trace. */
+const char *mapping_handle_name(const MappingHandle handle)
+{
+  switch (handle) {
+    case MappingHandle::None:
+      return "none";
+    case MappingHandle::Move:
+      return "move";
+    case MappingHandle::Rotate:
+      return "rotate";
+    case MappingHandle::Corner00:
+      return "corner00";
+    case MappingHandle::Corner10:
+      return "corner10";
+    case MappingHandle::Corner11:
+      return "corner11";
+    case MappingHandle::Corner01:
+      return "corner01";
+    case MappingHandle::EdgeMinX:
+      return "edge_min_x";
+    case MappingHandle::EdgeMaxX:
+      return "edge_max_x";
+    case MappingHandle::EdgeMinY:
+      return "edge_min_y";
+    case MappingHandle::EdgeMaxY:
+      return "edge_max_y";
+    case MappingHandle::Anchor:
+      return "anchor";
+    case MappingHandle::MirrorCenter:
+      return "mirror_center";
+  }
+  return "?";
+}
+
 struct LayerMappingGizmoGroup {
   wmGizmo *gz_cage = nullptr;
   wmGizmo *gz_anchor = nullptr;
@@ -369,6 +403,14 @@ void finish_drag(bContext *C, LayerMappingGizmoGroup &ggd, const bool commit)
   const bool same_target = resolved && target.material() == ggd.session_material &&
                            BLI_uuid_equal(target.marker(), ggd.session_marker);
 
+  ed::material_combined::preview_trace("gizmo finish_drag handle=%s commit=%d uid=%u same=%d",
+                                       mapping_handle_name(ggd.handle),
+                                       int(commit),
+                                       ggd.session_material != nullptr ?
+                                           ggd.session_material->id.session_uid :
+                                           0u,
+                                       int(same_target));
+
   Material *material = same_target ? target.material() : ggd.session_material;
   ARegion *region = CTX_wm_region(C);
 
@@ -461,8 +503,15 @@ void begin_drag(bContext *C,
   ggd.drag_pivot_uv = pivot_for_handle(ggd, xform);
 
   ggd.drag_active = true;
-  /* The composites shade at a capped octave while the drag lasts and refine on release. */
-  ed::material_combined::gradient_interactive_begin(*ggd.session_material, true);
+  /* The composites shade at a capped octave while the drag lasts and refine on release. This is
+   * not a Gradient-handle drag: keep redrawing every step, without the 3 s throttle. */
+  ed::material_combined::gradient_interactive_begin(*ggd.session_material, true, false);
+  ed::material_combined::preview_trace(
+      "gizmo begin_drag uid=%u handle=%s mouse=(%.1f,%.1f)",
+      ggd.session_material->id.session_uid,
+      mapping_handle_name(handle),
+      event->xy[0],
+      event->xy[1]);
   update_status_text(C, xform);
 }
 
@@ -479,8 +528,9 @@ void apply_drag(bContext *C,
     finish_drag(C, ggd, false);
     return;
   }
-  /* Re-armed on every step: the mark expires on its own. */
-  ed::material_combined::gradient_interactive_begin(*ggd.session_material, true);
+  /* Re-armed on every step: the mark expires on its own. No rebuild throttle: only the
+   * Gradient handles ask for that. */
+  ed::material_combined::gradient_interactive_begin(*ggd.session_material, true, false);
 
   const float precision = (event->modifier & KM_SHIFT) ? 0.1f : 1.0f;
   if (ggd.handle == MappingHandle::MirrorCenter) {
@@ -490,6 +540,13 @@ void apply_drag(bContext *C,
       finish_drag(C, ggd, false);
       return;
     }
+    ed::material_combined::preview_trace(
+        "gizmo apply_drag uid=%u handle=mirror_center mouse=(%d,%d) center=(%.4f,%.4f)",
+        ggd.session_material->id.session_uid,
+        event->xy[0],
+        event->xy[1],
+        center.x,
+        center.y);
     if (ScrArea *area = CTX_wm_area(C)) {
       char text[128];
       BLI_snprintf(text, sizeof(text), IFACE_("Mirror Center %.4f  %.4f"), center.x, center.y);
@@ -545,6 +602,19 @@ void apply_drag(bContext *C,
     finish_drag(C, ggd, false);
     return;
   }
+
+  ed::material_combined::preview_trace(
+      "gizmo apply_drag uid=%u handle=%s mouse=(%d,%d) offset=(%.4f,%.4f) scale=(%.4f,%.4f) "
+      "rotation=%.4f",
+      ggd.session_material->id.session_uid,
+      mapping_handle_name(ggd.handle),
+      event->xy[0],
+      event->xy[1],
+      next.offset.x,
+      next.offset.y,
+      next.scale.x,
+      next.scale.y,
+      next.rotation);
 
   update_status_text(C, next);
   notify_mapping_changed(C, target.material(), CTX_wm_region(C));

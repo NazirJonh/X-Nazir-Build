@@ -1818,9 +1818,19 @@ bool CombinedPasses::row_emit(CombinedTarget &t,
         }
         projection = &projection_frame;
         flags |= gpu_layer_projected;
-        flags &= ~(gpu_layer_mapped | gpu_layer_repeat_u | gpu_layer_repeat_v |
-                   gpu_layer_mirror_u | gpu_layer_mirror_v | gpu_layer_mirror_u_neg |
-                   gpu_layer_mirror_v_neg);
+        /* The MAPPED/REPEAT/MIRROR bits stay set: the projected read takes its wrap from the
+         * frame's own flags, while the coverage clip below still reads the row mapping's UV square
+         * (#gpu_layer_clips_coverage), the same factor the CPU acquisition folds in for a
+         * projected row. */
+      }
+      if (layer.mapping_clips_coverage) {
+        /* A Material row covers by its source's transparency, so the clip the row mapping applies
+         * has to reach the coverage: the layer pass multiplies the 0/1 inside factor in, as the
+         * CPU acquisition folds it (#PaintMaterialCompositeImageLayer::
+         * mapping_clips_coverage) and the generated graph does. A projected row keeps the same UV
+         * clip: the CPU fold builds the chain from the row's mapping with the transform-effect
+         * steps left out, and the layer pass mirrors that square. */
+        flags |= gpu_layer_clips_coverage;
       }
     }
     if (row_in_textures) {

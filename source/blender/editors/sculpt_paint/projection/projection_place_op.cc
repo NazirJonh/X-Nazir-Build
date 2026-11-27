@@ -117,9 +117,10 @@ static void place_cancel(bContext * /*C*/, wmOperator *op)
 static void place_notify(Material *ma)
 {
   /* The projected maps are baked per texel, so a full-resolution rebuild on every mouse step lags a
-   * 4K canvas: the previews shade at an octave until the gesture ends (see #place_free). Re-armed
+   * 4K canvas: the previews shade at an octave until the gesture ends (see #place_free). The
+   * octave stays, but the Gradient rebuild throttle does not apply: every step redraws. Re-armed
    * on every step, as the mark expires by itself. */
-  ed::material_combined::gradient_interactive_begin(*ma);
+  ed::material_combined::gradient_interactive_begin(*ma, false, false);
   /* The per-object bake of a projected CPU-effect row runs reduced until #place_free ends it. */
   if (G_MAIN != nullptr) {
     BKE_paint_layers_bake_drag_set(*G_MAIN, ma->id.session_uid, true);

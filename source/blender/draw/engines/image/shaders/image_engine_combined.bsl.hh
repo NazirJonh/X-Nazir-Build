@@ -28,6 +28,12 @@
 #define COMBINED_LAYER_HAS_MAP 2
 #define COMBINED_LAYER_ALPHA_COVERAGE 4
 #define COMBINED_LAYER_PREMULTIPLIED 8
+/* The row covers by its source's transparency, not by the alpha of its map: a clip of the map read
+ * (a clipping wrap or a transform step's clip) has to take the texel out of the coverage as well,
+ * the 0/1 factor the CPU acquisition folds in (#PaintMaterialCompositeImageLayer::
+ * mapping_clips_coverage) and the generated graph multiplies in. Without it a clipped texel lays
+ * its black at full coverage. */
+#define COMBINED_LAYER_CLIPS_COVERAGE 16
 #define COMBINED_LAYER_MAPPED 32
 #define COMBINED_LAYER_REPEAT_U 64
 #define COMBINED_LAYER_REPEAT_V 128
@@ -933,6 +939,10 @@ bool combined_input_step_apply(const int step_flags,
  * A tangent-space Normal map has its vectors follow the mapping, as in
  * `composite_resample_mapped`: flipped by the sign of the scale, rotated back, then flipped per axis by the
  * side of the fold center the canvas point reads from.
+ *
+ * \a r_clip_factor receives one inside the mapped unit square and zero where a clipping axis put
+ * the read outside it, the factor the row's coverage follows when it does not cover through the
+ * map's alpha (#COMBINED_LAYER_CLIPS_COVERAGE).
  */
 float4 sample_map(sampler2D tx,
                   float2 uv,
@@ -947,7 +957,8 @@ float4 sample_map(sampler2D tx,
                   const float4 input_step_1_a,
                   const float4 input_step_1_b,
                   const int input_step_flags,
-                  float lod)
+                  float lod,
+                  float &r_clip_factor)
 {
   float2 sample_uv = uv;
   float2 side = float2(1.0f);
@@ -1050,7 +1061,56 @@ float4 sample_map(sampler2D tx,
     }
     color.xyz = float3(0.5f * v.x + 0.5f, 0.5f * v.y + 0.5f, 0.5f * n.z + 0.5f);
   }
+  r_clip_factor = clipped ? 0.0f : 1.0f;
   return color;
+}
+
+/**
+ * The 0/1 factor of the row's own clipping UV square at the canvas \a uv, without reading a map:
+ * one inside the square and zero where a clipping axis put the point outside it. The coordinate
+ * math is the row-mapping tail of #sample_map, the transform effects' steps left out, so a
+ * projected row's coverage follows the same factor the CPU acquisition folds in for it
+ * (#COMBINED_LAYER_CLIPS_COVERAGE).
+ */
+float mapping_clip_factor(float2 uv,
+                          int flags,
+                          float2 mapping_offset,
+                          float2 mapping_scale,
+                          float2 mapping_rotation,
+                          float2 mapping_mirror_center)
+{
+  if ((flags & COMBINED_LAYER_MAPPED) == 0) {
+    return 1.0f;
+  }
+  float2 p = uv;
+  if ((flags & COMBINED_LAYER_MIRROR_U) != 0) {
+    const bool negative = (flags & COMBINED_LAYER_MIRROR_U_NEG) != 0;
+    p.x = combined_mirror_fold(p.x, mapping_mirror_center.x, negative);
+  }
+  if ((flags & COMBINED_LAYER_MIRROR_V) != 0) {
+    const bool negative = (flags & COMBINED_LAYER_MIRROR_V_NEG) != 0;
+    p.y = combined_mirror_fold(p.y, mapping_mirror_center.y, negative);
+  }
+  float2 rotated;
+  rotated.x = p.x * mapping_rotation.x - p.y * mapping_rotation.y;
+  rotated.y = p.x * mapping_rotation.y + p.y * mapping_rotation.x;
+  p = rotated * mapping_scale + mapping_offset;
+  const bool repeat_u = (flags & COMBINED_LAYER_REPEAT_U) != 0;
+  const bool repeat_v = (flags & COMBINED_LAYER_REPEAT_V) != 0;
+  if (repeat_u) {
+    p.x -= floor(p.x);
+  }
+  if (repeat_v) {
+    p.y -= floor(p.y);
+  }
+  bool clipped = false;
+  if (!repeat_u && (p.x < 0.0f || p.x >= 1.0f)) {
+    clipped = true;
+  }
+  if (!repeat_v && (p.y < 0.0f || p.y >= 1.0f)) {
+    clipped = true;
+  }
+  return clipped ? 0.0f : 1.0f;
 }
 
 /** \} */
@@ -1697,6 +1757,7 @@ void mask_comp([[resource_table]] MaskResources &srt,
                                 srt.input_step_flags);
       }
       else {
+        float clip_unused = 1.0f;
         c = sample_map(srt.mask_tx,
                        uv,
                        srt.flags,
@@ -1710,7 +1771,8 @@ void mask_comp([[resource_table]] MaskResources &srt,
                        srt.input_step_1_a,
                        srt.input_step_1_b,
                        srt.input_step_flags,
-                       srt.lod);
+                       srt.lod,
+                       clip_unused);
       }
       if (srt.mode == COMBINED_MASK_COV_SCALAR) {
         match = clamp(c.x, 0.0f, 1.0f);
@@ -1799,6 +1861,7 @@ void mask_comp([[resource_table]] MaskResources &srt,
                                   srt.input_step_flags);
         }
         else {
+          float clip_unused = 1.0f;
           c = sample_map(srt.mask_tx,
                          uv,
                          srt.flags,
@@ -1812,7 +1875,8 @@ void mask_comp([[resource_table]] MaskResources &srt,
                          srt.input_step_1_a,
                          srt.input_step_1_b,
                          srt.input_step_flags,
-                         srt.lod);
+                         srt.lod,
+                         clip_unused);
         }
         gray = clamp((c.x + c.y + c.z) / 3.0f, 0.0f, 1.0f);
         weight = clamp(c.w, 0.0f, 1.0f) * opacity;
@@ -1865,6 +1929,7 @@ void mask_comp([[resource_table]] MaskResources &srt,
                               srt.input_step_flags);
     }
     else {
+      float clip_unused = 1.0f;
       c = sample_map(srt.mask_tx,
                      uv,
                      srt.flags,
@@ -1878,7 +1943,8 @@ void mask_comp([[resource_table]] MaskResources &srt,
                      srt.input_step_1_a,
                      srt.input_step_1_b,
                      srt.input_step_flags,
-                     srt.lod);
+                     srt.lod,
+                     clip_unused);
     }
     float value = ((srt.flags & COMBINED_MASK_FROM_ALPHA) != 0) ? c.w : (c.x + c.y + c.z) / 3.0f;
     m *= (1.0f - srt.influence) + srt.influence * clamp(value, 0.0f, 1.0f);
@@ -2004,6 +2070,9 @@ void layer_comp([[resource_table]] LayerResources &srt,
                                                           imageLoad(srt.accum_img, texel);
   float4 top = srt.layer_color;
   float coverage = 1.0f;
+  /* One inside the row's mapped unit square, zero where a clipping axis put the read outside it.
+   * The coverage follows it when the row does not cover through its map's alpha. */
+  float clip_factor = 1.0f;
   if ((srt.flags & COMBINED_LAYER_ROW_USE) != 0) {
     /* The corrections have already worked on the row's colour and coverage. */
     top = imageLoad(srt.row_color_img, texel);
@@ -2059,6 +2128,17 @@ void layer_comp([[resource_table]] LayerResources &srt,
                                     srt.input_step_1_a,
                                     srt.input_step_1_b,
                                     srt.input_step_flags);
+        if ((srt.flags & COMBINED_LAYER_CLIPS_COVERAGE) != 0) {
+          /* The projected read clips its colour on the frame, but the row's coverage follows the
+           * row mapping's UV square as well, the factor the CPU acquisition folds in for a
+           * projected row. The transform effects' steps are left out, as they are on the CPU. */
+          clip_factor = mapping_clip_factor(uv,
+                                            srt.flags,
+                                            srt.mapping_offset,
+                                            srt.mapping_scale,
+                                            srt.mapping_rotation,
+                                            srt.mapping_mirror_center);
+        }
         if ((srt.flags & COMBINED_LAYER_TANGENT_NORMAL) != 0) {
           /* After the per-tap remap of the steps and before the DirectX flip below, the order the
            * CPU bake and its decode compose them in. */
@@ -2089,7 +2169,8 @@ void layer_comp([[resource_table]] LayerResources &srt,
                          srt.input_step_1_a,
                          srt.input_step_1_b,
                          srt.input_step_flags,
-                         srt.lod);
+                         srt.lod,
+                         clip_factor);
       }
       if ((srt.flags & COMBINED_LAYER_NORMAL_DIRECTX) != 0) {
         top.y = 1.0f - top.y;
@@ -2123,6 +2204,12 @@ void layer_comp([[resource_table]] LayerResources &srt,
         (srt.flags & COMBINED_LAYER_SLOT) == 0)
     {
       coverage = 0.0f;
+    }
+    if ((srt.flags & COMBINED_LAYER_CLIPS_COVERAGE) != 0) {
+      /* The row covers by its source's transparency, so the clip of the map read has to take the
+       * texel out of the coverage too -- otherwise the zero colour the read returns lays as opaque
+       * black. This is the same 0/1 factor the CPU acquisition folds in. */
+      coverage *= clip_factor;
     }
     if ((srt.flags & COMBINED_LAYER_ROW_STORE) != 0) {
       imageStore(srt.row_color_img, texel, top);
@@ -2303,6 +2390,7 @@ void correction_comp([[resource_table]] CorrectionResources &srt,
                               srt.input_step_flags);
     }
     else {
+      float clip_unused = 1.0f;
       c = sample_map(srt.correction_tx,
                      uv,
                      srt.flags,
@@ -2316,7 +2404,8 @@ void correction_comp([[resource_table]] CorrectionResources &srt,
                      srt.input_step_1_a,
                      srt.input_step_1_b,
                      srt.input_step_flags,
-                     srt.lod);
+                     srt.lod,
+                     clip_unused);
     }
   }
   /* A slice correction covers by the coverage its reader rendered with; its colour's alpha is
@@ -3849,10 +3938,11 @@ void shade_comp([[resource_table]] ShadeResources &srt,
   }
 
   /* `uv.y = 0` is the bottom row, so a larger row (larger `uv.y`) is a larger `+Y` (up), matching
-   * the CPU's `plane_extent.y`-scaled plane point. */
-  const float3 plane_point((uv.x - 0.5f) * srt.plane_extent.x,
-                           (uv.y - 0.5f) * srt.plane_extent.y,
-                           0.0f);
+   * the CPU's `plane_extent.y`-scaled plane point. Written as plain assignments: a multi-line
+   * `const float3` reading a resource struct is what the shader preprocessor truncates. */
+  float3 plane_point = float3(0.0f);
+  plane_point.x = (uv.x - 0.5f) * srt.plane_extent.x;
+  plane_point.y = (uv.y - 0.5f) * srt.plane_extent.y;
 
   /* The CPU shades the color channels from their float composites, which hold the straight
    * scene-linear evaluation unclamped -- so a stack that overshoots (Add, Exposure) keeps its HDR
@@ -3889,11 +3979,14 @@ void shade_comp([[resource_table]] ShadeResources &srt,
     const float4 light_column = srt.light_direction[i];
     const float3 to_light = light_column.xyz * light_column.w - plane_point;
     /* The threshold must match `combined_preview_light_degenerate_epsilon_sq` on the CPU: at or
-     * below it the texel sits on the light and the stored direction is used. */
-    const float3 light_dir = (light_column.w <= 0.0f ||
-                              dot(to_light, to_light) <= 1e-12f) ?
-                                 light_column.xyz :
-                                 normalize(to_light);
+     * below it the texel sits on the light and the stored direction is used. The fallback is a
+     * plain assignment rather than a multi-line conditional `const float3`. */
+    float3 light_dir = light_column.xyz;
+    if (light_column.w > 0.0f) {
+      if (dot(to_light, to_light) > 1e-12f) {
+        light_dir = normalize(to_light);
+      }
+    }
     float wrap = srt.light_specular[i].w;
     float n_dot_l_raw = dot(normal, light_dir);
 

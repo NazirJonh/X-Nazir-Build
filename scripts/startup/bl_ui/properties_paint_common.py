@@ -1564,14 +1564,20 @@ def _material_paint_grid_catalog_filter_domain(channel):
     return "{:s}{:s}".format(_MATERIAL_PAINT_GRID_CATALOG_FILTER_DOMAIN_PREFIX, channel.channel)
 
 
-def _material_paint_source_images():
+def _material_paint_source_images(context):
     """Images offerable as a channel source, in the same set the Image Browser's PAINT_SOURCE
     filter shows: auto-created paint canvases are write targets, never sources, and the render
     result / compositing buffers are not data-blocks a paint source can point at (both rejected
-    by #image_id_passes_paint_filter)."""
+    by #image_id_passes_paint_filter). The maps the paint layer stack owns hide the way the
+    browsers hide them -- a bake or row result carries no canvas flag to catch it above, and a
+    tiled or saved map is not a generated source either -- unless Show Internal Paint Maps is on.
+    """
+    reveal_internal = context.preferences.experimental.show_paint_layer_internal_maps
     return [
         image for image in bpy.data.images
-        if not image.is_paint_canvas and image.type not in {'RENDER_RESULT', 'COMPOSITING'}
+        if not image.is_paint_canvas
+        and (reveal_internal or not image.is_paint_layer_internal_map)
+        and image.type not in {'RENDER_RESULT', 'COMPOSITING'}
     ]
 
 
@@ -1591,8 +1597,8 @@ class PAINT_GT_mp_source(UIGrid):
     # Rebuilt once per redraw by get_item_count, which the grid always calls before get_item.
     _images = []
 
-    def get_item_count(self, _context, _data, _propname):
-        PAINT_GT_mp_source._images = _material_paint_source_images()
+    def get_item_count(self, context, _data, _propname):
+        PAINT_GT_mp_source._images = _material_paint_source_images(context)
         return len(PAINT_GT_mp_source._images)
 
     def get_item(self, _context, data, _propname, index):

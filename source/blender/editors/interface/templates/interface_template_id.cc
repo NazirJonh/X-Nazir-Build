@@ -165,8 +165,8 @@ static bool id_search_allows_id(const bContext &C,
   }
 
   /* The maps the paint layer stack generated and owns are reached through the layer UI alone: a
-   * template_ID browse menu is a way around that, so they stay hidden until Developer Extras is
-   * on. Unlike the paint-slot filter above, this holds for the unfiltered "All" mode too. */
+   * template_ID browse menu is a way around that, so they stay hidden until Show Internal Paint
+   * Maps is on. Unlike the paint-slot filter above, this holds for the unfiltered "All" mode too. */
   if (template_ui->idcode == ID_IM && !reveal_internal &&
       BKE_paint_layers_image_is_internal(*id_cast<Image *>(id)))
   {
@@ -223,8 +223,8 @@ static void id_search_cb(const bContext *C,
 {
   TemplateID *template_ui = static_cast<TemplateID *>(arg_template);
   Main &bmain = *CTX_data_main(C);
-  /* Developer Extras reveals the maps the stack owns; read it once per search. */
-  const bool reveal_internal = (U.flag & USER_DEVELOPER_UI) != 0;
+  /* Show Internal Paint Maps reveals the maps the stack owns; read it once per search. */
+  const bool reveal_internal = USER_EXPERIMENTAL_TEST(&U, show_paint_layer_internal_maps);
 
   ListBaseT<ID> *lb = template_ui->idlb;
   const int flag = RNA_property_flag(template_ui->prop);
@@ -257,7 +257,7 @@ static void id_search_cb_tagged(const bContext *C,
 {
   TemplateID *template_ui = static_cast<TemplateID *>(arg_template);
   Main &bmain = *CTX_data_main(C);
-  const bool reveal_internal = (U.flag & USER_DEVELOPER_UI) != 0;
+  const bool reveal_internal = USER_EXPERIMENTAL_TEST(&U, show_paint_layer_internal_maps);
   ListBaseT<ID> *lb = template_ui->idlb;
   const int flag = RNA_property_flag(template_ui->prop);
 

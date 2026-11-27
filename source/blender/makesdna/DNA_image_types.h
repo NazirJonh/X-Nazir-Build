@@ -72,8 +72,9 @@ enum eImage_Flag : int {
    * Map generated and owned by the paint layer stack: a layer channel map, a mask or correction
    * map, a merge or bake-coverage map, a row bake or the composite stand-in canvas. The user
    * reaches these through the layer UI alone, so they are hidden from the image browsers unless
-   * Developer Extras is on (see #BKE_paint_layers_image_is_internal). A map the user assigned (a
-   * dropped texture, an ID Map) never carries this bit.
+   * the Show Internal Paint Maps developer tool is on (see
+   * #BKE_paint_layers_image_is_internal). A map the user assigned (a dropped texture, an ID Map)
+   * never carries this bit.
    */
   IMA_PAINT_LAYER_INTERNAL_MAP = (1 << 12),
   IMA_DEINTERLACE = (1 << 13),

@@ -220,6 +220,15 @@ bool BKE_paint_ensure(ToolSettings *ts, Paint **r_paint);
  */
 void BKE_paint_init(Main *bmain, Scene *sce, PaintMode mode, bool ensure_brushes = true);
 void BKE_paint_free(Paint *paint);
+
+/**
+ * Free every tool binding of \a paint -- the main asset reference and every per-brush-type one --
+ * and leave the bindings empty. The single owner of that memory lives here, so callers that
+ * snapshot and restore the bindings (the tool system's #ToolBrushBindingsBackup) do not reimplement
+ * the release.
+ */
+void BKE_paint_tool_brush_bindings_clear(Paint &paint);
+
 /**
  * Called when copying scene settings, so even if 'src' and 'tar' are the same still do a
  * #id_us_plus(), rather than if we were copying between 2 existing scenes where a matching

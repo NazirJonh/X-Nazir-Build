@@ -2118,19 +2118,26 @@ void BKE_paint_init(Main *bmain, Scene *sce, PaintMode mode, const bool ensure_b
   }
 }
 
+void BKE_paint_tool_brush_bindings_clear(Paint &paint)
+{
+  MEM_delete(paint.tool_brush_bindings.main_brush_asset_reference);
+  paint.tool_brush_bindings.main_brush_asset_reference = nullptr;
+
+  /* Pop the head each time: it keeps the list head/last pointers valid while the payload is freed,
+   * so the list can be reused right after the clear (a restore rebuilds it). */
+  while (void *link = BLI_pophead(&paint.tool_brush_bindings.active_brush_per_brush_type)) {
+    NamedBrushAssetReference *brush_ref = static_cast<NamedBrushAssetReference *>(link);
+    MEM_delete(brush_ref->name);
+    MEM_delete(brush_ref->brush_asset_reference);
+    MEM_delete(brush_ref);
+  }
+}
+
 void BKE_paint_free(Paint *paint)
 {
   BKE_curvemapping_free(paint->cavity_curve);
   MEM_delete(paint->brush_asset_reference);
-  MEM_delete(paint->tool_brush_bindings.main_brush_asset_reference);
-
-  for (NamedBrushAssetReference &brush_ref :
-       paint->tool_brush_bindings.active_brush_per_brush_type.items_mutable())
-  {
-    MEM_delete(brush_ref.name);
-    MEM_delete(brush_ref.brush_asset_reference);
-    MEM_delete(&brush_ref);
-  }
+  BKE_paint_tool_brush_bindings_clear(*paint);
 
   BKE_curvemapping_free(paint->unified_paint_settings.curve_rand_hue);
   BKE_curvemapping_free(paint->unified_paint_settings.curve_rand_saturation);

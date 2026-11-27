@@ -1346,6 +1346,64 @@ TEST_F(OutlinerStackPaintLayersSourceTest, the_drop_catches_materials_and_words_
   target.place = StackMovePlace::Below;
   EXPECT_EQ(handler->drop_tooltip(ctx, &material->id, payload, "Wood", "Base", target),
             "Add Wood as a Material layer below Base");
+
+  /* A drop aimed at a row that already reads a material still makes a row of its own: beside the
+   * row is a new layer, not a re-point of that row. Changing a row's source is the slot's job. */
+  Material *other = BKE_material_add(bmain, "Other");
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Material;
+  params.source = other;
+  MaterialPaintLayer *material_row = BKE_paint_layers_add_with_policy(*material, params);
+  ASSERT_NE(material_row, nullptr);
+  target.anchor.row_id = material_row->marker;
+  target.place = StackMovePlace::Above;
+  /* Never null: an action that refuses writes its reason through this pointer. */
+  const char *hint = nullptr;
+  EXPECT_TRUE(handler->can_accept(ctx, material->id, payload, target, &hint));
+  EXPECT_EQ(hint, nullptr);
+  EXPECT_EQ(handler->drop_tooltip(ctx, &material->id, payload, "Wood", "Base", target),
+            "Add Wood as a Material layer above Base");
+  target.place = StackMovePlace::Below;
+  hint = nullptr;
+  EXPECT_TRUE(handler->can_accept(ctx, material->id, payload, target, &hint));
+  EXPECT_EQ(hint, nullptr);
+  EXPECT_EQ(handler->drop_tooltip(ctx, &material->id, payload, "Wood", "Base", target),
+            "Add Wood as a Material layer below Base");
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest,
+       a_drop_re_points_a_correction_that_reads_a_material)
+{
+  const StackDropHandler *handler = source().drop_handler();
+  ASSERT_NE(handler, nullptr);
+
+  MaterialPaintLayer *layer = add_layer("Base");
+  ASSERT_NE(layer, nullptr);
+  Material *source_material = BKE_material_add(bmain, "Source");
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::CorrectionMaterial;
+  params.anchor = layer;
+  params.source = source_material;
+  MaterialPaintLayer *correction = BKE_paint_layers_add_with_policy(*material, params);
+  ASSERT_NE(correction, nullptr);
+
+  Material *dragged = BKE_material_add(bmain, "Dragged");
+  StackReadContext ctx;
+  ctx.bmain = bmain;
+  StackDropPayload payload;
+  payload.id_type = ID_MA;
+  payload.id_uid = dragged->id.session_uid;
+
+  StackDropTarget target;
+  target.anchor.row_id = correction->marker;
+  target.place = StackMovePlace::Above;
+  /* A correction has no source slot in the Layer panel, so the drop stays its re-point. */
+  const char *hint = nullptr;
+  EXPECT_TRUE(handler->can_accept(ctx, material->id, payload, target, &hint));
+  EXPECT_EQ(hint, nullptr);
+  EXPECT_EQ(
+      handler->drop_tooltip(ctx, &material->id, payload, "Dragged", "Source", target),
+      "Make Dragged the source of Source");
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest,

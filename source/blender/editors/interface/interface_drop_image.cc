@@ -808,10 +808,12 @@ static Material *resolve_drag_material(bContext *C, const wmDrag &drag)
 }
 
 /**
- * Drop target for material source slots: the Brush Material tab's source and the Shape tools'
- * own MATERIAL rows. Brush slots go through #paint_slot_assign_material_to_brush (so the brush is
- * made local and its preset snapshot follows); Shape slots are written directly to their
- * #PaintShapeTexture property, as the Shape keeps its own source and has no brush to touch.
+ * Drop target for material source slots: the Brush Material tab's source, the Shape tools' own
+ * MATERIAL rows and a Paint Layers row's source. Brush slots go through
+ * #paint_slot_assign_material_to_brush (so the brush is made local and its preset snapshot
+ * follows); Shape slots are written directly to their #PaintShapeTexture property, as the Shape
+ * keeps its own source and has no brush to touch; a layer's source goes through its own RNA
+ * setter, which refuses the owner itself and cycles.
  */
 class MaterialSlotDropTarget : public ui::DropTargetInterface {
   PaintSlotTarget target_;
@@ -857,6 +859,10 @@ class MaterialSlotDropTarget : public ui::DropTargetInterface {
     }
     if (target_.owner == PaintSlotOwner::CurvePatchSlot) {
       return fmt::format(fmt::runtime(TIP_("Use material \"{}\" as the slot's source")),
+                         material_name);
+    }
+    if (target_.owner == PaintSlotOwner::LayerSource) {
+      return fmt::format(fmt::runtime(TIP_("Make material \"{}\" the layer's source")),
                          material_name);
     }
     return fmt::format(fmt::runtime(TIP_("Assign material \"{}\" to brush")), material_name);
@@ -907,6 +913,21 @@ class MaterialSlotDropTarget : public ui::DropTargetInterface {
       RNA_enum_set(&ptr, "kind", BRUSH_CURVE_PATCH_SLOT_MATERIAL);
       return paint_slot_assign_id_to_prop(
           *C, ptr, target_.prop, ma->id, "Assign Material to Curve Patch Slot");
+    }
+
+    if (target_.owner == PaintSlotOwner::LayerSource) {
+      /* An imported asset is not judged until it is here, so the same refusals the source slot's
+       * browser applies are asked once more before the assignment. */
+      const char *disabled_hint = nullptr;
+      if (!paint_slot_material_acceptable(target_, *ma, &disabled_hint)) {
+        BKE_report(CTX_wm_reports(C), RPT_ERROR, disabled_hint);
+        return false;
+      }
+      /* The pointer's RNA setter is #BKE_paint_layers_set_material: it refuses the owner itself
+       * and cycles, and tags the material for the bake. */
+      PointerRNA ptr = target_.ptr;
+      return paint_slot_assign_id_to_prop(
+          *C, ptr, target_.prop, ma->id, "Assign Material to Layer");
     }
 
     return paint_slot_assign_material_to_brush(*C, *ma);

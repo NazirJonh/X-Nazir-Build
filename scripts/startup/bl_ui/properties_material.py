@@ -2491,6 +2491,10 @@ class LAYER_MATERIAL_PT_user_settings(LayerMaterialButtonsPanel, Panel):
         # material) and stays in Preferences > Editing > Miscellaneous. It is shown here as well
         # because it is looked for in this panel; one RNA property may appear in both places.
         layout.prop(context.preferences.view, "paint_layers_commit_patch_on_switch")
+        # Likewise a User Preference (which images the browsers offer), not a per-material compute
+        # setting: it reveals the maps the stacks own, and is repeated here because it is looked
+        # for beside the layers. The Advanced panel's settings change how a stack is computed.
+        layout.prop(context.preferences.experimental, "show_paint_layer_internal_maps")
 
 
 class LAYER_MATERIAL_PT_active_channel(LayerMaterialButtonsPanel, Panel):

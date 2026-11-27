@@ -560,7 +560,10 @@ struct ImageGridFilteredItem {
 
 /**
  * True when \a image can be assigned as a brush texture from the grid.
- * Excludes render results, composites, viewer nodes, and generated images.
+ * Excludes render results, composites, viewer nodes, and generated images. A map the paint layer
+ * stack owns is excluded too -- also when it is tiled or saved and no longer generated, which the
+ * generated check does not catch -- unless Show Internal Paint Maps is on. A generated map of the
+ * stack stays excluded either way.
  */
 bool image_grid_is_assignable_texture(const Image &image);
 

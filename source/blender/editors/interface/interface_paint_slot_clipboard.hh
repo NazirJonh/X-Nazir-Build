@@ -47,6 +47,12 @@ enum class PaintSlotOwner {
    * assignment, and the owner brush decides editability like any texture slot of the list.
    */
   CurvePatchSlot,
+  /**
+   * A #MaterialPaintLayer.material: the source a Material row, or a correction/mask item that reads
+   * a material, takes. Assigned through the pointer's own RNA setter, which refuses the owner
+   * itself and cycles.
+   */
+  LayerSource,
 };
 
 /** The paint slot a button draws: the RNA property it assigns and the owner of that property. */
@@ -61,7 +67,8 @@ struct PaintSlotTarget {
 
 /**
  * The owner of the material slot \a ptr/\a prop_name names, or nothing when it is not one of the
- * paint slots' own: a brush's PBR paint source, or a Shape part's own source.
+ * paint slots' own: a brush's PBR paint source, a Shape part's own source, a Curve Patch slot, or a
+ * Paint Layers row's source.
  */
 std::optional<PaintSlotOwner> paint_slot_material_owner(const PointerRNA &ptr,
                                                         StringRefNull prop_name);

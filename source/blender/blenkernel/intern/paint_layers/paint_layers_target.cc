@@ -2014,7 +2014,7 @@ MaterialPaintLayer *BKE_paint_layers_corrections_bake(Main &bmain,
 /** \name Internal maps
  *
  * What the browsers ask about the maps the stack owns: the predicate that names them and the walk
- * that marks the maps older files predate the flag for. Developer Extras reveals them.
+ * that marks the maps older files predate the flag for. Show Internal Paint Maps reveals them.
  * \{ */
 
 bool BKE_paint_layers_image_is_internal(const Image &image)

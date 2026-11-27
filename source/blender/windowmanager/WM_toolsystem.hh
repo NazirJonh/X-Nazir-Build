@@ -7,6 +7,9 @@
  * \ingroup wm
  */
 
+#include <memory>
+#include <optional>
+
 #include "BKE_paint_types.hh"
 
 namespace blender {
@@ -84,11 +87,44 @@ void WM_toolsystem_brush_bindings_update_from_active(bContext *C, Paint *paint);
  * For a brush restore that happens where no valid context exists (teardown paths of a session that
  * swapped the brush through the tool system): the binding must follow the restored hand, or the
  * next tool refresh -- an undo, a tool round-trip -- would put the swapped-out brush back. Only the
- * main binding is written: the per-type bindings need the active tool, which a context-less caller
- * cannot ask for (Sculpt Mode's Paint tool, where the Curve Patch tool runs, binds through the main
- * binding).
+ * main binding is written; a tool that is limited to a brush type (Sculpt Mode's Paint tool, where
+ * the Curve Patch tool runs, is one) reads its per-type binding instead, which is what
+ * #ToolBrushBindingsBackup restores.
  */
 void WM_toolsystem_brush_binding_main_update_from_active(Paint *paint);
+
+/**
+ * An opaque snapshot of a #Paint's tool brush bindings: the main binding and every per-brush-type
+ * binding.
+ *
+ * For a transient brush switch that must not become the tool system's remembered brush (a Curve
+ * Patch session activates a private snapshot through #WM_toolsystem_activate_brush_and_tool). That
+ * call records the snapshot in the binding of its brush type, so restoring only the brush pointer
+ * leaves the private snapshot behind: the next mode entry or tool refresh reads the binding and
+ * puts the snapshot back in the hand. Switching between two such sessions would also carry the
+ * first snapshot into the second one's "previous brush".
+ */
+class ToolBrushBindingsBackup {
+ public:
+  ToolBrushBindingsBackup();
+  ~ToolBrushBindingsBackup();
+  ToolBrushBindingsBackup(const ToolBrushBindingsBackup &) = delete;
+  ToolBrushBindingsBackup &operator=(const ToolBrushBindingsBackup &) = delete;
+
+  /** Capture the bindings \a paint holds now. */
+  static std::unique_ptr<ToolBrushBindingsBackup> capture(const Paint &paint);
+
+  /**
+   * Put the snapshot back into \a paint, replacing every binding it holds now. The snapshot is the
+   * whole state at capture time: a binding added afterwards is dropped, which is what a transient
+   * switch that must leave no trace wants. A caller that needs to keep those has to merge instead.
+   */
+  void restore(Paint &paint) const;
+
+ private:
+  struct Data;
+  std::unique_ptr<Data> data_;
+};
 
 /**
  * Get an asset reference to the last activated brush asset of a specific brush type.

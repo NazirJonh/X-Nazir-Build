@@ -27,6 +27,7 @@
 #include "BKE_library.hh"
 #include "BKE_main.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_asset.hh"
 #include "BKE_report.hh"
 #include "BKE_wm_runtime.hh"
 
@@ -86,6 +87,15 @@ std::optional<PaintSlotOwner> paint_slot_material_owner(const PointerRNA &ptr,
     }
     return PaintSlotOwner::CurvePatchSlot;
   }
+  if (RNA_struct_is_a(ptr.type, RNA_MaterialPaintLayer)) {
+    /* The row's source slot. The Layer panel draws it for a Material row; a correction or mask
+     * item that reads a material edits the same property in the source-surface panel. Only a row
+     * of another source draws no such slot, so the property alone names the owner. */
+    if (prop_name != "material") {
+      return std::nullopt;
+    }
+    return PaintSlotOwner::LayerSource;
+  }
   return std::nullopt;
 }
 
@@ -106,6 +116,50 @@ bool paint_slot_material_acceptable(const PaintSlotTarget &target,
       *r_hint = TIP_("Layer Material must be a layered material");
     }
     return false;
+  }
+  if (target.owner == PaintSlotOwner::LayerSource) {
+    /* The setter refuses a row of another source (#BKE_paint_layers_set_material); say so on the
+     * gesture too, so an accepted drop is never one that silently assigns nothing. */
+    const MaterialPaintLayer *row = static_cast<const MaterialPaintLayer *>(target.ptr.data);
+    if (row == nullptr || row->source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
+      if (r_hint != nullptr) {
+        *r_hint = TIP_("Only a row that reads a material takes a source");
+      }
+      return false;
+    }
+    const Material *owner = nullptr;
+    if (target.ptr.owner_id != nullptr && GS(target.ptr.owner_id->name) == ID_MA) {
+      owner = id_cast<const Material *>(target.ptr.owner_id);
+    }
+    if (owner != nullptr && !paint_slot_owner_editable(target.ptr.owner_id)) {
+      if (r_hint != nullptr) {
+        *r_hint = TIP_("The layered material is linked or overridden");
+      }
+      return false;
+    }
+    /* A Smart asset is a saved stack, not a material a row can read. */
+    if (BKE_paint_layers_asset_type_get(material) != PaintLayerAssetType::None) {
+      if (r_hint != nullptr) {
+        *r_hint = TIP_("That material is a Smart asset; drop it on a layer to insert it");
+      }
+      return false;
+    }
+    if (owner != nullptr) {
+      switch (BKE_paint_layers_material_source_issue(*owner, material)) {
+        case PaintLayerMaterialSourceIssue::None:
+          break;
+        case PaintLayerMaterialSourceIssue::Self:
+          if (r_hint != nullptr) {
+            *r_hint = TIP_("A layered material cannot read itself");
+          }
+          return false;
+        case PaintLayerMaterialSourceIssue::Cycle:
+          if (r_hint != nullptr) {
+            *r_hint = TIP_("That material already reads this one; it would form a cycle");
+          }
+          return false;
+      }
+    }
   }
   return true;
 }

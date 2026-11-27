@@ -17,6 +17,9 @@
  */
 
 #include <cstring>
+#include <memory>
+#include <string>
+#include <utility>
 
 #include "CLG_log.h"
 
@@ -26,6 +29,7 @@
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_utildefines.h"
+#include "BLI_vector.hh"
 
 #include "DNA_ID.h"
 #include "DNA_brush_types.h"
@@ -471,6 +475,59 @@ void WM_toolsystem_brush_binding_main_update_from_active(Paint *paint)
   }
   toolsystem_main_brush_binding_update_from_active(paint);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Brush bindings backup
+ * \{ */
+
+struct ToolBrushBindingsBackup::Data {
+  /** The main binding, when the paint had one. */
+  std::optional<AssetWeakReference> main_brush;
+  /** Every per-brush-type binding, in list order. */
+  Vector<std::pair<std::string, AssetWeakReference>> per_brush_type;
+};
+
+ToolBrushBindingsBackup::ToolBrushBindingsBackup() = default;
+ToolBrushBindingsBackup::~ToolBrushBindingsBackup() = default;
+
+std::unique_ptr<ToolBrushBindingsBackup> ToolBrushBindingsBackup::capture(const Paint &paint)
+{
+  auto backup = std::make_unique<ToolBrushBindingsBackup>();
+  backup->data_ = std::make_unique<Data>();
+
+  if (paint.tool_brush_bindings.main_brush_asset_reference != nullptr) {
+    backup->data_->main_brush = *paint.tool_brush_bindings.main_brush_asset_reference;
+  }
+  for (const NamedBrushAssetReference &brush_ref :
+       paint.tool_brush_bindings.active_brush_per_brush_type)
+  {
+    /* A binding without a name or a reference remembers nothing; there is nothing to restore. */
+    if (brush_ref.name == nullptr || brush_ref.brush_asset_reference == nullptr) {
+      continue;
+    }
+    backup->data_->per_brush_type.append_as(std::string(brush_ref.name),
+                                            *brush_ref.brush_asset_reference);
+  }
+  return backup;
+}
+
+void ToolBrushBindingsBackup::restore(Paint &paint) const
+{
+  BKE_paint_tool_brush_bindings_clear(paint);
+
+  if (this->data_->main_brush.has_value()) {
+    paint.tool_brush_bindings.main_brush_asset_reference = MEM_new<AssetWeakReference>(
+        __func__, *this->data_->main_brush);
+  }
+  for (const auto &[name, reference] : this->data_->per_brush_type) {
+    NamedBrushAssetReference *brush_ref = MEM_new<NamedBrushAssetReference>(__func__);
+    brush_ref->name = BLI_strdup(name.c_str());
+    brush_ref->brush_asset_reference = MEM_new<AssetWeakReference>(__func__, reference);
+    BLI_addtail(&paint.tool_brush_bindings.active_brush_per_brush_type, brush_ref);
+  }
+}
+
+/** \} */
 
 static void toolsystem_brush_activate_from_toolref_for_object_particle(const Main *bmain,
                                                                        const WorkSpace *workspace,

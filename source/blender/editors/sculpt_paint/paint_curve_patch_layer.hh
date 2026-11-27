@@ -48,6 +48,7 @@ struct Scene;
 struct ViewContext;
 struct wmOperatorType;
 struct wmWindowManager;
+class ToolBrushBindingsBackup;
 
 namespace bke {
 class CurvesGeometry;
@@ -114,9 +115,17 @@ float4x4 curve_patch_painted_to_curve_space(const Object &curve_object,
 
 /**
  * RAII: the single path that restores the previous brush on every exit (Apply / Discard / Failed /
- * object death). Holds the Scene and Paint it switched, and the outgoing brush; restores through
- * the same user-facing switch (#BKE_paint_brush_set_synced, which snapshots the PBR preset of
- * whatever brush is outgoing at that moment) on destruction unless #release was called.
+ * object death). Holds the Scene and Paint it switched, the outgoing brush and the tool's brush
+ * bindings; restores through the same user-facing switch (#BKE_paint_brush_set_synced, which
+ * snapshots the PBR preset of whatever brush is outgoing at that moment) on destruction unless
+ * #release was called.
+ *
+ * The bindings have to come back with the brush: the entry records the row's private snapshot in
+ * them, and the next mode entry or tool refresh reads them instead of the brush pointer.
+ *
+ * With Material canvas brush sync on, the entry also pushes the row's snapshot into the paired
+ * Paint (Sculpt <-> Image), so that one is captured and restored the same way: leaving it would
+ * keep the session's brush in the other editor after the restore.
  *
  * A layer session owns one, so the restore survives every way the session can end -- including the
  * confirm dialog's teardown / relaunch round-trip, which destroys the modal's operator data while
@@ -124,7 +133,6 @@ float4x4 curve_patch_painted_to_curve_space(const Object &curve_object,
  */
 class PrevBrushRestore {
  public:
-  PrevBrushRestore() = default;
   /** Capture \a paint's outgoing brush, to be restored on destruction. */
   PrevBrushRestore(Scene &scene, Paint &paint);
   PrevBrushRestore(const PrevBrushRestore &) = delete;
@@ -140,6 +148,23 @@ class PrevBrushRestore {
   Scene *scene_ = nullptr;
   Paint *paint_ = nullptr;
   Brush *prev_brush_ = nullptr;
+  /**
+   * The tool's brush bindings as they were before the session switched the brush. The entry goes
+   * through the tool system, which records the row's private snapshot in the binding of the
+   * snapshot's brush type (the Sculpt Paint tool has its own "PAINT" binding); restoring only the
+   * brush pointer would leave that binding behind and the next mode entry or tool refresh would
+   * put the snapshot back in the hand -- and a switch between two effects would carry the first
+   * snapshot into the second one's restored brush.
+   */
+  std::unique_ptr<ToolBrushBindingsBackup> bindings_backup_;
+  /**
+   * The Paint Material canvas brush sync pairs with \a paint_ (Sculpt <-> Image), when sync is on.
+   * The entry pushes the row's snapshot into it too, so its brush and bindings are captured here
+   * and restored as well. Null when there is no pair.
+   */
+  Paint *paired_paint_ = nullptr;
+  Brush *prev_paired_brush_ = nullptr;
+  std::unique_ptr<ToolBrushBindingsBackup> paired_bindings_backup_;
   bool released_ = false;
 };
 

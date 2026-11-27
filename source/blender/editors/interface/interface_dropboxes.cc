@@ -131,8 +131,25 @@ static void drop_name_copy(bContext *C, wmDrag *drag, wmDropBox *drop)
 /** \name Material Drag/Drop Callbacks
  * \{ */
 
-static bool drop_material_poll(bContext *C, wmDrag *drag, const wmEvent * /*event*/)
+/**
+ * Whether a button under the cursor takes the drop itself. The Properties region carries the
+ * object's active `material_slot` in its context, so without this the material drop would match
+ * anywhere in the Material tab and assign to the object even over a slot of its own (the Paint
+ * Layers row's source, a brush's paint source, ...). The button's target either assigns the
+ * material to its slot or refuses it; falling back to the object's slot would be a different
+ * gesture than the one the user aimed at.
+ */
+static bool drop_material_button_yields_to_target(bContext *C, const wmEvent *event)
 {
+  const ARegion *region = CTX_wm_region(C);
+  return region != nullptr && region_but_find_drop_target_at(C, region, event) != nullptr;
+}
+
+static bool drop_material_poll(bContext *C, wmDrag *drag, const wmEvent *event)
+{
+  if (!WM_drag_is_ID_type(drag, ID_MA)) {
+    return false;
+  }
   PointerRNA mat_slot = CTX_data_pointer_get_type(C, "material_slot", RNA_MaterialSlot);
   if (RNA_pointer_is_null(&mat_slot)) {
     return false;
@@ -142,10 +159,13 @@ static bool drop_material_poll(bContext *C, wmDrag *drag, const wmEvent * /*even
     return false;
   }
 
+  if (drop_material_button_yields_to_target(C, event)) {
+    return false;
+  }
+
   Object *ob = static_cast<Object *>(ob_ptr.data);
 
-  return WM_drag_is_ID_type(drag, ID_MA) && ID_IS_EDITABLE(&ob->id) &&
-         !ID_IS_OVERRIDE_LIBRARY(&ob->id);
+  return ID_IS_EDITABLE(&ob->id) && !ID_IS_OVERRIDE_LIBRARY(&ob->id);
 }
 
 static void drop_material_copy(bContext *C, wmDrag *drag, wmDropBox *drop)

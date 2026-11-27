@@ -9060,6 +9060,15 @@ static void rna_def_userdef_experimental(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop, "Paint Debug", "Enable paint & sculpt debugging options for developers");
   RNA_def_property_update(prop, 0, "rna_userdef_update");
+
+  prop = RNA_def_property(srna, "show_paint_layer_internal_maps", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "show_paint_layer_internal_maps", 1);
+  RNA_def_property_ui_text(
+      prop,
+      "Show Internal Paint Maps",
+      "Display the maps the paint layer stacks generated and own in image browsers and data-block "
+      "searches, instead of keeping them reachable through the layer UI alone");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
 }
 
 static void rna_def_userdef_build_features(BlenderRNA *brna)

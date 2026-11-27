@@ -944,16 +944,17 @@ class MaterialLayerAction final : public StackDropAction {
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name Built-in Action: Material → the Source of a Material Row
+/** \name Built-in Action: Material → the Source of an Attached Item
  *
- * A material dropped onto a row that reads a material re-points that row: another source, the same
- * row, its blend, opacity and mask untouched. The scope and the marker stay as they are; a marker
- * that names nothing in the new source is let go by #BKE_paint_layers_set_material. Beside a row,
- * or onto a row that is not a Material row, the material becomes a layer of its own, as
+ * A material dropped onto a correction or mask item that reads a material re-points that item:
+ * another source, the same item, its blend, opacity and mask untouched. The scope and the marker
+ * stay as they are; a marker that names nothing in the new source is let go by
+ * #BKE_paint_layers_set_material. A stack row is not this action's: the Layer panel's source slot
+ * changes it, and a material dropped beside the row becomes a layer of its own, as
  * #MaterialLayerAction does.
  * \{ */
 
-class MaterialToSourceRowAction final : public StackDropAction {
+class MaterialToAttachedSourceAction final : public StackDropAction {
  public:
   int priority() const override
   {
@@ -979,6 +980,13 @@ class MaterialToSourceRowAction final : public StackDropAction {
     const MaterialPaintLayer *row = target_row(*material, target);
     if (row == nullptr || row->source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
       /* Not this action's reading: the drop is left to #MaterialLayerAction, which adds a row. */
+      return false;
+    }
+    /* A stack row's source has its own slot in the Layer panel; only an attached item -- a
+     * correction or a mask item -- has no such control, so the drop is its only re-point. */
+    if (row->role != MA_PAINT_LAYER_ROLE_EFFECT &&
+        row->role != MA_PAINT_LAYER_ROLE_MASK_ITEM)
+    {
       return false;
     }
     const Material *candidate = drop_payload_material(ctx.bmain, payload);
@@ -1423,7 +1431,7 @@ std::unique_ptr<StackDropHandler> paint_layers_drop_handler_create()
   handler->add_action(std::make_unique<ImageToFillLayerAction>());
   handler->add_action(std::make_unique<ImageToChannelAction>());
   handler->add_action(std::make_unique<SmartMaterialAssetAction>());
-  handler->add_action(std::make_unique<MaterialToSourceRowAction>());
+  handler->add_action(std::make_unique<MaterialToAttachedSourceAction>());
   handler->add_action(std::make_unique<MaterialLayerAction>());
   /* Last: only a file no built-in action takes reaches the extensions. */
   handler->add_action(std::make_unique<FileHandlerDropAction>());

@@ -118,8 +118,19 @@ namespace blender::ed::sculpt_paint {
  * \{ */
 
 PrevBrushRestore::PrevBrushRestore(Scene &scene, Paint &paint)
-    : scene_(&scene), paint_(&paint), prev_brush_(BKE_paint_brush(&paint))
+    : scene_(&scene),
+      paint_(&paint),
+      prev_brush_(BKE_paint_brush(&paint)),
+      bindings_backup_(ToolBrushBindingsBackup::capture(paint))
 {
+  /* With Material canvas brush sync on, the entry's #WM_toolsystem_activate_brush_and_tool pushes
+   * the row's snapshot into the paired Paint and re-points its main binding. Capture it before that
+   * happens, so the session cannot leave its private brush in the other editor. */
+  this->paired_paint_ = BKE_paint_material_sync_target_get(this->scene_, this->paint_);
+  if (this->paired_paint_ != nullptr) {
+    this->prev_paired_brush_ = BKE_paint_brush(this->paired_paint_);
+    this->paired_bindings_backup_ = ToolBrushBindingsBackup::capture(*this->paired_paint_);
+  }
 }
 
 PrevBrushRestore::~PrevBrushRestore()
@@ -130,14 +141,28 @@ PrevBrushRestore::~PrevBrushRestore()
   /* The same user-facing switch the entry used, so the outgoing PBR state (here: the snapshot's)
    * is snapshotted before the previous brush comes back with its own. */
   BKE_paint_brush_set_synced(*this->scene_, *this->paint_, this->prev_brush_);
-  /* The entry went through the tool system, which recorded the snapshot as its tool's brush; a
-   * restore that only swaps the pointer would leave that binding behind, and the next tool refresh
-   * (an undo step, a tool round-trip, a mode re-entry) would silently put the snapshot back in the
-   * hand after the restore had already run -- the "the wrong brush stays active" reports. The
-   * restored brush IS the active one now, so the binding follows the hand again. Only the main
-   * binding is written: no context exists here for the per-type ones (and Sculpt Mode's Paint tool,
-   * where the session's tool runs, binds through the main binding). */
+  /* The entry went through the tool system, which recorded the snapshot in the brush binding of
+   * the snapshot's type -- a per-type one for the tools that are limited to a brush type (Sculpt
+   * Mode's Paint tool is), the main one otherwise. A pointer-only restore would leave that binding
+   * behind, and the next tool refresh (an undo step, a tool round-trip, a mode re-entry) would
+   * silently put the snapshot back in the hand after the restore had already run -- the "the wrong
+   * brush stays active" reports. Restoring the whole bindings snapshot also keeps one effect's
+   * snapshot out of the next effect's restored hand when the user switches between them. */
+  this->bindings_backup_->restore(*this->paint_);
+  /* The restored brush IS the active one now, so the main binding follows the hand again even
+   * when the paint had no main binding before the session. Only the main binding is written here:
+   * the per-type ones came back from the snapshot above. */
   WM_toolsystem_brush_binding_main_update_from_active(this->paint_);
+
+  /* Material canvas brush sync also moved the paired Paint (Sculpt <-> Image) to the snapshot. Put
+   * its brush and bindings back the same way, or its next tool refresh would restore the session's
+   * brush in the other editor. This is a no-op when sync did not run (mask target, non-material
+   * brush, sync off): the paired brush then equals the captured one. */
+  if (this->paired_paint_ != nullptr) {
+    BKE_paint_brush_set_synced(*this->scene_, *this->paired_paint_, this->prev_paired_brush_);
+    this->paired_bindings_backup_->restore(*this->paired_paint_);
+    WM_toolsystem_brush_binding_main_update_from_active(this->paired_paint_);
+  }
 }
 
 bool PrevBrushRestore::activate(Brush &brush)

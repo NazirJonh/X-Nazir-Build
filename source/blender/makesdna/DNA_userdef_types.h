@@ -904,6 +904,11 @@ struct UserDef_Experimental {
   char write_legacy_blend_file_format = 0;
   char no_data_block_packing = 0;
   char use_paint_debug = 0;
+  /**
+   * Show the maps the paint layer stacks generated and own in image browsers and data-block
+   * searches. Independent of Developer Extras; checked with #USER_EXPERIMENTAL_TEST.
+   */
+  char show_paint_layer_internal_maps = 0;
   char SANITIZE_AFTER_HERE = {};
   /* The following options are automatically sanitized (set to 0)
    * when the release cycle is not alpha. */
@@ -918,7 +923,7 @@ struct UserDef_Experimental {
    * actually remove this flag is tracked in #158903. */
   char use_remote_asset_libraries = 1;
   char use_collection_importer = 0;
-  char _pad[4] = {};
+  char _pad[3] = {};
 };
 
 #define USER_EXPERIMENTAL_TEST(userdef, member) (((userdef)->experimental).member)

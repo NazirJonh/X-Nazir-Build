@@ -3976,8 +3976,8 @@ void BKE_paint_layers_row_result_job_free(PaintLayersRowResultJob &job);
  *
  * The maps the stack mints for a row (its painted channels, a bake, a merge, a mask whose kind
  * paints its own map) are the stack's own: the user reaches them through the layer UI alone, so
- * the image browsers hide them unless Developer Extras is on. A map the user assigned -- a dropped
- * texture, an ID Map a filter samples -- is never internal.
+ * the image browsers hide them unless the Show Internal Paint Maps developer tool is on. A map the
+ * user assigned -- a dropped texture, an ID Map a filter samples -- is never internal.
  * \{ */
 
 /**

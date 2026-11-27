@@ -32,6 +32,7 @@
 #include "BKE_idtype.hh"
 #include "BKE_main.hh"
 #include "BKE_name_matching.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_preferences.h"
 
 #include "MEM_guardedalloc.h"
@@ -321,6 +322,15 @@ bool image_grid_is_assignable_texture(const Image &image)
     return false;
   }
   if (ELEM(image.type, IMA_TYPE_R_RESULT, IMA_TYPE_COMPOSITE)) {
+    return false;
+  }
+  /* The maps the paint layer stack minted and owns are reached through the layer UI alone, so the
+   * ID browsers hide them unless Show Internal Paint Maps is on. Ownership is the stack's own flag,
+   * not the source: a tiled map is not GENERATED and saving one turns it file-backed, and both
+   * would otherwise slip through the checks above into every brush texture grid. */
+  if (BKE_paint_layers_image_is_internal(image) &&
+      !USER_EXPERIMENTAL_TEST(&U, show_paint_layer_internal_maps))
+  {
     return false;
   }
   return true;

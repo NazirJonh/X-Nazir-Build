@@ -170,6 +170,22 @@ TEST_F(CombinedCacheTest, lighting_change_forces_a_full_rebuild)
   EXPECT_EQ(stats.pixels_processed, int64_t(inputs_.width) * inputs_.height);
 }
 
+TEST_F(CombinedCacheTest, distance_change_forces_a_full_rebuild)
+{
+  uint64_t revision_a = 0;
+  uint64_t revision_b = 0;
+  this->ensure(make_request(), &revision_a);
+  /* Only the distance moves; the direction and every other field stay put. */
+  CombinedPreviewLighting moved = lighting_;
+  moved.lights[0].distance = lighting_.lights[0].distance + 0.25f;
+  ASSERT_NE(moved.hash(), lighting_.hash());
+  lighting_ = moved;
+  CombinedEvalStats stats;
+  this->ensure(make_request(), &revision_b, &stats);
+  EXPECT_NE(revision_a, revision_b);
+  EXPECT_EQ(stats.pixels_processed, int64_t(inputs_.width) * inputs_.height);
+}
+
 TEST_F(CombinedCacheTest, changed_region_rebuilds_only_that_rectangle)
 {
   this->ensure(make_request());

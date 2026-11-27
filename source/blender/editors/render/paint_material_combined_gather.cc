@@ -641,6 +641,10 @@ ImBuf *combined_preview_ensure(Main &bmain,
   CombinedInputs inputs;
   inputs.width = input_size.x;
   inputs.height = input_size.y;
+  /* The canvas the inputs are a fraction of, so the evaluator can place a finite-distance light
+   * on the real plane rather than on whatever octave the drag reduced the inputs to. */
+  inputs.canvas_width = canvas_size.x;
+  inputs.canvas_height = canvas_size.y;
   inputs.output_width = output_size.x == input_size.x ? 0 : output_size.x;
   inputs.output_height = output_size.y == input_size.y ? 0 : output_size.y;
   inputs.emission_strength = combined_emission_strength(ma);
@@ -1245,6 +1249,7 @@ bool combined_preview_gpu_update(const Material &ma,
                                  const int pass,
                                  gpu::Texture *output,
                                  const float3x3 &texel_to_uv,
+                                 const int2 canvas_size,
                                  const PaintLayerTileContext &context)
 {
   const Object *painted_object = context.painted_object;
@@ -1985,16 +1990,20 @@ bool combined_preview_gpu_update(const Material &ma,
   /* The lighting pass. Lights that cannot change a pixel are dropped, as on the CPU. */
   /* One light per column: the shader declares matrices because it has no push constant array. The
    * columns past `lights_num` are never read. */
+  static_assert(CombinedPreviewLighting::lights_max == 4,
+                "the GPU light matrices have four columns");
   float4x4 light_direction = float4x4::identity();
   float4x4 light_diffuse = float4x4::identity();
   float4x4 light_specular = float4x4::identity();
   int lights_num = 0;
-  for (const int i : IndexRange(std::clamp(lighting.lights_num, 0, int(lighting.lights.size())))) {
+  const int lights_limit = std::clamp(lighting.lights_num, 0, CombinedPreviewLighting::lights_max);
+  for (const int i : IndexRange(lights_limit)) {
     const CombinedPreviewLight &light = lighting.lights[i];
     if (math::is_zero(light.diffuse_color) && math::is_zero(light.specular_color)) {
       continue;
     }
-    light_direction[lights_num] = float4(light.direction, 0.0f);
+    /* Negative distances are directional, as on the CPU; the shader only tests the sign. */
+    light_direction[lights_num] = float4(light.direction, std::max(light.distance, 0.0f));
     light_diffuse[lights_num] = float4(light.diffuse_color, 0.0f);
     light_specular[lights_num] = float4(light.specular_color, light.wrap);
     lights_num++;
@@ -2013,9 +2022,11 @@ bool combined_preview_gpu_update(const Material &ma,
                                                     "ao_tx",
                                                     "alpha_tx",
                                                     "emission_tx"};
+  const float2 plane_extent = BKE_paint_material_combined_plane_extent(canvas_size);
   GPU_shader_bind(shade_shader);
   GPU_shader_uniform_mat4(shade_shader, "texel_to_uv", texel_to_uv_4x4.ptr());
   GPU_shader_uniform_2iv(shade_shader, "texture_size", &size.x);
+  GPU_shader_uniform_2fv(shade_shader, "plane_extent", &plane_extent.x);
   GPU_shader_uniform_mat4(shade_shader, "light_direction", light_direction.ptr());
   GPU_shader_uniform_mat4(shade_shader, "light_diffuse", light_diffuse.ptr());
   GPU_shader_uniform_mat4(shade_shader, "light_specular", light_specular.ptr());
@@ -2055,6 +2066,7 @@ void combined_preview_gpu_verify(Main &bmain,
                                  const CombinedPreviewLighting &lighting,
                                  gpu::Texture *output,
                                  const float3x3 &texel_to_uv,
+                                 const int2 /*canvas_size*/,
                                  const PaintLayerTileContext &context)
 {
   const Object *painted_object = context.painted_object;

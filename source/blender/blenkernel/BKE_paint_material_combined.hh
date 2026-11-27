@@ -76,10 +76,11 @@ struct CombinedInputs {
    * reduced resolution: an interactive Gradient drag shades the channel composites at a
    * power-of-two octave of the canvas, and this preview is shaded at that octave with them.
    *
-   * Zero means the inputs are the canvas. Only the cache's canvas report reads this
-   * (#BKE_paint_material_combined_cache_size_get answers the canvas, never the octave, because
-   * #ED_space_image_get_size builds the editor's view from it); the shading and every rectangle
-   * work in #width and #height.
+   * Zero means the inputs are the canvas. The cache's canvas report and the finite-distance
+   * lights' plane extent read this (#BKE_paint_material_combined_cache_size_get answers the
+   * canvas, never the octave, because #ED_space_image_get_size builds the editor's view from it),
+   * so a light stays put on the canvas as the preview's resolution changes. Every rectangle still
+   * works in #width and #height.
    */
   int canvas_width = 0;
   int canvas_height = 0;
@@ -128,15 +129,47 @@ struct CombinedInputs {
   }
 };
 
-/** One analytic directional light of the studio rig. */
+/**
+ * Extents of the flat canvas plane in the space the studio rig lives in: the larger canvas
+ * dimension spans 1.0 and the origin is the canvas centre. \a canvas_size must be positive.
+ */
+float2 BKE_paint_material_combined_plane_extent(int2 canvas_size);
+
+/**
+ * One analytic light of the studio rig: a finite-distance light when its `distance` is above zero,
+ * otherwise directional.
+ */
 struct CombinedPreviewLight {
-  /** Normalized, in the flat canvas's tangent space: `+Z` points at the viewer. */
+  /**
+   * Normalized, in the flat canvas's tangent space: `+Z` points at the viewer.
+   *
+   * For a directional light this is the unit vector pointing towards the light. For a
+   * finite-distance light it is the unit vector from the canvas centre towards the light's
+   * position -- not the direction of arrival at a given texel; see
+   * #BKE_paint_material_combined_light_direction.
+   */
   float3 direction = float3(0.0f, 0.0f, 1.0f);
   float3 diffuse_color = float3(1.0f);
   float3 specular_color = float3(1.0f);
   /** Wraps diffuse round the terminator, as Workbench's studio lights do. */
   float wrap = 0.0f;
+  /**
+   * Distance of the light from the canvas centre along #direction, in canvas units (the larger
+   * canvas dimension is 1.0), so the light's position is `direction * distance` and its height
+   * above the canvas is `distance * direction.z`. Non-negative; negative values are treated as
+   * zero. Zero keeps the light directional. Defaults to zero so a hand-built rig and the existing
+   * tests stay directional; the shipped studio rig sets it in
+   * #BKE_paint_material_combined_lighting_default.
+   */
+  float distance = 0.0f;
 };
+
+/** Squared length below which `to_light` is treated as degenerate. Matches the BSL shader. */
+inline constexpr float combined_preview_light_degenerate_epsilon_sq = 1e-12f;
+
+/** Unit direction from \a plane_point to the light; the stored direction when directional. */
+float3 BKE_paint_material_combined_light_direction(const CombinedPreviewLight &light,
+                                                   float3 plane_point);
 
 /**
  * The whole lighting environment of the preview.
@@ -145,8 +178,10 @@ struct CombinedPreviewLight {
  * either reaching into the evaluator.
  */
 struct CombinedPreviewLighting {
-  std::array<CombinedPreviewLight, 4> lights;
-  int lights_num = 4;
+  /** The GPU packs one light per matrix column; see #combined_preview_gpu_update. */
+  static constexpr int lights_max = 4;
+  std::array<CombinedPreviewLight, lights_max> lights;
+  int lights_num = lights_max;
   float3 ambient_color = float3(0.05f);
   float exposure = 1.0f;
   /** How much the AO channel darkens ambient. 0 ignores AO entirely. */
@@ -169,8 +204,8 @@ CombinedPreviewLighting BKE_paint_material_combined_lighting_default();
  *
  * The flat-canvas equivalent of #View3DShading.studiolight_rot_z: `+Z` points at the viewer, so
  * rotating about it sweeps the rig across the surface and makes a normal map read as relief. Only
- * the directions move -- colours, wrap, ambient and exposure are properties of the rig, not of
- * where it is standing.
+ * the directions rotate about the canvas normal -- colours, wrap, ambient and exposure are
+ * properties of the rig, not of where it is standing.
  *
  * Applied by the caller rather than stored, so #CombinedPreviewLighting stays the complete
  * description of a lighting environment and #hash therefore still covers everything that shades.

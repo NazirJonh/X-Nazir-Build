@@ -202,6 +202,9 @@ void combined_preview_gpu_caches_free();
  *                its own resolution.
  * \param texel_to_uv: maps an \a output texel (plus the half-texel centre) to the canvas UV in
  *                     [0, 1]; a texel that lands outside the canvas is written transparent.
+ * \param canvas_size: the canvas in texels, which the finite-distance lights' plane extent is
+ *                     derived from. The caller knows it; the GPU path must not guess it from the
+ *                     channel stacks.
  * \param context: the object a projected row reads its surface from (null refuses a projected row
  *                        the GPU path), and the UDIM tile the preview is of -- the Image Editor's
  *                        active one, the base square when unset.
@@ -215,6 +218,7 @@ bool combined_preview_gpu_update(const Material &ma,
                                  int pass,
                                  gpu::Texture *output,
                                  const float3x3 &texel_to_uv,
+                                 const int2 canvas_size,
                                  const PaintLayerTileContext &context = {});
 
 /**
@@ -252,6 +256,7 @@ void combined_preview_gpu_verify(Main &bmain,
                                  const CombinedPreviewLighting &lighting,
                                  gpu::Texture *output,
                                  const float3x3 &texel_to_uv,
+                                 const int2 canvas_size,
                                  const PaintLayerTileContext &context = {});
 
 }  // namespace blender::ed::material_combined

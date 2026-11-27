@@ -65,6 +65,8 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 
+#include "GPU_texture.hh"
+
 #include "image_runtime.hh"
 
 namespace blender {
@@ -774,12 +776,21 @@ bool ED_space_image_update_gpu_combined(Main *bmain,
   /* The preview is the composite of the tile the editor shows, exactly as the CPU channel pass
    * below builds it: the active UDIM tile, the base one for a non-tiled image. */
   const int tile_number = space_image_active_tile_number(*sima);
+  /* The canvas the preview stands for, from the editor's own size rule -- the one the drawing
+   * code uses for `texel_to_uv` -- rather than re-deriving it from the channel stacks. */
+  int canvas_width = 0;
+  int canvas_height = 0;
+  ED_space_image_get_size(sima, &canvas_width, &canvas_height);
+  const int2 canvas_size = (canvas_width > 0 && canvas_height > 0) ?
+                               int2(canvas_width, canvas_height) :
+                               int2(GPU_texture_width(texture), GPU_texture_height(texture));
   if (!ed::material_combined::combined_preview_gpu_update(
           *ma,
           lighting,
           sima->material_paint_pass,
           texture,
           texel_to_uv,
+          canvas_size,
           PaintLayerTileContext{.painted_object = painted_object, .tile_number = tile_number}))
   {
     return false;
@@ -791,6 +802,7 @@ bool ED_space_image_update_gpu_combined(Main *bmain,
         lighting,
         texture,
         texel_to_uv,
+        canvas_size,
         PaintLayerTileContext{.painted_object = painted_object, .tile_number = tile_number});
   }
   return true;

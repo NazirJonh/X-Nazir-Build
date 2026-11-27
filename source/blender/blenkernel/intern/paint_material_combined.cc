@@ -82,6 +82,36 @@ float4 BKE_paint_material_combined_default_value(const eMaterialPaintChannel cha
   return float4(0.0f);
 }
 
+/**
+ * Extents of the flat canvas plane: the larger dimension spans 1.0, in the space the rig's
+ * directions and distances live in.
+ */
+float2 BKE_paint_material_combined_plane_extent(const int2 canvas_size)
+{
+  BLI_assert(canvas_size.x > 0 && canvas_size.y > 0);
+  const float largest = float(std::max(canvas_size.x, canvas_size.y));
+  return float2(float(canvas_size.x), float(canvas_size.y)) / largest;
+}
+
+float3 BKE_paint_material_combined_light_direction(const CombinedPreviewLight &light,
+                                                   const float3 plane_point)
+{
+  /* Negative distances are the same light as zero: directional. Normalized here so that the CPU,
+   * the GPU packing and the lighting hash all agree. */
+  const float distance = std::max(light.distance, 0.0f);
+  if (distance <= 0.0f) {
+    return light.direction;
+  }
+  const float3 to_light = light.direction * distance - plane_point;
+  if (math::length_squared(to_light) <= combined_preview_light_degenerate_epsilon_sq) {
+    return light.direction;
+  }
+  return math::normalize(to_light);
+}
+
+/** Distance of the shipped studio lights along their directions, in canvas units. */
+static constexpr float combined_preview_light_distance = 0.6f;
+
 uint64_t CombinedPreviewLighting::hash() const
 {
   uint64_t hash = get_default_hash(
@@ -90,16 +120,21 @@ uint64_t CombinedPreviewLighting::hash() const
    * in them, and folding those in would report a change the shading cannot see. */
   for (const int i : IndexRange(std::clamp(this->lights_num, 0, int(this->lights.size())))) {
     const CombinedPreviewLight &light = this->lights[i];
-    hash = get_default_hash(
-        hash, light.direction, light.diffuse_color, light.specular_color, light.wrap);
+    /* At get_default_hash's five-argument cap: a further field must use a nested hash. */
+    hash = get_default_hash(hash,
+                            light.direction,
+                            light.diffuse_color,
+                            light.specular_color,
+                            light.wrap,
+                            std::max(light.distance, 0.0f));
   }
   return hash;
 }
 
 CombinedPreviewLighting BKE_paint_material_combined_lighting_default()
 {
-  /* Four directional lights in the Workbench studio arrangement -- a key from the upper right, a
-   * fill from the left, a rim from below and a soft top -- plus a small ambient term so an
+  /* Four finite-distance lights in the Workbench studio arrangement -- a key from the upper right,
+   * a fill from the left, a rim from below and a soft top -- plus a small ambient term so an
    * unlit-facing texel is not pure black.
    *
    * The rig's *arrangement*; where it is standing comes from
@@ -112,21 +147,25 @@ CombinedPreviewLighting BKE_paint_material_combined_lighting_default()
   lighting.lights[0].diffuse_color = float3(1.0f, 0.98f, 0.95f);
   lighting.lights[0].specular_color = float3(1.0f, 0.98f, 0.95f);
   lighting.lights[0].wrap = 0.2f;
+  lighting.lights[0].distance = combined_preview_light_distance;
 
   lighting.lights[1].direction = math::normalize(float3(-0.7f, 0.15f, 0.7f));
   lighting.lights[1].diffuse_color = float3(0.30f, 0.33f, 0.38f);
   lighting.lights[1].specular_color = float3(0.25f, 0.28f, 0.33f);
   lighting.lights[1].wrap = 0.4f;
+  lighting.lights[1].distance = combined_preview_light_distance;
 
   lighting.lights[2].direction = math::normalize(float3(0.0f, -0.8f, 0.6f));
   lighting.lights[2].diffuse_color = float3(0.18f, 0.18f, 0.20f);
   lighting.lights[2].specular_color = float3(0.18f, 0.18f, 0.20f);
   lighting.lights[2].wrap = 0.5f;
+  lighting.lights[2].distance = combined_preview_light_distance;
 
   lighting.lights[3].direction = math::normalize(float3(0.0f, 0.85f, 0.5f));
   lighting.lights[3].diffuse_color = float3(0.22f, 0.24f, 0.28f);
   lighting.lights[3].specular_color = float3(0.20f, 0.22f, 0.26f);
   lighting.lights[3].wrap = 0.3f;
+  lighting.lights[3].distance = combined_preview_light_distance;
 
   lighting.ambient_color = float3(0.05f);
   lighting.exposure = 1.0f;
@@ -207,7 +246,21 @@ struct ChannelReader {
   }
 };
 
-/** GGX normal distribution, `alpha` being the squared roughness. */
+/**
+ * Preview GGX alpha from the perceptual roughness.
+ *
+ * The physically standard mapping is `alpha = roughness^2`. The flat preview reads too glossy at
+ * the middle of the scale -- four unshadowed studio lights accumulate their highlights -- so the
+ * preview softens it to `roughness^1.5`: `roughness = 0` stays a sharp mirror and `roughness = 1`
+ * stays fully rough, while the middle widens and dims. Preview-only, not a change to the material.
+ * Keep this in sync with `shade_comp` in `image_engine_combined.bsl.hh`.
+ */
+static float combined_preview_ggx_alpha(const float roughness)
+{
+  return std::max(roughness * std::sqrt(roughness), 1e-4f);
+}
+
+/** GGX normal distribution, `alpha` being the GGX roughness parameter (see above). */
 static float combined_ggx_d(const float n_dot_h, const float alpha)
 {
   const float alpha2 = alpha * alpha;
@@ -311,14 +364,19 @@ bool BKE_paint_material_combined_eval(const CombinedInputs &inputs,
    * black still costs a normalize, a GGX, a Smith and a Schlick per texel, and the studio rig's
    * dimmer fills go black as soon as a user turns them down. Filtered once here rather than
    * branched on 16 million times. */
-  std::array<CombinedPreviewLight, 4> lights;
+  const int lights_limit = std::clamp(lighting.lights_num, 0, CombinedPreviewLighting::lights_max);
+  std::array<CombinedPreviewLight, CombinedPreviewLighting::lights_max> lights;
   int lights_num = 0;
-  for (const int i : IndexRange(std::clamp(lighting.lights_num, 0, int(lighting.lights.size())))) {
+  /* Whether any kept light depends on where its texel sits on the plane. A fully directional rig
+   * then skips the plane math entirely, as it did before finite-distance lights existed. */
+  bool has_finite_lights = false;
+  for (const int i : IndexRange(lights_limit)) {
     const CombinedPreviewLight &light = lighting.lights[i];
     if (math::is_zero(light.diffuse_color) && math::is_zero(light.specular_color)) {
       continue;
     }
     lights[lights_num++] = light;
+    has_finite_lights |= light.distance > 0.0f;
   }
   const float3 view_dir(0.0f, 0.0f, 1.0f);
 
@@ -341,6 +399,17 @@ bool BKE_paint_material_combined_eval(const CombinedInputs &inputs,
   const int samples_y = is_scaled ? std::clamp(int(scale_y + 0.5f), 1, 2) : 1;
   const float sample_weight = 1.0f / float(samples_x * samples_y);
 
+  /* The output always covers the whole canvas, and the octave keeps the canvas aspect, so an
+   * output pixel's UV is its canvas UV. The plane point is therefore the output pixel's place on
+   * the canvas, in the rig's space (see #BKE_paint_material_combined_plane_extent), and it maps
+   * the *canvas* rather than the reduced output buffer: the light stays put on the canvas as the
+   * preview's resolution changes. Row 0 is the bottom row of the ImBuf (`uv.y = 0` is the bottom),
+   * so a larger row means a larger `+Y`: `+Y` points up the canvas, as the rig assumes. */
+  const float2 plane_extent = BKE_paint_material_combined_plane_extent(
+      int2(inputs.in_width(), inputs.in_height()));
+  const float inv_out_width = 1.0f / float(out_width);
+  const float inv_out_height = 1.0f / float(out_height);
+
   const IndexRange rows(area.ymin, BLI_rcti_size_y(&area));
   /* Grained by texels rather than by rows, so a task is the same size whatever the canvas is: a
    * fixed 64 rows is 16k texels on a 256-wide dab region and 256k on a 4096-wide canvas, and the
@@ -355,13 +424,22 @@ bool BKE_paint_material_combined_eval(const CombinedInputs &inputs,
    * A generic lambda, so each sampler compiles into its own instantiation of the loop, rather than
    * a branch inside it: whether the output is reduced is a runtime value, and testing it eight
    * times per pixel -- once per channel -- is not something the compiler can be relied on to
-   * hoist. The unscaled instantiation is the path every non-viewport caller takes and has to stay
-   * exactly as cheap as it was before a reduced output existed at all. */
+   * hoist. The unscaled instantiation is the path every non-viewport caller takes.
+   *
+   * The plane math is guarded by `has_finite_lights`, resolved once before the loop: a fully
+   * directional rig pays one predictable branch per texel and no vector work for the plane at
+   * all. */
   const auto shade_area = [&](auto make_sampler) {
     threading::parallel_for(rows, grain, [&](const IndexRange range) {
       for (const int y : range) {
         for (const int x : IndexRange(area_xmin, area_width)) {
           const auto sample = make_sampler(x, y);
+          const float3 plane_point =
+              has_finite_lights ?
+                  float3(((float(x) + 0.5f) * inv_out_width - 0.5f) * plane_extent.x,
+                         ((float(y) + 0.5f) * inv_out_height - 0.5f) * plane_extent.y,
+                         0.0f) :
+                  float3(0.0f);
 
           const float4 base = sample(base_reader);
           const float metallic = std::clamp(sample(metallic_reader).x, 0.0f, 1.0f);
@@ -393,14 +471,16 @@ bool BKE_paint_material_combined_eval(const CombinedInputs &inputs,
           const float3 f0 = math::interpolate(float3(0.08f * specular), base_rgb, metallic);
           const float ao = math::interpolate(1.0f, ao_map, lighting.ao_influence);
 
-          const float alpha_ggx = std::max(roughness * roughness, 1e-4f);
+          const float alpha_ggx = combined_preview_ggx_alpha(roughness);
           const float smith_k = alpha_ggx * 0.5f;
           const float n_dot_v = std::max(math::dot(normal, view_dir), 1e-4f);
 
           float3 lit(0.0f);
           for (const int light_index : IndexRange(lights_num)) {
             const CombinedPreviewLight &light = lights[light_index];
-            const float3 light_dir = light.direction;
+            const float3 light_dir = BKE_paint_material_combined_light_direction(light,
+                                                                                 plane_point);
+
             const float n_dot_l_raw = math::dot(normal, light_dir);
 
             const float n_dot_l_wrapped = std::max(

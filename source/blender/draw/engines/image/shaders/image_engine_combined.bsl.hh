@@ -3800,9 +3800,12 @@ struct ShadeResources {
   [[image(0, write, SFLOAT_16_16_16_16)]] image2D output_img;
   [[push_constant]] const float4x4 texel_to_uv;
   [[push_constant]] const int2 texture_size;
+  /** Canvas extents in the larger-dimension-is-1 plane, for the finite-distance light rig. */
+  [[push_constant]] const float2 plane_extent;
   /** One light per column: the direction, the diffuse colour, and the specular colour with the
    * wrap in its fourth component. A matrix because a push constant array is not one BSL declares
-   * yet. */
+   * yet. A column's `light_direction` has the distance in its fourth component: zero keeps the
+   * light directional, above zero makes it a finite-distance light. */
   [[push_constant]] const float4x4 light_direction;
   [[push_constant]] const float4x4 light_diffuse;
   [[push_constant]] const float4x4 light_specular;
@@ -3845,6 +3848,12 @@ void shade_comp([[resource_table]] ShadeResources &srt,
     return;
   }
 
+  /* `uv.y = 0` is the bottom row, so a larger row (larger `uv.y`) is a larger `+Y` (up), matching
+   * the CPU's `plane_extent.y`-scaled plane point. */
+  const float3 plane_point((uv.x - 0.5f) * srt.plane_extent.x,
+                           (uv.y - 0.5f) * srt.plane_extent.y,
+                           0.0f);
+
   /* The CPU shades the color channels from their float composites, which hold the straight
    * scene-linear evaluation unclamped -- so a stack that overshoots (Add, Exposure) keeps its HDR
    * value here too, and the view transform, not this pass, decides what a value above one looks
@@ -3867,14 +3876,24 @@ void shade_comp([[resource_table]] ShadeResources &srt,
   float3 f0 = mix(float3(0.08f * specular), base_rgb, metallic);
   float ao = mix(1.0f, ao_map, srt.ao_influence);
 
-  float alpha_ggx = max(roughness * roughness, 1e-4f);
+  /* Preview-only matte bias: `roughness^1.5` instead of the physical `roughness^2`, so the middle
+   * of the scale widens and dims while 0 stays a sharp mirror and 1 stays fully rough. Keep in
+   * sync with `combined_preview_ggx_alpha` on the CPU. */
+  float alpha_ggx = max(roughness * sqrt(roughness), 1e-4f);
   float smith_k = alpha_ggx * 0.5f;
   float3 view_dir = float3(0.0f, 0.0f, 1.0f);
   float n_dot_v = max(dot(normal, view_dir), 1e-4f);
 
   float3 lit = float3(0.0f);
   for (int i = 0; i < srt.lights_num; i++) {
-    float3 light_dir = srt.light_direction[i].xyz;
+    const float4 light_column = srt.light_direction[i];
+    const float3 to_light = light_column.xyz * light_column.w - plane_point;
+    /* The threshold must match `combined_preview_light_degenerate_epsilon_sq` on the CPU: at or
+     * below it the texel sits on the light and the stored direction is used. */
+    const float3 light_dir = (light_column.w <= 0.0f ||
+                              dot(to_light, to_light) <= 1e-12f) ?
+                                 light_column.xyz :
+                                 normalize(to_light);
     float wrap = srt.light_specular[i].w;
     float n_dot_l_raw = dot(normal, light_dir);
 

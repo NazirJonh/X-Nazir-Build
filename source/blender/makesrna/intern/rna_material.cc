@@ -45,6 +45,7 @@
 
 #include "rna_internal.hh"
 #include "rna_material_projection.hh"
+#include "rna_material_mesh_maps.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
@@ -234,25 +235,6 @@ const EnumPropertyItem rna_enum_material_paint_layers_image_size_items[] = {
     {PAINT_NEW_CHANNEL_IMAGE_SIZE_1K, "SIZE_1K", 0, "1K (1024 x 1024)", "1024 x 1024"},
     {PAINT_NEW_CHANNEL_IMAGE_SIZE_2K, "SIZE_2K", 0, "2K (2048 x 2048)", "2048 x 2048"},
     {PAINT_NEW_CHANNEL_IMAGE_SIZE_4K, "SIZE_4K", 0, "4K (4096 x 4096)", "4096 x 4096"},
-    {0, nullptr, 0, nullptr, nullptr},
-};
-
-/* Values match #eMaterialMeshMapType. THICKNESS and POSITION have DNA values but no bake side
- * yet, so they are not offered. Defined here, outside the makesrna-only section, because
- * rna_object.cc reuses the table at runtime (see #DEF_ENUM): the Object mesh map states key on the
- * same map types. */
-const EnumPropertyItem rna_enum_material_mesh_map_type_items[] = {
-    {MA_MESH_MAP_AO, "AO", 0, "Ambient Occlusion", "Ambient occlusion map"},
-    {MA_MESH_MAP_CURVATURE, "CURVATURE", 0, "Curvature", "Curvature map"},
-    {MA_MESH_MAP_NORMAL_WORLD, "NORMAL_WORLD", 0, "Normal (World)", "World-space normal map"},
-    {MA_MESH_MAP_NORMAL_OBJECT,
-     "NORMAL_OBJECT",
-     0,
-     "Normal (Object)",
-     "Object-space normal map"},
-    {MA_MESH_MAP_ID_OBJECT, "ID_OBJECT", 0, "Object ID", "Object index map"},
-    {MA_MESH_MAP_ID_MATERIAL, "ID_MATERIAL", 0, "Material ID", "Material index map"},
-    {MA_MESH_MAP_EDGE, "EDGE", 0, "Edge", "Edge/bevel map"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -763,8 +745,6 @@ static const EnumPropertyItem rna_material_paint_layer_canvas_size_all_items[] =
 #  include "BKE_main.hh"
 #  include "BKE_material.hh"
 #  include "BKE_mesh.hh"
-#  include "BKE_mesh_maps.hh"
-#  include "BKE_mesh_maps_bake.hh"
 #  include "BKE_mesh_types.hh"
 #  include "BKE_node.hh"
 #  include "BKE_paint.hh"
@@ -7292,98 +7272,6 @@ static void rna_MaterialPaintLayerChannel_gradient_value_end_set(PointerRNA *ptr
 
 /** \} */
 
-/** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name Mesh map RNA helpers
- * \{ */
-
-static void rna_Material_mesh_map_slots_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
-{
-  Material *ma = id_cast<Material *>(ptr->owner_id);
-  rna_iterator_listbase_begin(iter, ptr, &ma->mesh_map_slots, nullptr);
-}
-
-static int rna_Material_mesh_map_slots_length(PointerRNA *ptr)
-{
-  Material *ma = id_cast<Material *>(ptr->owner_id);
-  return BLI_listbase_count(&ma->mesh_map_slots);
-}
-
-static MaterialMeshMapSlot *rna_Material_mesh_map_slots_ensure(Material *ma, int type)
-{
-  return BKE_mesh_maps_slot_ensure(*ma, int8_t(type));
-}
-
-static MaterialMeshMapSlot *rna_Material_mesh_map_slots_find(Material *ma, int type)
-{
-  return BKE_mesh_maps_slot_find(*ma, int8_t(type));
-}
-
-static bool rna_Material_mesh_map_type_is_bakeable(Material * /*ma*/, int type)
-{
-  return BKE_mesh_maps_bake_type_is_supported(int8_t(type));
-}
-
-static void rna_Material_mesh_map_bake_target_objects_begin(CollectionPropertyIterator *iter,
-                                                            PointerRNA *ptr)
-{
-  Material *ma = id_cast<Material *>(ptr->owner_id);
-  /* The objects are resolved from the whole file, which a property setter is not handed: fall back
-   * to #G_MAIN, guarded the same way other introspection callbacks guard it. */
-  if (ma == nullptr || G_MAIN == nullptr) {
-    iter->valid = false;
-    return;
-  }
-  Vector<Object *> objects;
-  BKE_mesh_maps_bake_target_objects(*G_MAIN, *ma, objects);
-  /* The iterator owns the array and frees it at the end, so the objects outlive this call. */
-  Object **data = MEM_new_array<Object *>(size_t(std::max<int64_t>(objects.size(), 1)), __func__);
-  for (const int64_t i : objects.index_range()) {
-    data[i] = objects[i];
-  }
-  rna_iterator_array_begin(iter, ptr, data, sizeof(Object *), objects.size(), true, nullptr);
-}
-
-static PointerRNA rna_Material_mesh_map_bake_target_objects_get(CollectionPropertyIterator *iter)
-{
-  /* The items are IDs, so each pointer is self-owned rather than a child of the material. */
-  Object *ob = static_cast<Object *>(rna_iterator_array_dereference_get(iter));
-  return RNA_id_pointer_create(&ob->id);
-}
-
-static int rna_MaterialMeshMapSlot_type_get(PointerRNA *ptr)
-{
-  return static_cast<const MaterialMeshMapSlot *>(ptr->data)->type;
-}
-
-/** The atlas Image itself, resolving the slot's map type through the material's slot list. */
-static PointerRNA rna_MaterialMeshMapSlot_atlas_image_get(PointerRNA *ptr)
-{
-  const MaterialMeshMapSlot *slot = static_cast<const MaterialMeshMapSlot *>(ptr->data);
-  Image *image = (slot != nullptr) ? slot->image : nullptr;
-  if (image == nullptr) {
-    return PointerRNA_NULL;
-  }
-  return RNA_id_pointer_create(&image->id);
-}
-
-static void rna_MaterialMeshMapSlot_image_set(PointerRNA *ptr, PointerRNA value, ReportList *)
-{
-  MaterialMeshMapSlot *slot = static_cast<MaterialMeshMapSlot *>(ptr->data);
-  Material *ma = id_cast<Material *>(ptr->owner_id);
-  BKE_mesh_maps_slot_image_set(*ma, slot->type, static_cast<Image *>(value.data));
-}
-
-static PointerRNA rna_Material_mesh_map_settings_get(PointerRNA *ptr)
-{
-  Material *ma = id_cast<Material *>(ptr->owner_id);
-  return RNA_pointer_create_with_parent(
-      *ptr, RNA_MaterialMeshMapSettings, &ma->mesh_map_settings);
-}
-
-/** \} */
-
 }  // namespace blender
 
 #else
@@ -10817,164 +10705,6 @@ static void rna_def_material_anchor_point_items(BlenderRNA *brna, StructRNA *srn
                            "reads it; reads as empty");
   RNA_def_property_update(
       prop, NC_MATERIAL | ND_SHADING, "rna_Material_paint_layer_add_anchor_reader_update");
-}
-
-static void rna_def_material_mesh_maps(BlenderRNA *brna, StructRNA *srna)
-{
-  StructRNA *coll_srna;
-  StructRNA *slot_srna;
-  PropertyRNA *prop;
-  FunctionRNA *func;
-  PropertyRNA *parm;
-
-  prop = RNA_def_property(srna, "mesh_map_slots", PROP_COLLECTION, PROP_NONE);
-  RNA_def_property_struct_type(prop, "MaterialMeshMapSlot");
-  RNA_def_property_collection_funcs(prop,
-                                    "rna_Material_mesh_map_slots_begin",
-                                    "rna_iterator_listbase_next",
-                                    "rna_iterator_listbase_end",
-                                    "rna_iterator_listbase_get",
-                                    "rna_Material_mesh_map_slots_length",
-                                    nullptr,
-                                    nullptr,
-                                    nullptr);
-  RNA_def_property_ui_text(
-      prop, "Mesh Map Slots", "The material's shared mesh map atlases, one per map type");
-
-  RNA_def_property_srna(prop, "MaterialMeshMapSlots");
-  coll_srna = RNA_def_struct(brna, "MaterialMeshMapSlots", nullptr);
-  RNA_def_struct_sdna(coll_srna, "Material");
-  RNA_def_struct_ui_text(coll_srna, "Mesh Map Slots", "Collection of mesh map atlas slots");
-
-  func = RNA_def_function(coll_srna, "ensure", "rna_Material_mesh_map_slots_ensure");
-  RNA_def_function_ui_description(func, "Get the slot for a map type, creating it if absent");
-  parm = RNA_def_enum(func,
-                      "type",
-                      rna_enum_material_mesh_map_type_items,
-                      MA_MESH_MAP_AO,
-                      "Type",
-                      "The mesh map type");
-  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
-  parm = RNA_def_pointer(func, "slot", "MaterialMeshMapSlot", "", "The mesh map slot");
-  RNA_def_function_return(func, parm);
-
-  func = RNA_def_function(coll_srna, "find", "rna_Material_mesh_map_slots_find");
-  RNA_def_function_ui_description(func, "Get the slot for a map type, or none");
-  parm = RNA_def_enum(func,
-                      "type",
-                      rna_enum_material_mesh_map_type_items,
-                      MA_MESH_MAP_AO,
-                      "Type",
-                      "The mesh map type");
-  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
-  parm = RNA_def_pointer(func, "slot", "MaterialMeshMapSlot", "", "The mesh map slot, or none");
-  RNA_def_function_return(func, parm);
-
-  func = RNA_def_function(
-      srna, "mesh_map_type_is_bakeable", "rna_Material_mesh_map_type_is_bakeable");
-  RNA_def_function_ui_description(
-      func, "Whether a bake can produce this map type in this build");
-  parm = RNA_def_enum(func,
-                      "type",
-                      rna_enum_material_mesh_map_type_items,
-                      MA_MESH_MAP_AO,
-                      "Type",
-                      "The mesh map type");
-  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
-  parm = RNA_def_boolean(func, "result", false, "", "Whether the map type can be baked");
-  RNA_def_function_return(func, parm);
-
-  prop = RNA_def_property(srna, "mesh_map_bake_target_objects", PROP_COLLECTION, PROP_NONE);
-  RNA_def_property_struct_type(prop, "Object");
-  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
-  RNA_def_property_collection_funcs(prop,
-                                    "rna_Material_mesh_map_bake_target_objects_begin",
-                                    "rna_iterator_array_next",
-                                    "rna_iterator_array_end",
-                                    "rna_Material_mesh_map_bake_target_objects_get",
-                                    nullptr,
-                                    nullptr,
-                                    nullptr,
-                                    nullptr);
-  RNA_def_property_ui_text(
-      prop,
-      "Bake Target Objects",
-      "The objects a 'Bake All Objects' run over this material covers, sources excluded");
-
-  /* slot */
-  /* `srna` stays the Material: the settings below belong to it, not to the slot. */
-  slot_srna = RNA_def_struct(brna, "MaterialMeshMapSlot", nullptr);
-  RNA_def_struct_sdna(slot_srna, "MaterialMeshMapSlot");
-  RNA_def_struct_ui_text(slot_srna, "Mesh Map Slot", "One shared mesh map atlas");
-
-  prop = RNA_def_property(slot_srna, "type", PROP_ENUM, PROP_NONE);
-  RNA_def_property_enum_items(prop, rna_enum_material_mesh_map_type_items);
-  RNA_def_property_enum_funcs(prop, "rna_MaterialMeshMapSlot_type_get", nullptr, nullptr);
-  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
-  RNA_def_property_ui_text(prop, "Type", "The mesh map this slot holds");
-
-  prop = RNA_def_property(slot_srna, "image", PROP_POINTER, PROP_NONE);
-  RNA_def_property_struct_type(prop, "Image");
-  RNA_def_property_pointer_sdna(prop, nullptr, "image");
-  RNA_def_property_pointer_funcs(prop, nullptr, "rna_MaterialMeshMapSlot_image_set", nullptr, nullptr);
-  RNA_def_property_flag(prop, PROP_EDITABLE);
-  RNA_def_property_ui_text(prop, "Image", "The shared atlas for this map type, or none");
-
-  /* Read-only alias of `image`, named for the UI a mesh map mask reads: same atlas, but drawn as
-   * a preview rather than a Drop image picker (a mesh map mask never assigns a map of its own). */
-  prop = RNA_def_property(slot_srna, "atlas_image", PROP_POINTER, PROP_NONE);
-  RNA_def_property_struct_type(prop, "Image");
-  RNA_def_property_pointer_funcs(
-      prop, "rna_MaterialMeshMapSlot_atlas_image_get", nullptr, nullptr, nullptr);
-  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
-  RNA_def_property_ui_text(prop, "Atlas Image", "The shared atlas this slot holds, or none");
-
-  /* settings */
-  prop = RNA_def_property(srna, "mesh_map_settings", PROP_POINTER, PROP_NONE);
-  RNA_def_property_struct_type(prop, "MaterialMeshMapSettings");
-  RNA_def_property_pointer_funcs(
-      prop, "rna_Material_mesh_map_settings_get", nullptr, nullptr, nullptr);
-  RNA_def_property_ui_text(
-      prop, "Mesh Map Settings", "Baking and viewport settings shared by the mesh maps");
-
-  srna = RNA_def_struct(brna, "MaterialMeshMapSettings", nullptr);
-  RNA_def_struct_sdna(srna, "MaterialMeshMapSettings");
-  RNA_def_struct_ui_text(srna, "Mesh Map Settings", "Baking and viewport settings of mesh maps");
-
-  prop = RNA_def_property(srna, "resolution", PROP_INT, PROP_NONE);
-  RNA_def_property_int_sdna(prop, nullptr, "resolution");
-  RNA_def_property_range(prop, 16, 16384);
-  RNA_def_property_ui_text(prop, "Resolution", "Square side the atlas is allocated at");
-  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
-
-  prop = RNA_def_property(srna, "samples", PROP_INT, PROP_NONE);
-  RNA_def_property_int_sdna(prop, nullptr, "samples");
-  RNA_def_property_range(prop, 1, 4096);
-  RNA_def_property_ui_text(prop, "Samples", "Cycles samples the mesh map bake renders with");
-  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
-
-  prop = RNA_def_property(srna, "use_denoise", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "use_denoise", 1);
-  RNA_def_property_ui_text(prop, "Denoise", "Ask Cycles to denoise the mesh map bake");
-  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
-
-  prop = RNA_def_property(srna, "margin", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_float_sdna(prop, nullptr, "margin");
-  RNA_def_property_range(prop, 0.0f, 256.0f);
-  RNA_def_property_ui_text(prop, "Margin", "UV margin in pixels applied while merging a bake");
-  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
-
-  prop = RNA_def_property(srna, "ao_distance", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_float_sdna(prop, nullptr, "ao_distance");
-  RNA_def_property_range(prop, 0.0f, FLT_MAX);
-  RNA_def_property_ui_text(prop, "AO Distance", "Ambient occlusion ray distance; zero is automatic");
-  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
-
-  prop = RNA_def_property(srna, "edge_radius", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_float_sdna(prop, nullptr, "edge_radius");
-  RNA_def_property_range(prop, 0.0f, FLT_MAX);
-  RNA_def_property_ui_text(prop, "Edge Radius", "Edge/bevel ray radius in object-space units");
-  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 }
 
 void RNA_def_material(BlenderRNA *brna)

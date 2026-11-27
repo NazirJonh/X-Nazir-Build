@@ -1456,7 +1456,7 @@ enum eMaterialPaintLayerColorBalanceMethod : int16_t {
 /**
  * #MaterialPaintLayer::mesh_map_type, and the key of #MaterialMeshMapSlot: which geometry map of
  * the owning object a #MA_PAINT_LAYER_SOURCE_MESH_MAP row reads from the material's shared atlas.
- * The reserved values keep room for later maps without renumbering.
+ * The reserved value keeps room for later maps without renumbering.
  */
 enum eMaterialMeshMapType : int8_t {
   MA_MESH_MAP_AO = 0,
@@ -1468,9 +1468,24 @@ enum eMaterialMeshMapType : int8_t {
   MA_MESH_MAP_EDGE = 6,
   /** Reserved; the architecture must not exclude these. */
   MA_MESH_MAP_THICKNESS = 7,
-  /** Reserved; the architecture must not exclude these. */
+  /** The world-space position, optionally normalized by the object's bounds. */
   MA_MESH_MAP_POSITION = 8,
-  MA_MESH_MAP_TYPE_NUM = 9,
+  /** Tangent-space normal, built on the tangent frame of the mesh's active UV map. */
+  MA_MESH_MAP_NORMAL_TANGENT = 9,
+  MA_MESH_MAP_TYPE_NUM = 10,
+};
+
+/** #MaterialMeshMapSettings::position_normalization: what the Position map's texels store. */
+enum eMaterialMeshMapPositionNormalization : int8_t {
+  /** The raw world-space position, signed and unbounded. Also the way to share one range across
+   * several objects: the box and sphere below fit each object separately. */
+  MA_MESH_MAP_POSITION_RAW = 0,
+  /** The low-poly mesh's world bounding box remapped to [0, 1] per axis. The box is computed per
+   * object, so two objects sharing the material's atlas get different ranges. */
+  MA_MESH_MAP_POSITION_BOX = 1,
+  /** The low-poly mesh's world bounding sphere remapped to [0, 1]. The sphere is computed per
+   * object, so two objects sharing the material's atlas get different ranges. */
+  MA_MESH_MAP_POSITION_SPHERE = 2,
 };
 
 /** #MaterialPaintLayerIdColor::flag */
@@ -2331,6 +2346,22 @@ struct MaterialMeshMapSettings {
   /** Edge/bevel ray radius in object-space units. */
   float edge_radius = 0.01f;
   char _pad2[4] = {};
+  /**
+   * #eMaterialMeshMapPositionNormalization. The box and sphere fit the low-poly mesh of each
+   * object in the material's shared atlas separately; use the raw position when several objects
+   * must share one range.
+   */
+  int8_t position_normalization = MA_MESH_MAP_POSITION_BOX;
+  /**
+   * Whether the tangent-space normal map is DirectX-style (green points down). Off bakes the
+   * OpenGL convention, which is what the shader's Normal Map node and the fork's viewers read.
+   */
+  int8_t use_directx_normal = 0;
+  /* Appended after the v1 tail pad, keeping the DNA append-only: the v1 members and their pads
+   * keep their sizes and order. Closes the struct's 4-byte alignment at 36 bytes, so the restored
+   * `_pad_tail[4]` of #Material still ends `Material` exactly on its pointer boundary (36 + 4 =
+   * 40) without letting the compiler fill in padding of its own. */
+  char _pad3[6] = {};
 };
 
 struct Material {

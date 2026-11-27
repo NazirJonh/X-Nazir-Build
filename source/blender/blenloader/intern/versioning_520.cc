@@ -2603,6 +2603,23 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
     version_brush_stroke_random(*bmain);
   }
 
+  /* The mesh map bake's Position normalization is new and defaults to the bounding-box remap:
+   * older files read zero (the raw world position) instead of the DNA default, and a raw
+   * position is a signed, unbounded gradient nobody asked for. The other new settings read as
+   * their old behavior when zero, so they need no versioning.
+   *
+   * NOTE: Keyed on the member existence instead of a file subversion (see above). The existence
+   * check must query the "int8_t" type name, not "char": makesdna stores `int8_t` members under
+   * their own type name in the file SDNA, so a "char" query never matches and would reset the
+   * settings on every file load. */
+  if (!DNA_struct_member_exists_with_alias(
+          fd->filesdna, "MaterialMeshMapSettings", "int8_t", "position_normalization"))
+  {
+    for (Material &material : bmain->materials) {
+      material.mesh_map_settings.position_normalization = MA_MESH_MAP_POSITION_BOX;
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

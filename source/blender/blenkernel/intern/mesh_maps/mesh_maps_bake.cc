@@ -59,6 +59,25 @@
 
 namespace blender {
 
+/* The descriptor table must keep the classification the bake's callers rely on: one row per type,
+ * the render maps through a pass, the CPU fills without one, and the scalar atlas list exactly the
+ * one the writer and the composite share. */
+BLI_STATIC_ASSERT(ARRAY_SIZE(MESH_MAP_BAKE_TYPE_INFOS) == MA_MESH_MAP_TYPE_NUM,
+                  "Every map type must have a descriptor row");
+BLI_STATIC_ASSERT((MESH_MAP_BAKE_TYPE_INFOS[MA_MESH_MAP_AO].flags &
+                   (MESH_MAP_TYPE_RENDERED | MESH_MAP_TYPE_SCALAR)) ==
+                      (MESH_MAP_TYPE_RENDERED | MESH_MAP_TYPE_SCALAR),
+                  "AO is a rendered scalar atlas");
+BLI_STATIC_ASSERT((MESH_MAP_BAKE_TYPE_INFOS[MA_MESH_MAP_ID_OBJECT].flags &
+                   (MESH_MAP_TYPE_CPU_FILL | MESH_MAP_TYPE_SCALAR)) == MESH_MAP_TYPE_CPU_FILL,
+                  "The ID maps are CPU fills, not scalar atlases");
+BLI_STATIC_ASSERT(MESH_MAP_BAKE_TYPE_INFOS[MA_MESH_MAP_NORMAL_WORLD].pass == SCE_PASS_NORMAL,
+                  "The normals bake through the native normal pass");
+BLI_STATIC_ASSERT(MESH_MAP_BAKE_TYPE_INFOS[MA_MESH_MAP_POSITION].emit_tree_builder != nullptr,
+                  "Position builds an emission graph");
+BLI_STATIC_ASSERT(MESH_MAP_BAKE_TYPE_INFOS[MA_MESH_MAP_ID_MATERIAL].emit_tree_builder == nullptr,
+                  "A CPU fill builds no emission graph");
+
 namespace {
 
 bool mesh_map_bake_type_valid(const int8_t type)
@@ -100,51 +119,40 @@ void mesh_map_bake_emit_from(bNodeTree &tree,
 
 bool BKE_mesh_maps_bake_type_renders(const int8_t type)
 {
-  return ELEM(type,
-              MA_MESH_MAP_AO,
-              MA_MESH_MAP_CURVATURE,
-              MA_MESH_MAP_EDGE,
-              MA_MESH_MAP_NORMAL_WORLD,
-              MA_MESH_MAP_NORMAL_OBJECT);
+  const MeshMapTypeInfo *info = BKE_mesh_maps_type_info_get(type);
+  return info != nullptr && (info->flags & MESH_MAP_TYPE_RENDERED) != 0;
 }
 
-bool BKE_mesh_maps_bake_type_cpu_id(const int8_t type)
+bool BKE_mesh_maps_bake_type_cpu_simple(const int8_t type)
 {
-  return ELEM(type, MA_MESH_MAP_ID_OBJECT, MA_MESH_MAP_ID_MATERIAL);
+  /* A simple CPU fill: it reads the low-poly mesh and its settings alone, neither casting rays
+   * through other surfaces nor composing other atlases. */
+  const MeshMapTypeInfo *info = BKE_mesh_maps_type_info_get(type);
+  return info != nullptr && (info->flags & MESH_MAP_TYPE_CPU_FILL) != 0 &&
+         (info->flags & (MESH_MAP_TYPE_NEEDS_SOURCES | MESH_MAP_TYPE_NEEDS_OTHER_ATLAS)) == 0;
 }
 
 bool BKE_mesh_maps_bake_type_scalar(const int8_t type)
 {
-  return ELEM(type, MA_MESH_MAP_AO, MA_MESH_MAP_CURVATURE, MA_MESH_MAP_EDGE);
+  const MeshMapTypeInfo *info = BKE_mesh_maps_type_info_get(type);
+  return info != nullptr && (info->flags & MESH_MAP_TYPE_SCALAR) != 0;
 }
 
 eScenePassType BKE_mesh_maps_bake_pass_for_type(const int8_t type)
 {
-  switch (type) {
-    case MA_MESH_MAP_AO:
-    case MA_MESH_MAP_CURVATURE:
-    case MA_MESH_MAP_EDGE:
-      return SCE_PASS_EMIT;
-    case MA_MESH_MAP_NORMAL_WORLD:
-    case MA_MESH_MAP_NORMAL_OBJECT:
-      return SCE_PASS_NORMAL;
-    default:
-      return eScenePassType(0);
-  }
+  const MeshMapTypeInfo *info = BKE_mesh_maps_type_info_get(type);
+  return info != nullptr ? info->pass : eScenePassType(0);
 }
 
 bool BKE_mesh_maps_bake_normal_space_for_type(const int8_t type, eBakeSpace &r_space)
 {
-  switch (type) {
-    case MA_MESH_MAP_NORMAL_WORLD:
-      r_space = R_BAKE_SPACE_WORLD;
-      return true;
-    case MA_MESH_MAP_NORMAL_OBJECT:
-      r_space = R_BAKE_SPACE_OBJECT;
-      return true;
-    default:
-      return false;
+  const MeshMapTypeInfo *info = BKE_mesh_maps_type_info_get(type);
+  if (info == nullptr || info->pass != SCE_PASS_NORMAL) {
+    /* The space is claimed by the native normal pass maps only; the others are never rotated. */
+    return false;
   }
+  r_space = info->space;
+  return true;
 }
 
 float BKE_mesh_maps_bake_ao_distance(const Mesh &mesh, const MaterialMeshMapSettings &settings)
@@ -171,107 +179,155 @@ float BKE_mesh_maps_bake_ao_distance(const Mesh &mesh, const MaterialMeshMapSett
   return half_diagonal > 0.0f ? half_diagonal : 1.0f;
 }
 
+/* The per-type value sources of the emission graph, declared in BKE_mesh_maps_bake.hh and held in
+ * #MESH_MAP_BAKE_TYPE_INFOS; the common tail of #BKE_mesh_maps_bake_build_emit_tree wires whatever
+ * they built into an emission node. */
+
+bool mesh_map_bake_emit_source_ao(bNodeTree &tree,
+                                  const MaterialMeshMapSettings &settings,
+                                  const float ao_distance,
+                                  const int samples,
+                                  bNodeSocket **r_source,
+                                  bNode **r_source_node)
+{
+  bNode *ao = bke::node_add_static_node(nullptr, tree, SH_NODE_AMBIENT_OCCLUSION);
+  if (ao == nullptr) {
+    return false;
+  }
+  /* Only the object itself occludes, and the per-shader-evaluation ray count is the bake's
+   * sample count. The plane stays unlinked so Cycles shades the actual normal. */
+  ao->custom1 = std::max(samples, 1);
+  ao->custom2 |= SHD_AO_LOCAL;
+  if (bNodeSocket *distance = bke::node_find_socket(*ao, SOCK_IN, UString("Distance"))) {
+    mesh_map_bake_set_float(*distance, ao_distance > 0.0f ? ao_distance : 1.0f);
+  }
+  *r_source = bke::node_find_socket(*ao, SOCK_OUT, UString("AO"));
+  *r_source_node = ao;
+  return true;
+}
+
+bool mesh_map_bake_emit_source_position(bNodeTree &tree,
+                                        const MaterialMeshMapSettings & /*settings*/,
+                                        const float /*ao_distance*/,
+                                        const int /*samples*/,
+                                        bNodeSocket **r_source,
+                                        bNode **r_source_node)
+{
+  /* The Geometry node's Position output is the world-space position Cycles shades with: the
+   * emission pass records it as a color, and the normalization pass (the caller's) decides
+   * what the texels mean beyond that. */
+  bNode *geometry = bke::node_add_static_node(nullptr, tree, SH_NODE_NEW_GEOMETRY);
+  if (geometry == nullptr) {
+    return false;
+  }
+  *r_source = bke::node_find_socket(*geometry, SOCK_OUT, UString("Position"));
+  *r_source_node = geometry;
+  return true;
+}
+
+bool mesh_map_bake_emit_source_curvature(bNodeTree &tree,
+                                         const MaterialMeshMapSettings & /*settings*/,
+                                         const float /*ao_distance*/,
+                                         const int /*samples*/,
+                                         bNodeSocket **r_source,
+                                         bNode **r_source_node)
+{
+  bNode *geometry = bke::node_add_static_node(nullptr, tree, SH_NODE_NEW_GEOMETRY);
+  if (geometry == nullptr) {
+    return false;
+  }
+  /* Cycles requests #ATTR_STD_POINTINESS itself when the output is linked. */
+  *r_source = bke::node_find_socket(*geometry, SOCK_OUT, UString("Pointiness"));
+  *r_source_node = geometry;
+  return true;
+}
+
+bool mesh_map_bake_emit_source_edge(bNodeTree &tree,
+                                    const MaterialMeshMapSettings &settings,
+                                    const float /*ao_distance*/,
+                                    const int samples,
+                                    bNodeSocket **r_source,
+                                    bNode **r_source_node)
+{
+  bNode *bevel = bke::node_add_static_node(nullptr, tree, SH_NODE_BEVEL);
+  bNode *geometry = bke::node_add_static_node(nullptr, tree, SH_NODE_NEW_GEOMETRY);
+  bNode *dot = bke::node_add_static_node(nullptr, tree, SH_NODE_VECTOR_MATH);
+  bNode *subtract = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+  bNode *range = bke::node_add_static_node(nullptr, tree, SH_NODE_MAP_RANGE);
+  if (bevel == nullptr || geometry == nullptr || dot == nullptr || subtract == nullptr ||
+      range == nullptr)
+  {
+    return false;
+  }
+  bevel->custom1 = std::clamp(
+      samples, MESH_MAP_BAKE_EDGE_BEVEL_SAMPLES_MIN, MESH_MAP_BAKE_EDGE_BEVEL_SAMPLES_MAX);
+  if (bNodeSocket *radius = bke::node_find_socket(*bevel, SOCK_IN, UString("Radius"))) {
+    mesh_map_bake_set_float(*radius, std::max(settings.edge_radius, 0.0f));
+  }
+
+  /* edge = saturate((1 - dot(bevel normal, geometry normal)) / MESH_MAP_BAKE_EDGE_RANGE). */
+  dot->custom1 = NODE_VECTOR_MATH_DOT_PRODUCT;
+  subtract->custom1 = NODE_MATH_SUBTRACT;
+  if (NodeMapRange *storage = static_cast<NodeMapRange *>(range->storage)) {
+    storage->data_type = CD_PROP_FLOAT;
+    storage->interpolation_type = NODE_MAP_RANGE_LINEAR;
+    storage->clamp = 1;
+  }
+  range->custom1 = true;
+  range->custom2 = NODE_MAP_RANGE_LINEAR;
+
+  bNodeSocket *bevel_normal = bke::node_find_socket(*bevel, SOCK_OUT, UString("Normal"));
+  bNodeSocket *geometry_normal = bke::node_find_socket(*geometry, SOCK_OUT, UString("Normal"));
+  bNodeSocket *dot_a = bke::node_find_socket(*dot, SOCK_IN, UString("Vector"));
+  bNodeSocket *dot_b = bke::node_find_socket(*dot, SOCK_IN, UString("Vector_001"));
+  bNodeSocket *dot_value = bke::node_find_socket(*dot, SOCK_OUT, UString("Value"));
+  bNodeSocket *subtract_a = bke::node_find_socket(*subtract, SOCK_IN, UString("Value"));
+  bNodeSocket *subtract_b = bke::node_find_socket(*subtract, SOCK_IN, UString("Value_001"));
+  bNodeSocket *subtract_value = bke::node_find_socket(*subtract, SOCK_OUT, UString("Value"));
+  bNodeSocket *range_value = bke::node_find_socket(*range, SOCK_IN, UString("Value"));
+  bNodeSocket *range_from_min = bke::node_find_socket(*range, SOCK_IN, UString("From Min"));
+  bNodeSocket *range_from_max = bke::node_find_socket(*range, SOCK_IN, UString("From Max"));
+  bNodeSocket *range_to_min = bke::node_find_socket(*range, SOCK_IN, UString("To Min"));
+  bNodeSocket *range_to_max = bke::node_find_socket(*range, SOCK_IN, UString("To Max"));
+  *r_source = bke::node_find_socket(*range, SOCK_OUT, UString("Result"));
+  if (bevel_normal == nullptr || geometry_normal == nullptr || dot_a == nullptr ||
+      dot_b == nullptr || dot_value == nullptr || subtract_a == nullptr ||
+      subtract_b == nullptr || subtract_value == nullptr || range_value == nullptr ||
+      range_from_min == nullptr || range_from_max == nullptr || range_to_min == nullptr ||
+      range_to_max == nullptr || *r_source == nullptr)
+  {
+    return false;
+  }
+  mesh_map_bake_set_float(*subtract_a, 1.0f);
+  mesh_map_bake_set_float(*range_from_min, 0.0f);
+  mesh_map_bake_set_float(*range_from_max, MESH_MAP_BAKE_EDGE_RANGE);
+  mesh_map_bake_set_float(*range_to_min, 0.0f);
+  mesh_map_bake_set_float(*range_to_max, 1.0f);
+
+  bke::node_add_link(tree, *bevel, *bevel_normal, *dot, *dot_a);
+  bke::node_add_link(tree, *geometry, *geometry_normal, *dot, *dot_b);
+  bke::node_add_link(tree, *dot, *dot_value, *subtract, *subtract_b);
+  bke::node_add_link(tree, *subtract, *subtract_value, *range, *range_value);
+  *r_source_node = range;
+  return true;
+}
+
 bNode *BKE_mesh_maps_bake_build_emit_tree(bNodeTree &tree,
                                           const int8_t type,
                                           const MaterialMeshMapSettings &settings,
-                                          const float ao_distance)
+                                          const float ao_distance,
+                                          const int samples)
 {
+  const MeshMapTypeInfo *info = BKE_mesh_maps_type_info_get(type);
+  if (info == nullptr || info->emit_tree_builder == nullptr) {
+    /* The normals bake through the native pass and the CPU maps need no engine: no graph. */
+    return nullptr;
+  }
   bNodeSocket *source = nullptr;
   bNode *source_node = nullptr;
-
-  switch (type) {
-    case MA_MESH_MAP_AO: {
-      bNode *ao = bke::node_add_static_node(nullptr, tree, SH_NODE_AMBIENT_OCCLUSION);
-      if (ao == nullptr) {
-        return nullptr;
-      }
-      /* Only the object itself occludes, and the per-shader-evaluation ray count is the bake's
-       * sample count. The plane stays unlinked so Cycles shades the actual normal. */
-      ao->custom1 = std::max(settings.samples, 1);
-      ao->custom2 |= SHD_AO_LOCAL;
-      if (bNodeSocket *distance = bke::node_find_socket(*ao, SOCK_IN, UString("Distance"))) {
-        mesh_map_bake_set_float(*distance, ao_distance > 0.0f ? ao_distance : 1.0f);
-      }
-      source = bke::node_find_socket(*ao, SOCK_OUT, UString("AO"));
-      source_node = ao;
-      break;
-    }
-    case MA_MESH_MAP_CURVATURE: {
-      bNode *geometry = bke::node_add_static_node(nullptr, tree, SH_NODE_NEW_GEOMETRY);
-      if (geometry == nullptr) {
-        return nullptr;
-      }
-      /* Cycles requests #ATTR_STD_POINTINESS itself when the output is linked. */
-      source = bke::node_find_socket(*geometry, SOCK_OUT, UString("Pointiness"));
-      source_node = geometry;
-      break;
-    }
-    case MA_MESH_MAP_EDGE: {
-      bNode *bevel = bke::node_add_static_node(nullptr, tree, SH_NODE_BEVEL);
-      bNode *geometry = bke::node_add_static_node(nullptr, tree, SH_NODE_NEW_GEOMETRY);
-      bNode *dot = bke::node_add_static_node(nullptr, tree, SH_NODE_VECTOR_MATH);
-      bNode *subtract = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
-      bNode *range = bke::node_add_static_node(nullptr, tree, SH_NODE_MAP_RANGE);
-      if (bevel == nullptr || geometry == nullptr || dot == nullptr || subtract == nullptr ||
-          range == nullptr)
-      {
-        return nullptr;
-      }
-      bevel->custom1 = std::clamp(settings.samples, 2, 128);
-      if (bNodeSocket *radius = bke::node_find_socket(*bevel, SOCK_IN, UString("Radius"))) {
-        mesh_map_bake_set_float(*radius, std::max(settings.edge_radius, 0.0f));
-      }
-
-      /* edge = saturate((1 - dot(bevel normal, geometry normal)) / MESH_MAP_BAKE_EDGE_RANGE). */
-      dot->custom1 = NODE_VECTOR_MATH_DOT_PRODUCT;
-      subtract->custom1 = NODE_MATH_SUBTRACT;
-      if (NodeMapRange *storage = static_cast<NodeMapRange *>(range->storage)) {
-        storage->data_type = CD_PROP_FLOAT;
-        storage->interpolation_type = NODE_MAP_RANGE_LINEAR;
-        storage->clamp = 1;
-      }
-      range->custom1 = true;
-      range->custom2 = NODE_MAP_RANGE_LINEAR;
-
-      bNodeSocket *bevel_normal = bke::node_find_socket(*bevel, SOCK_OUT, UString("Normal"));
-      bNodeSocket *geometry_normal = bke::node_find_socket(*geometry, SOCK_OUT, UString("Normal"));
-      bNodeSocket *dot_a = bke::node_find_socket(*dot, SOCK_IN, UString("Vector"));
-      bNodeSocket *dot_b = bke::node_find_socket(*dot, SOCK_IN, UString("Vector_001"));
-      bNodeSocket *dot_value = bke::node_find_socket(*dot, SOCK_OUT, UString("Value"));
-      bNodeSocket *subtract_a = bke::node_find_socket(*subtract, SOCK_IN, UString("Value"));
-      bNodeSocket *subtract_b = bke::node_find_socket(*subtract, SOCK_IN, UString("Value_001"));
-      bNodeSocket *subtract_value = bke::node_find_socket(*subtract, SOCK_OUT, UString("Value"));
-      bNodeSocket *range_value = bke::node_find_socket(*range, SOCK_IN, UString("Value"));
-      bNodeSocket *range_from_min = bke::node_find_socket(*range, SOCK_IN, UString("From Min"));
-      bNodeSocket *range_from_max = bke::node_find_socket(*range, SOCK_IN, UString("From Max"));
-      bNodeSocket *range_to_min = bke::node_find_socket(*range, SOCK_IN, UString("To Min"));
-      bNodeSocket *range_to_max = bke::node_find_socket(*range, SOCK_IN, UString("To Max"));
-      source = bke::node_find_socket(*range, SOCK_OUT, UString("Result"));
-      if (bevel_normal == nullptr || geometry_normal == nullptr || dot_a == nullptr ||
-          dot_b == nullptr || dot_value == nullptr || subtract_a == nullptr ||
-          subtract_b == nullptr || subtract_value == nullptr || range_value == nullptr ||
-          range_from_min == nullptr || range_from_max == nullptr || range_to_min == nullptr ||
-          range_to_max == nullptr || source == nullptr)
-      {
-        return nullptr;
-      }
-      mesh_map_bake_set_float(*subtract_a, 1.0f);
-      mesh_map_bake_set_float(*range_from_min, 0.0f);
-      mesh_map_bake_set_float(*range_from_max, MESH_MAP_BAKE_EDGE_RANGE);
-      mesh_map_bake_set_float(*range_to_min, 0.0f);
-      mesh_map_bake_set_float(*range_to_max, 1.0f);
-
-      bke::node_add_link(tree, *bevel, *bevel_normal, *dot, *dot_a);
-      bke::node_add_link(tree, *geometry, *geometry_normal, *dot, *dot_b);
-      bke::node_add_link(tree, *dot, *dot_value, *subtract, *subtract_b);
-      bke::node_add_link(tree, *subtract, *subtract_value, *range, *range_value);
-      source_node = range;
-      break;
-    }
-    default:
-      return nullptr;
+  if (!info->emit_tree_builder(tree, settings, ao_distance, samples, &source, &source_node)) {
+    return nullptr;
   }
-
   if (source == nullptr || source_node == nullptr) {
     return nullptr;
   }
@@ -294,6 +350,37 @@ bNode *BKE_mesh_maps_bake_build_emit_tree(bNodeTree &tree,
     }
   }
   return emission;
+}
+
+void BKE_mesh_maps_bake_normalize_position(float *result,
+                                           const size_t texels_num,
+                                           const float bb_min[3],
+                                           const float bb_max[3],
+                                           const int8_t mode)
+{
+  if (result == nullptr || mode == MA_MESH_MAP_POSITION_RAW) {
+    return;
+  }
+  float3 size = {std::max(bb_max[0] - bb_min[0], 1e-9f),
+                 std::max(bb_max[1] - bb_min[1], 1e-9f),
+                 std::max(bb_max[2] - bb_min[2], 1e-9f)};
+  if (mode == MA_MESH_MAP_POSITION_SPHERE) {
+    /* One radius covers all axes, so a long axis keeps its relative lengths. */
+    const float radius = std::max({size.x, size.y, size.z}) * 0.5f;
+    size = {radius * 2.0f, radius * 2.0f, radius * 2.0f};
+  }
+  const float3 center = {(bb_min[0] + bb_max[0]) * 0.5f,
+                         (bb_min[1] + bb_max[1]) * 0.5f,
+                         (bb_min[2] + bb_max[2]) * 0.5f};
+  const float3 origin = mode == MA_MESH_MAP_POSITION_SPHERE ?
+                            center - size * 0.5f :
+                            float3{bb_min[0], bb_min[1], bb_min[2]};
+  for (size_t i = 0; i < texels_num; i++) {
+    float *texel = &result[i * 4];
+    for (int axis = 0; axis < 3; axis++) {
+      texel[axis] = (texel[axis] - origin[axis]) / size[axis];
+    }
+  }
 }
 
 void BKE_mesh_maps_bake_id_object_color(const Object &ob, float r_color[3])
@@ -791,7 +878,8 @@ int8_t BKE_mesh_maps_bake_state_commit(ObjectMeshMapState &state,
 
 bool BKE_mesh_maps_bake_type_is_supported(const int8_t type)
 {
-  return BKE_mesh_maps_bake_type_renders(type) || BKE_mesh_maps_bake_type_cpu_id(type);
+  const MeshMapTypeInfo *info = BKE_mesh_maps_type_info_get(type);
+  return info != nullptr && info->flags != 0;
 }
 
 bool BKE_mesh_maps_bake_object_in_plan(Main &bmain,

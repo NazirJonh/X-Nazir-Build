@@ -100,6 +100,8 @@ class LAYER_MATERIAL_PT_mesh_maps(LayerMaterialButtonsPanel, Panel):
             col.prop(settings, "margin")
             col.prop(settings, "ao_distance")
             col.prop(settings, "edge_radius")
+            col.prop(settings, "position_normalization")
+            col.prop(settings, "use_directx_normal")
 
     def _draw_high_poly(self, layout, context, ob, mat):
         source = next((item for item in ob.mesh_map_sources if item.material == mat), None)

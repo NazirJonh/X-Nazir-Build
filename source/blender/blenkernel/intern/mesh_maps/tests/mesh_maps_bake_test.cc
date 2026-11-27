@@ -45,6 +45,7 @@
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_object.hh"
+#include "BKE_object_types.hh"
 #include "BKE_scene.hh"
 
 #include "RE_bake.h"
@@ -315,30 +316,29 @@ class MeshMapBakeTest : public bke::BlenderGTestBase {
 TEST_F(MeshMapBakeTest, plan_renders_cpu_and_scalar_per_type)
 {
   const int8_t rendered[] = {
-      MA_MESH_MAP_AO, MA_MESH_MAP_CURVATURE, MA_MESH_MAP_EDGE,
-      MA_MESH_MAP_NORMAL_WORLD, MA_MESH_MAP_NORMAL_OBJECT};
+      MA_MESH_MAP_AO, MA_MESH_MAP_CURVATURE, MA_MESH_MAP_EDGE, MA_MESH_MAP_POSITION,
+      MA_MESH_MAP_NORMAL_WORLD, MA_MESH_MAP_NORMAL_OBJECT, MA_MESH_MAP_NORMAL_TANGENT};
   for (const int8_t type : rendered) {
     EXPECT_TRUE(BKE_mesh_maps_bake_type_renders(type)) << int(type);
-    EXPECT_FALSE(BKE_mesh_maps_bake_type_cpu_id(type)) << int(type);
+    EXPECT_FALSE(BKE_mesh_maps_bake_type_cpu_simple(type)) << int(type);
   }
   const int8_t cpu[] = {MA_MESH_MAP_ID_OBJECT, MA_MESH_MAP_ID_MATERIAL};
   for (const int8_t type : cpu) {
-    EXPECT_TRUE(BKE_mesh_maps_bake_type_cpu_id(type)) << int(type);
+    EXPECT_TRUE(BKE_mesh_maps_bake_type_cpu_simple(type)) << int(type);
     EXPECT_FALSE(BKE_mesh_maps_bake_type_renders(type)) << int(type);
   }
-  for (const int8_t type : {int8_t(MA_MESH_MAP_THICKNESS), int8_t(MA_MESH_MAP_POSITION)}) {
-    EXPECT_FALSE(BKE_mesh_maps_bake_type_renders(type));
-    EXPECT_FALSE(BKE_mesh_maps_bake_type_cpu_id(type));
-  }
+  /* Thickness is still a reserved type: neither a render pass nor an ID fill. */
+  EXPECT_FALSE(BKE_mesh_maps_bake_type_renders(MA_MESH_MAP_THICKNESS));
+  EXPECT_FALSE(BKE_mesh_maps_bake_type_cpu_simple(MA_MESH_MAP_THICKNESS));
 }
 
 /** The two families are strictly disjoint: nothing is both rendered and CPU-filled. */
-TEST_F(MeshMapBakeTest, render_types_are_not_cpu_id)
+TEST_F(MeshMapBakeTest, render_types_are_not_cpu_simple)
 {
   for (int type = 0; type < MA_MESH_MAP_TYPE_NUM; type++) {
     const int8_t t = int8_t(type);
     const bool renders = BKE_mesh_maps_bake_type_renders(t);
-    const bool cpu = BKE_mesh_maps_bake_type_cpu_id(t);
+    const bool cpu = BKE_mesh_maps_bake_type_cpu_simple(t);
     EXPECT_FALSE(renders && cpu) << type;
   }
 }
@@ -348,8 +348,10 @@ TEST_F(MeshMapBakeTest, pass_and_normal_space_per_type)
   EXPECT_EQ(BKE_mesh_maps_bake_pass_for_type(MA_MESH_MAP_AO), SCE_PASS_EMIT);
   EXPECT_EQ(BKE_mesh_maps_bake_pass_for_type(MA_MESH_MAP_CURVATURE), SCE_PASS_EMIT);
   EXPECT_EQ(BKE_mesh_maps_bake_pass_for_type(MA_MESH_MAP_EDGE), SCE_PASS_EMIT);
+  EXPECT_EQ(BKE_mesh_maps_bake_pass_for_type(MA_MESH_MAP_POSITION), SCE_PASS_EMIT);
   EXPECT_EQ(BKE_mesh_maps_bake_pass_for_type(MA_MESH_MAP_NORMAL_WORLD), SCE_PASS_NORMAL);
   EXPECT_EQ(BKE_mesh_maps_bake_pass_for_type(MA_MESH_MAP_NORMAL_OBJECT), SCE_PASS_NORMAL);
+  EXPECT_EQ(BKE_mesh_maps_bake_pass_for_type(MA_MESH_MAP_NORMAL_TANGENT), SCE_PASS_NORMAL);
   EXPECT_EQ(BKE_mesh_maps_bake_pass_for_type(MA_MESH_MAP_ID_OBJECT), eScenePassType(0));
 
   eBakeSpace space = R_BAKE_SPACE_CAMERA;
@@ -357,7 +359,119 @@ TEST_F(MeshMapBakeTest, pass_and_normal_space_per_type)
   EXPECT_EQ(space, R_BAKE_SPACE_WORLD);
   EXPECT_TRUE(BKE_mesh_maps_bake_normal_space_for_type(MA_MESH_MAP_NORMAL_OBJECT, space));
   EXPECT_EQ(space, R_BAKE_SPACE_OBJECT);
+  EXPECT_TRUE(BKE_mesh_maps_bake_normal_space_for_type(MA_MESH_MAP_NORMAL_TANGENT, space));
+  EXPECT_EQ(space, R_BAKE_SPACE_TANGENT);
   EXPECT_FALSE(BKE_mesh_maps_bake_normal_space_for_type(MA_MESH_MAP_AO, space));
+}
+
+TEST_F(MeshMapBakeTest, normalize_position_raw_box_and_sphere)
+{
+  const float bb_min[3] = {0.0f, 0.0f, 0.0f};
+  const float bb_max[3] = {2.0f, 2.0f, 10.0f};
+  const float raw[8] = {2.0f, 2.0f, 10.0f, 1.0f, -3.0f, 1.0f, 0.0f, 0.5f};
+  float texels[8];
+
+  std::memcpy(texels, raw, sizeof(raw));
+  BKE_mesh_maps_bake_normalize_position(texels, 2, bb_min, bb_max, MA_MESH_MAP_POSITION_RAW);
+  for (int i = 0; i < 8; i++) {
+    EXPECT_FLOAT_EQ(texels[i], raw[i]) << i;
+  }
+
+  std::memcpy(texels, raw, sizeof(raw));
+  BKE_mesh_maps_bake_normalize_position(texels, 2, bb_min, bb_max, MA_MESH_MAP_POSITION_BOX);
+  EXPECT_FLOAT_EQ(texels[0], 1.0f);
+  EXPECT_FLOAT_EQ(texels[1], 1.0f);
+  EXPECT_FLOAT_EQ(texels[2], 1.0f);
+  /* Alpha is not part of the normalization. */
+  EXPECT_FLOAT_EQ(texels[3], 1.0f);
+  EXPECT_FLOAT_EQ(texels[4], -1.5f);
+  EXPECT_FLOAT_EQ(texels[5], 0.5f);
+  EXPECT_FLOAT_EQ(texels[6], 0.0f);
+  EXPECT_FLOAT_EQ(texels[7], 0.5f);
+
+  std::memcpy(texels, raw, sizeof(raw));
+  BKE_mesh_maps_bake_normalize_position(texels, 2, bb_min, bb_max, MA_MESH_MAP_POSITION_SPHERE);
+  /* The longest axis sets one diameter: size 10, centre (1, 1, 5), origin (-4, -4, 0). */
+  EXPECT_FLOAT_EQ(texels[0], 0.6f);
+  EXPECT_FLOAT_EQ(texels[1], 0.6f);
+  EXPECT_FLOAT_EQ(texels[2], 1.0f);
+  EXPECT_FLOAT_EQ(texels[3], 1.0f);
+  EXPECT_FLOAT_EQ(texels[4], 0.1f);
+  EXPECT_FLOAT_EQ(texels[5], 0.5f);
+  EXPECT_FLOAT_EQ(texels[6], 0.0f);
+  EXPECT_FLOAT_EQ(texels[7], 0.5f);
+}
+
+TEST_F(MeshMapBakeTest, type_table_describes_every_type)
+{
+  for (int type = 0; type < MA_MESH_MAP_TYPE_NUM; type++) {
+    const int8_t t = int8_t(type);
+    const MeshMapTypeInfo *info = BKE_mesh_maps_type_info_get(t);
+    /* A type added to the enum without a descriptor row fails here, not silently in a bake. */
+    ASSERT_NE(info, nullptr) << type;
+    EXPECT_EQ(info->id, t) << type;
+    ASSERT_NE(info->idname, nullptr) << type;
+    EXPECT_NE(info->idname[0], '\0') << type;
+    ASSERT_NE(info->ui_name, nullptr) << type;
+    EXPECT_NE(info->ui_name[0], '\0') << type;
+    ASSERT_NE(info->ui_description, nullptr) << type;
+    EXPECT_NE(info->ui_description[0], '\0') << type;
+  }
+  /* Outside the described range there is no descriptor, and the callers must refuse the type. */
+  EXPECT_EQ(BKE_mesh_maps_type_info_get(int8_t(MA_MESH_MAP_TYPE_NUM)), nullptr);
+  EXPECT_EQ(BKE_mesh_maps_type_info_get(int8_t(-1)), nullptr);
+}
+
+/** The public predicates are thin reads of the descriptor table; this pins them to it bit for
+ * bit, so a table edit that disagrees with the bake's behavior fails here. */
+TEST_F(MeshMapBakeTest, type_predicates_and_mask_follow_the_table)
+{
+  for (int type = 0; type < MA_MESH_MAP_TYPE_NUM; type++) {
+    const int8_t t = int8_t(type);
+    const MeshMapTypeInfo *info = BKE_mesh_maps_type_info_get(t);
+    ASSERT_NE(info, nullptr) << type;
+    const bool rendered = (info->flags & MESH_MAP_TYPE_RENDERED) != 0;
+    const bool cpu_fill = (info->flags & MESH_MAP_TYPE_CPU_FILL) != 0;
+    const bool scalar = (info->flags & MESH_MAP_TYPE_SCALAR) != 0;
+    const bool needs_sources = (info->flags & MESH_MAP_TYPE_NEEDS_SOURCES) != 0;
+    const bool needs_other_atlas = (info->flags & MESH_MAP_TYPE_NEEDS_OTHER_ATLAS) != 0;
+    EXPECT_EQ(BKE_mesh_maps_bake_type_renders(t), rendered) << type;
+    EXPECT_EQ(BKE_mesh_maps_bake_type_scalar(t), scalar) << type;
+    EXPECT_EQ(BKE_mesh_maps_bake_type_cpu_simple(t),
+              cpu_fill && !needs_sources && !needs_other_atlas)
+        << type;
+    /* Every described type is one the bake can produce when its flags say so, and every scalar
+     * map is filled somehow: through the engine or on the CPU. */
+    EXPECT_EQ(BKE_mesh_maps_bake_type_is_supported(t), info->flags != 0) << type;
+    EXPECT_TRUE(!scalar || rendered || cpu_fill) << type;
+    EXPECT_TRUE(!needs_sources || cpu_fill) << type;
+    EXPECT_TRUE(!needs_other_atlas || cpu_fill) << type;
+    /* A rendered map bakes through the row's pass; a CPU fill needs no pass and no space.
+     * The reserved Thickness placeholder has neither flag, so it is neither rendered nor a CPU
+     * fill and must not be mistaken for either. */
+    EXPECT_EQ(rendered, info->pass != eScenePassType(0)) << type;
+    EXPECT_EQ(cpu_fill, !rendered && info->flags != 0u) << type;
+    eBakeSpace space = R_BAKE_SPACE_CAMERA;
+    const bool has_space = BKE_mesh_maps_bake_normal_space_for_type(t, space);
+    EXPECT_EQ(has_space, info->pass == SCE_PASS_NORMAL) << type;
+    if (has_space) {
+      EXPECT_EQ(space, info->space) << type;
+    }
+  }
+
+  /* The supported mask is the bits of the types the table supports, and the CPU mask is the two
+   * ID maps. */
+  uint32_t expected_mask = 0;
+  for (int type = 0; type < MA_MESH_MAP_TYPE_NUM; type++) {
+    const MeshMapTypeInfo *info = BKE_mesh_maps_type_info_get(int8_t(type));
+    if (info != nullptr && info->flags != 0) {
+      expected_mask |= 1u << uint32_t(type);
+    }
+  }
+  EXPECT_EQ(uint32_t(MESH_MAP_BAKE_TYPE_MASK_SUPPORTED), expected_mask);
+  EXPECT_EQ(uint32_t(MESH_MAP_BAKE_TYPE_MASK_ALL), uint32_t(MESH_MAP_BAKE_TYPE_MASK_SUPPORTED));
+  EXPECT_EQ(uint32_t(MESH_MAP_BAKE_TYPE_MASK_CPU),
+            uint32_t((1u << MA_MESH_MAP_ID_OBJECT) | (1u << MA_MESH_MAP_ID_MATERIAL)));
 }
 
 TEST_F(MeshMapBakeTest, ao_distance_uses_setting_when_positive)
@@ -393,7 +507,7 @@ TEST_F(MeshMapBakeTest, emit_tree_ao_is_local_with_distance_and_samples)
   MaterialMeshMapSettings settings;
   settings.samples = 64;
   bNode *emission = BKE_mesh_maps_bake_build_emit_tree(
-      *ma->nodetree, MA_MESH_MAP_AO, settings, 3.5f);
+      *ma->nodetree, MA_MESH_MAP_AO, settings, 3.5f, settings.samples);
   ASSERT_NE(emission, nullptr);
   EXPECT_EQ(emission->type_legacy, SH_NODE_EMISSION);
 
@@ -413,7 +527,7 @@ TEST_F(MeshMapBakeTest, emit_tree_curvature_reads_pointiness)
   Material *ma = add_material("MapsMat");
   MaterialMeshMapSettings settings;
   bNode *emission = BKE_mesh_maps_bake_build_emit_tree(
-      *ma->nodetree, MA_MESH_MAP_CURVATURE, settings, 0.0f);
+      *ma->nodetree, MA_MESH_MAP_CURVATURE, settings, 0.0f, settings.samples);
   ASSERT_NE(emission, nullptr);
   bNode *geometry = find_node(*ma->nodetree, SH_NODE_NEW_GEOMETRY);
   ASSERT_NE(geometry, nullptr);
@@ -427,7 +541,7 @@ TEST_F(MeshMapBakeTest, emit_tree_edge_uses_bevel_and_map_range)
   settings.samples = 8;
   settings.edge_radius = 0.02f;
   bNode *emission = BKE_mesh_maps_bake_build_emit_tree(
-      *ma->nodetree, MA_MESH_MAP_EDGE, settings, 0.0f);
+      *ma->nodetree, MA_MESH_MAP_EDGE, settings, 0.0f, settings.samples);
   ASSERT_NE(emission, nullptr);
 
   bNode *bevel = find_node(*ma->nodetree, SH_NODE_BEVEL);
@@ -457,14 +571,15 @@ TEST_F(MeshMapBakeTest, emit_tree_is_null_for_non_emission_types)
   Material *ma = add_material("MapsMat");
   MaterialMeshMapSettings settings;
   EXPECT_EQ(BKE_mesh_maps_bake_build_emit_tree(
-                *ma->nodetree, MA_MESH_MAP_NORMAL_WORLD, settings, 0.0f),
+                *ma->nodetree, MA_MESH_MAP_NORMAL_WORLD, settings, 0.0f, settings.samples),
             nullptr);
   EXPECT_EQ(BKE_mesh_maps_bake_build_emit_tree(
-                *ma->nodetree, MA_MESH_MAP_ID_MATERIAL, settings, 0.0f),
+                *ma->nodetree, MA_MESH_MAP_ID_MATERIAL, settings, 0.0f, settings.samples),
             nullptr);
   EXPECT_EQ(count_nodes(*ma->nodetree, SH_NODE_EMISSION), 0);
   /* The negative guard is only meaningful next to a type that does build an emission surface. */
-  EXPECT_NE(BKE_mesh_maps_bake_build_emit_tree(*ma->nodetree, MA_MESH_MAP_AO, settings, 1.0f),
+  EXPECT_NE(BKE_mesh_maps_bake_build_emit_tree(
+                *ma->nodetree, MA_MESH_MAP_AO, settings, 1.0f, settings.samples),
             nullptr);
 }
 
@@ -478,7 +593,7 @@ TEST_F(MeshMapBakeTest, edge_samples_are_clamped)
     MaterialMeshMapSettings settings;
     settings.samples = inputs[i];
     bNode *emission = BKE_mesh_maps_bake_build_emit_tree(
-        *ma->nodetree, MA_MESH_MAP_EDGE, settings, 0.0f);
+        *ma->nodetree, MA_MESH_MAP_EDGE, settings, 0.0f, settings.samples);
     ASSERT_NE(emission, nullptr) << inputs[i];
     bNode *bevel = find_node(*ma->nodetree, SH_NODE_BEVEL);
     ASSERT_NE(bevel, nullptr) << inputs[i];
@@ -985,6 +1100,35 @@ TEST_F(MeshMapBakeTest, viewport_and_render_hashes_differ_for_subsurf)
   DEG_graph_free(render_graph);
 }
 
+/**
+ * Position in BOX/SPHERE mode fits the object's *world-space* bounds, so a rotation that changes
+ * the world AABB changes the baked pixels even though RAW/BOX/SPHERE are otherwise transform
+ * agnostic. The hash must therefore include the object matrix in every mode, not only RAW.
+ */
+TEST_F(MeshMapBakeTest, position_hash_follows_object_rotation_in_box_mode)
+{
+  Mesh *mesh = add_quad_two_uv("Quad");
+  Material *ma = add_material("MapsMat");
+  Object *ob = add_simple_object("Ob", mesh, ma);
+  ASSERT_NE(ob->runtime, nullptr);
+
+  ma->mesh_map_settings.position_normalization = MA_MESH_MAP_POSITION_BOX;
+
+  uint32_t before[2];
+  BKE_mesh_maps_object_hash(*ob, *ma, MA_MESH_MAP_POSITION, before);
+
+  /* Rotate 90 degrees around X: the quad leaves the XY plane, so its world AABB gains a Z
+   * extent and the normalized Position map would change. */
+  ob->runtime->object_to_world[1][1] = 0.0f;
+  ob->runtime->object_to_world[1][2] = -1.0f;
+  ob->runtime->object_to_world[2][1] = 1.0f;
+  ob->runtime->object_to_world[2][2] = 0.0f;
+
+  uint32_t after[2];
+  BKE_mesh_maps_object_hash(*ob, *ma, MA_MESH_MAP_POSITION, after);
+  EXPECT_NE(memcmp(before, after, sizeof(before)), 0);
+}
+
 TEST_F(MeshMapBakeTest, foreign_coverage_only_material_and_active_uv)
 {
   Material *ma = add_material("MapsMat");
@@ -1052,7 +1196,7 @@ TEST_F(MeshMapBakeTest, plan_pairs_active_and_all_scopes)
   Vector<MeshMapBakePair> active;
   BKE_mesh_maps_bake_plan_pairs(
       *bmain, a, *ma, MA_MESH_MAP_BAKE_ACTIVE_OBJECT, MESH_MAP_BAKE_TYPE_MASK_SUPPORTED, active);
-  ASSERT_EQ(active.size(), 7u);
+  ASSERT_EQ(active.size(), 9u);
   for (const MeshMapBakePair &pair : active) {
     EXPECT_EQ(pair.object, a);
     EXPECT_EQ(pair.material, ma);
@@ -1072,8 +1216,8 @@ TEST_F(MeshMapBakeTest, plan_pairs_active_and_all_scopes)
   Vector<MeshMapBakePair> all;
   BKE_mesh_maps_bake_plan_pairs(
       *bmain, nullptr, *ma, MA_MESH_MAP_BAKE_ALL_OBJECTS, MESH_MAP_BAKE_TYPE_MASK_SUPPORTED, all);
-  /* A and B use `ma`; each contributes the seven supported types. */
-  ASSERT_EQ(all.size(), 14u);
+  /* A and B use `ma`; each contributes the nine supported types. */
+  ASSERT_EQ(all.size(), 18u);
   bool saw_a = false;
   bool saw_b = false;
   bool saw_c = false;
@@ -1346,7 +1490,7 @@ TEST_F(MeshMapBakeTest, source_objects_are_not_foreign_or_baked)
   Vector<MeshMapBakePair> pairs;
   BKE_mesh_maps_bake_plan_pairs(
       *bmain, nullptr, *ma, MA_MESH_MAP_BAKE_ALL_OBJECTS, MESH_MAP_BAKE_TYPE_MASK_SUPPORTED, pairs);
-  ASSERT_EQ(pairs.size(), 7u);
+  ASSERT_EQ(pairs.size(), 9u);
   for (const MeshMapBakePair &pair : pairs) {
     EXPECT_EQ(pair.object, low);
   }

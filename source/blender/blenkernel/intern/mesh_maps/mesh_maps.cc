@@ -41,6 +41,20 @@
 
 namespace blender {
 
+/* The appended tail of #MaterialMeshMapSettings and the tail pad of #Material are one layout
+ * contract: the settings grow by appending, and #Material's `_pad_tail[4]` keeps closing it on
+ * the pointer boundary. The asserts fail to compile the day the pads drift. */
+static_assert(sizeof(MaterialMeshMapSettings) == 36,
+              "MaterialMeshMapSettings DNA layout changed");
+static_assert(offsetof(MaterialMeshMapSettings, position_normalization) == 28,
+              "MaterialMeshMapSettings DNA layout changed");
+static_assert(offsetof(MaterialMeshMapSettings, use_directx_normal) == 29,
+              "MaterialMeshMapSettings DNA layout changed");
+static_assert(offsetof(Material, mesh_map_settings) % 8 == 0,
+              "Material mesh_map_settings must stay pointer-aligned");
+static_assert(offsetof(Material, _pad_tail) + 4 == sizeof(Material),
+              "Material must end on its explicit tail pad without compiler padding");
+
 namespace {
 
 /** Whether \a type names a #eMaterialMeshMapType. */
@@ -500,8 +514,24 @@ void BKE_mesh_maps_object_hash(const Object &ob_eval,
   if (type == MA_MESH_MAP_EDGE) {
     h = mesh_map_hash_bytes(h, &ma.mesh_map_settings.edge_radius, sizeof(float));
   }
+  if (type == MA_MESH_MAP_POSITION) {
+    /* The raw mode stores the world position as it lies, and the box/sphere modes fit the
+     * *world-space* bounds of the object. Translation and a uniform scale may cancel in the
+     * normalized result, but a rotation changes the world AABB, so the transform is part of the
+     * claim in every mode. Hashing it always is safer than leaving a rotated object marked VALID
+     * with pixels baked from the old orientation. */
+    h = mesh_map_hash_mix(h, uint64_t(uint8_t(ma.mesh_map_settings.position_normalization)));
+    h = mesh_map_hash_bytes(h, ob_eval.object_to_world().ptr(), sizeof(float4x4));
+  }
+  if (type == MA_MESH_MAP_NORMAL_TANGENT) {
+    h = mesh_map_hash_mix(h, uint64_t(ma.mesh_map_settings.use_directx_normal != 0 ? 1 : 0));
+  }
 
-  if (ELEM(type, MA_MESH_MAP_NORMAL_WORLD, MA_MESH_MAP_NORMAL_OBJECT)) {
+  if (ELEM(type,
+           MA_MESH_MAP_NORMAL_WORLD,
+           MA_MESH_MAP_NORMAL_OBJECT,
+           MA_MESH_MAP_NORMAL_TANGENT))
+  {
     /* What the evaluated normals depend on beyond positions and topology: the sharp flags and the
      * custom normals. Their presence is part of the hash, so turning split normals on or off moves
      * it. */
@@ -510,7 +540,8 @@ void BKE_mesh_maps_object_hash(const Object &ob_eval,
     h = mesh_map_hash_attribute(h, mesh->attributes(), "custom_normal");
   }
   if (type == MA_MESH_MAP_NORMAL_WORLD) {
-    /* World-space normals follow the object transform; object-space and the rest do not. AO is a
+    /* World-space normals follow the object transform; object- and tangent-space and the rest do
+     * not (the tangent frame comes from the mesh and the conversion undoes the transform). AO is a
      * per-object effect in v1 and ignores the transform too. */
     h = mesh_map_hash_bytes(h, ob_eval.object_to_world().ptr(), sizeof(float4x4));
   }
@@ -665,6 +696,8 @@ void BKE_mesh_maps_material_slots_copy(Material &ma_dst, const Material &ma_src)
   ma_dst.mesh_map_settings.resolution = ma_src.mesh_map_settings.resolution;
   ma_dst.mesh_map_settings.samples = ma_src.mesh_map_settings.samples;
   ma_dst.mesh_map_settings.use_denoise = ma_src.mesh_map_settings.use_denoise;
+  ma_dst.mesh_map_settings.position_normalization = ma_src.mesh_map_settings.position_normalization;
+  ma_dst.mesh_map_settings.use_directx_normal = ma_src.mesh_map_settings.use_directx_normal;
   ma_dst.mesh_map_settings.margin = ma_src.mesh_map_settings.margin;
   ma_dst.mesh_map_settings.ao_distance = ma_src.mesh_map_settings.ao_distance;
   ma_dst.mesh_map_settings.edge_radius = ma_src.mesh_map_settings.edge_radius;

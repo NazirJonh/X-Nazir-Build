@@ -162,6 +162,10 @@ struct MeshMapBakeWorld {
   char uv_name[68] = "";
   int8_t type = MA_MESH_MAP_AO;
   int resolution = 0;
+  /** Whether the tangent normal of this pair flips its green channel (the DirectX convention). */
+  bool directx_normal = false;
+  /** #eMaterialMeshMapPositionNormalization for a Position pair. */
+  int8_t position_normalization = MA_MESH_MAP_POSITION_BOX;
   char *margin_mask = nullptr;
 
   /* The high-poly source: for a CPU ID pair, the user's original objects (their names decide the
@@ -292,24 +296,10 @@ Depsgraph *mesh_map_bake_depsgraph_new(Main &bmain, Scene &scene, ViewLayer &vie
 
 const char *mesh_map_bake_type_name(const int8_t type)
 {
-  switch (type) {
-    case MA_MESH_MAP_AO:
-      return "AO";
-    case MA_MESH_MAP_CURVATURE:
-      return "Curvature";
-    case MA_MESH_MAP_EDGE:
-      return "Edge";
-    case MA_MESH_MAP_NORMAL_WORLD:
-      return "World Normal";
-    case MA_MESH_MAP_NORMAL_OBJECT:
-      return "Object Normal";
-    case MA_MESH_MAP_ID_OBJECT:
-      return "Object ID";
-    case MA_MESH_MAP_ID_MATERIAL:
-      return "Material ID";
-    default:
-      return "Map";
-  }
+  const MeshMapTypeInfo *info = BKE_mesh_maps_type_info_get(type);
+  /* Keeps the label of a type this build does not list (a file saved by a newer Blender) readable.
+   * The names come from the descriptor table, so the reports and the RNA enum agree. */
+  return info != nullptr ? info->ui_name : "Map";
 }
 
 void mesh_map_bake_world_free(MeshMapBakeWorld &world)
@@ -476,6 +466,8 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
   }
   job.world.mesh = mesh_copy;
   job.world.low_matrix = object_matrix;
+  job.world.directx_normal = ma->mesh_map_settings.use_directx_normal != 0;
+  job.world.position_normalization = ma->mesh_map_settings.position_normalization;
 
   if (is_render) {
     /* The private render world: a fresh Main holding the mesh copy, a throw-away scene with the
@@ -517,8 +509,11 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
     assign_material(job.world.temp_object);
     if (BKE_mesh_maps_bake_pass_for_type(pair.type) == SCE_PASS_EMIT) {
       const float ao_distance = BKE_mesh_maps_bake_ao_distance(*mesh_copy, ma->mesh_map_settings);
-      BKE_mesh_maps_bake_build_emit_tree(
-          *temp_material->nodetree, pair.type, ma->mesh_map_settings, ao_distance);
+      BKE_mesh_maps_bake_build_emit_tree(*temp_material->nodetree,
+                                         pair.type,
+                                         ma->mesh_map_settings,
+                                         ao_distance,
+                                         ma->mesh_map_settings.samples);
       BKE_ntree_update_without_main(*temp_material->nodetree);
     }
 
@@ -1014,8 +1009,57 @@ void mesh_map_bake_worker_run(MeshMapBakeJob &job, MeshMapBakeWorld &world)
         RE_bake_normal_world_to_object(
             world.pixels, pixels_total, 4, world.result, world.temp_object, swizzle);
       }
+      else if (space == R_BAKE_SPACE_TANGENT) {
+        /* The tangent frame comes from the low-poly mesh's active UV; the conversion turns the
+         * world normals into it through the low-poly matrix, so a moved object keeps the same
+         * map. */
+        RE_bake_normal_world_to_tangent(world.pixels,
+                                        pixels_total,
+                                        4,
+                                        world.result,
+                                        world.mesh,
+                                        swizzle,
+                                        world.low_matrix.ptr());
+        if (world.directx_normal) {
+          /* DirectX flips the green channel of an encoded tangent map. The uncovered texels stay
+           * zero and the commit never writes them, so flipping everything is safe. */
+          const size_t floats_total = pixels_total * 4;
+          for (size_t i = 0; i < floats_total; i += 4) {
+            world.result[i + 1] = 1.0f - world.result[i + 1];
+          }
+        }
+      }
       else {
         RE_bake_normal_world_to_world(world.pixels, pixels_total, 4, world.result, swizzle);
+      }
+    }
+    else if (world.type == MA_MESH_MAP_POSITION &&
+             world.position_normalization != MA_MESH_MAP_POSITION_RAW)
+    {
+      /* The emission pass delivered the raw world-space position; remap it into the object's
+       * bounds so the map stays a readable gradient. Only the covered and margin texels survive
+       * the commit, so the background's remapped zeros do not matter. */
+      const Span<float3> positions = world.mesh->vert_positions();
+      if (!positions.is_empty()) {
+        /* The bounds are in world space, the same space the emission graph writes: seed them with
+         * the first *transformed* vertex, not with its object-space position, or a non-identity
+         * object matrix would fold the local origin into the world bounds. */
+        float3 first_world;
+        mul_v3_m4v3(first_world, world.low_matrix.ptr(), positions[0]);
+        float3 bb_min = first_world;
+        float3 bb_max = first_world;
+        for (const float3 &position : positions) {
+          float3 world_position;
+          mul_v3_m4v3(world_position, world.low_matrix.ptr(), position);
+          bb_min = math::min(bb_min, world_position);
+          bb_max = math::max(bb_max, world_position);
+        }
+        const size_t pixels_total = world.pixels_num * size_t(world.tiles_num);
+        BKE_mesh_maps_bake_normalize_position(world.result,
+                                              pixels_total,
+                                              bb_min,
+                                              bb_max,
+                                              world.position_normalization);
       }
     }
   }
@@ -1317,20 +1361,35 @@ void mesh_map_bake_free(void *customdata)
 /** \name Operator
  * \{ */
 
-/** The same maps as #rna_enum_material_mesh_map_type_items, as an enum-flag bitmask. */
+/** One enum-flag item of the descriptor table: bit `type` set, texts from the table. */
+constexpr EnumPropertyItem mesh_map_bake_type_flag_item(const int8_t type)
+{
+  const blender::MeshMapTypeInfo *info = blender::BKE_mesh_maps_type_info_get(type);
+  return {1 << info->id, info->idname, 0, info->ui_name, info->ui_description};
+}
+
+/**
+ * The same maps as #rna_enum_material_mesh_map_type_items, as an enum-flag bitmask (bit `type`
+ * set). Built from #MESH_MAP_BAKE_TYPE_INFOS, so the identifiers, names and descriptions live only
+ * in the table; the order is pinned by this list to the operators' historical listing (render maps
+ * first, then the CPU ones).
+ */
+constexpr EnumPropertyItem mesh_map_bake_type_flag_items_array[] = {
+    mesh_map_bake_type_flag_item(MA_MESH_MAP_AO),
+    mesh_map_bake_type_flag_item(MA_MESH_MAP_CURVATURE),
+    mesh_map_bake_type_flag_item(MA_MESH_MAP_EDGE),
+    mesh_map_bake_type_flag_item(MA_MESH_MAP_POSITION),
+    mesh_map_bake_type_flag_item(MA_MESH_MAP_NORMAL_WORLD),
+    mesh_map_bake_type_flag_item(MA_MESH_MAP_NORMAL_OBJECT),
+    mesh_map_bake_type_flag_item(MA_MESH_MAP_NORMAL_TANGENT),
+    mesh_map_bake_type_flag_item(MA_MESH_MAP_ID_OBJECT),
+    mesh_map_bake_type_flag_item(MA_MESH_MAP_ID_MATERIAL),
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 const EnumPropertyItem *mesh_map_bake_type_flag_items()
 {
-  static const EnumPropertyItem items[] = {
-      {1 << MA_MESH_MAP_AO, "AO", 0, "Ambient Occlusion", "Per-object ambient occlusion"},
-      {1 << MA_MESH_MAP_CURVATURE, "CURVATURE", 0, "Curvature", "Concave/convex curvature"},
-      {1 << MA_MESH_MAP_EDGE, "EDGE", 0, "Edge", "Bevel edge mask"},
-      {1 << MA_MESH_MAP_NORMAL_WORLD, "NORMAL_WORLD", 0, "World Normal", "World-space normal"},
-      {1 << MA_MESH_MAP_NORMAL_OBJECT, "NORMAL_OBJECT", 0, "Object Normal", "Object-space normal"},
-      {1 << MA_MESH_MAP_ID_OBJECT, "ID_OBJECT", 0, "Object ID", "Stable object color"},
-      {1 << MA_MESH_MAP_ID_MATERIAL, "ID_MATERIAL", 0, "Material ID", "Per-material-slot color"},
-      {0, nullptr, 0, nullptr, nullptr},
-  };
-  return items;
+  return mesh_map_bake_type_flag_items_array;
 }
 
 const EnumPropertyItem *mesh_map_bake_object_scope_items()

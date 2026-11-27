@@ -18,9 +18,10 @@
  * writer), an RGB map as stored.
  *
  * The three map families are:
- * - ray-traced maps baked through Cycles: AO, Curvature, Edge (an emission graph fed to the EMIT
- *   pass) and the two normals (the native NORMAL pass, always in world space, rotated on the CPU);
- *   this file turns a type into a pass/space/emission graph, but never calls the engine itself;
+ * - ray-traced maps baked through Cycles: AO, Curvature, Edge and Position (an emission graph fed
+ *   to the EMIT pass) and the three normals (the native NORMAL pass, always in world space,
+ *   rotated into the claimed space on the CPU); this file turns a type into a pass/space/emission
+ *   graph, but never calls the engine itself;
  * - CPU maps: the two ID maps, filled per covered texel from the mesh's `material_index`;
  * - an atlas shared by every object that uses the material (only the covered texels are written).
  */
@@ -28,6 +29,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "BKE_mesh_maps_types.hh"
 #include "BLI_function_ref.hh"
 #include "BLI_set.hh"
 #include "BLI_span.hh"
@@ -51,6 +53,7 @@ struct ObjectMeshMapState;
 struct Scene;
 struct ViewLayer;
 struct bNode;
+struct bNodeSocket;
 struct bNodeTree;
 
 /**
@@ -62,11 +65,14 @@ struct bNodeTree;
  */
 constexpr float MESH_MAP_BAKE_EDGE_RANGE = 0.3f;
 
-/** Whether \a type is baked by a render pass (AO, Curvature, Edge, both normals). */
+/** Whether \a type is baked by a render pass (AO, Curvature, Edge, Position, the three normals). */
 bool BKE_mesh_maps_bake_type_renders(int8_t type);
 
-/** Whether \a type is filled on the CPU (the two ID maps), with no engine involved. */
-bool BKE_mesh_maps_bake_type_cpu_id(int8_t type);
+/**
+ * Whether \a type is a simple CPU fill (the two ID maps): filled with no engine, and neither
+ * casting through other surfaces nor composing other atlases.
+ */
+bool BKE_mesh_maps_bake_type_cpu_simple(int8_t type);
 
 /**
  * Whether \a type is a scalar atlas -- its R is the whole value -- rather than an RGB one.
@@ -82,7 +88,7 @@ bool BKE_mesh_maps_bake_type_scalar(int8_t type);
 eScenePassType BKE_mesh_maps_bake_pass_for_type(int8_t type);
 
 /**
- * The normal space for the two normal maps. Returns false for anything else, leaving \a r_space
+ * The normal space for the three normal maps. Returns false for anything else, leaving \a r_space
  * untouched.
  */
 bool BKE_mesh_maps_bake_normal_space_for_type(int8_t type, eBakeSpace &r_space);
@@ -96,17 +102,32 @@ bool BKE_mesh_maps_bake_normal_space_for_type(int8_t type, eBakeSpace &r_space);
 float BKE_mesh_maps_bake_ao_distance(const Mesh &mesh, const MaterialMeshMapSettings &settings);
 
 /**
- * Build the emission surface for one ray-traced, non-native map (AO, Curvature, Edge) inside \a
- * tree: the value nodes, a #SH_NODE_EMISSION and the link into the material output. Returns the
- * emission node, or null for a type that has no emission graph (normals and the ID maps use another
- * path).
+ * Build the emission surface for one ray-traced, non-native map (AO, Curvature, Edge, Position)
+ * inside \a tree: the value nodes, a #SH_NODE_EMISSION and the link into the material output.
+ * Returns the emission node, or null for a type that has no emission graph (normals and the ID
+ * maps use another path).
  *
  * \param ao_distance: the already-resolved AO ray distance; ignored unless \a type is AO.
+ * \param samples: the already-resolved bake sample count the AO and Edge nodes ray with.
  */
 bNode *BKE_mesh_maps_bake_build_emit_tree(bNodeTree &tree,
                                           int8_t type,
                                           const MaterialMeshMapSettings &settings,
-                                          float ao_distance);
+                                          float ao_distance,
+                                          int samples);
+
+/**
+ * Remap a raw world-space Position result in place. \a mode decides the mapping
+ * (#eMaterialMeshMapPositionNormalization): #MA_MESH_MAP_POSITION_RAW leaves the buffer alone,
+ * #MA_MESH_MAP_POSITION_BOX remaps \a bb_min..\a bb_max per axis into [0, 1], and
+ * #MA_MESH_MAP_POSITION_SPHERE remaps the bounding sphere around the box's center into [0, 1].
+ * Only the RGB channels are touched; \a result holds \a texels_num RGBA texels.
+ */
+void BKE_mesh_maps_bake_normalize_position(float *result,
+                                           size_t texels_num,
+                                           const float bb_min[3],
+                                           const float bb_max[3],
+                                           int8_t mode);
 
 /** A stable ID colour for \a ob, raw RGB in [0, 1] (no color management). */
 void BKE_mesh_maps_bake_id_object_color(const Object &ob, float r_color[3]);
@@ -363,24 +384,7 @@ enum eMeshMapBakeObjectScope : int8_t {
   MA_MESH_MAP_BAKE_ALL_OBJECTS = 1,
 };
 
-/** Bit \a type set in a type mask; the supported types are 0..#MA_MESH_MAP_EDGE. */
-#define MESH_MAP_BAKE_TYPE_MASK_SUPPORTED 0x7Fu
-
-/**
- * Every map the bake can produce. The Cycles half of the render types has landed, so operators
- * mask against this. #MESH_MAP_BAKE_TYPE_MASK_CPU stays for the tests and callers that need the
- * subset that runs without an engine.
- */
-#define MESH_MAP_BAKE_TYPE_MASK_ALL MESH_MAP_BAKE_TYPE_MASK_SUPPORTED
-
-/**
- * The two CPU ID maps only: what this bake can run without an engine (handy for scripts and tests
- * on machines that do not have Cycles built in).
- */
-#define MESH_MAP_BAKE_TYPE_MASK_CPU \
-  ((1u << MA_MESH_MAP_ID_OBJECT) | (1u << MA_MESH_MAP_ID_MATERIAL))
-
-/** Whether \a type is one the bake can produce (excludes the reserved Thickness/Position). */
+/** Whether \a type is one the bake can produce. */
 bool BKE_mesh_maps_bake_type_is_supported(int8_t type);
 
 /**

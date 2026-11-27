@@ -175,7 +175,7 @@ TEST_F(MeshMapsTest, slot_ensure_is_idempotent_and_validates_type)
   EXPECT_EQ(BKE_mesh_maps_slot_ensure(*ma, MA_MESH_MAP_AO), ao);
   EXPECT_EQ(BKE_mesh_maps_slot_find(*ma, MA_MESH_MAP_AO), ao);
 
-  /* A reserved type still has a DNA value, so it is valid. */
+  /* Any type inside the enum is valid, whether or not a bake side exists yet. */
   EXPECT_NE(BKE_mesh_maps_slot_ensure(*ma, MA_MESH_MAP_POSITION), nullptr);
   /* A type outside the enum is refused and creates nothing. */
   EXPECT_EQ(BKE_mesh_maps_slot_ensure(*ma, MA_MESH_MAP_TYPE_NUM), nullptr);
@@ -721,6 +721,43 @@ TEST_F(MeshMapsTest, hash_transform_moves_only_normal_world)
   EXPECT_FALSE(hashes_equal(world_before, world_after));
   EXPECT_TRUE(hashes_equal(object_before, object_after));
   EXPECT_TRUE(hashes_equal(ao_before, ao_after));
+}
+
+TEST_F(MeshMapsTest, hash_of_position_follows_the_object_transform)
+{
+  Material *ma = BKE_material_add(bmain, "MapsMat");
+  Mesh *mesh = add_quad_mesh("Quad");
+  Object *ob = add_mesh_object("Ob", mesh);
+
+  /* Raw stores the world position as it lies, so the object transform is part of the claim. */
+  ma->mesh_map_settings.position_normalization = MA_MESH_MAP_POSITION_RAW;
+  uint32_t raw_before[2], raw_after[2];
+  hash_of(*ob, *ma, MA_MESH_MAP_POSITION, raw_before);
+  ob->runtime->object_to_world[3][0] = 5.0f;
+  hash_of(*ob, *ma, MA_MESH_MAP_POSITION, raw_after);
+  EXPECT_FALSE(hashes_equal(raw_before, raw_after));
+
+  /* Box and sphere fit the *world-space* bounds: translation and a uniform scale may cancel in
+   * the texels, but a rotation changes the world AABB, so the matrix is part of the claim in every
+   * mode. Hashing it always is safer than leaving a transformed object marked valid. */
+  ma->mesh_map_settings.position_normalization = MA_MESH_MAP_POSITION_BOX;
+  uint32_t box_before[2], box_after[2];
+  hash_of(*ob, *ma, MA_MESH_MAP_POSITION, box_before);
+  ob->runtime->object_to_world[3][0] += 2.0f;
+  hash_of(*ob, *ma, MA_MESH_MAP_POSITION, box_after);
+  EXPECT_FALSE(hashes_equal(box_before, box_after));
+
+  ma->mesh_map_settings.position_normalization = MA_MESH_MAP_POSITION_SPHERE;
+  uint32_t sphere_before[2], sphere_after[2];
+  hash_of(*ob, *ma, MA_MESH_MAP_POSITION, sphere_before);
+  ob->runtime->object_to_world[3][1] = 3.0f;
+  hash_of(*ob, *ma, MA_MESH_MAP_POSITION, sphere_after);
+  EXPECT_FALSE(hashes_equal(sphere_before, sphere_after));
+
+  /* The mode itself is part of the hash: a raw claim and a box claim never match. */
+  uint32_t box_again[2];
+  hash_of(*ob, *ma, MA_MESH_MAP_POSITION, box_again);
+  EXPECT_FALSE(hashes_equal(raw_after, box_again));
 }
 
 TEST_F(MeshMapsTest, hash_material_index_moves_only_id_material)

@@ -229,6 +229,10 @@ set(SRC
   rna_define.cc
   ${DEFSRC}
   ${APISRC}
+  # Not in `DEFSRC` (whose entries drive the generated `rna_*_gen.cc` outputs): the mesh maps RNA
+  # is defined here and called from `RNA_def_material` (`rna_material.cc`), it defines no struct
+  # of its own.
+  rna_material_mesh_maps.cc
   ../../../../intern/clog/clog.cc
   ../../makesdna/intern/dna_parse.cc
 
@@ -437,6 +441,11 @@ set(SRC
   rna_access_compare_override.cc
   rna_define.cc
   rna_path.cc
+  # Compiled with #RNA_RUNTIME like the generated files: holds the runtime callbacks of the mesh
+  # maps RNA of `rna_material.cc`, which the generated `rna_material_gen.cc` resolves by name
+  # (that file includes `rna_material.cc`, which includes `rna_material_mesh_maps.hh` for the
+  # declarations), and the definition of `rna_enum_material_mesh_map_type_items`.
+  rna_material_mesh_maps.cc
   ${GENSRC}
 
   ${SRC_RNA_INC}

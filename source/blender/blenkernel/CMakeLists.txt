@@ -579,6 +579,7 @@ set(SRC
   BKE_mesh_maps.hh
   BKE_mesh_maps_bake.hh
   BKE_mesh_maps_bake_handshake.hh
+  BKE_mesh_maps_types.hh
   BKE_mesh_mirror.hh
   BKE_mesh_remap.hh
   BKE_mesh_remesh_voxel.hh

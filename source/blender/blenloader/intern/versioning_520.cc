@@ -2620,6 +2620,24 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
     }
   }
 
+  /* The Normal Filter curvature's sampling radius and scale are new and default to 8 and 1.0:
+   * older files read both new members as zeros, and get the working defaults here; the filter
+   * clamps to a single texel at radius zero, and a zero scale flattens the filtered map
+   * completely.
+   *
+   * NOTE: Keyed on the member existence instead of a file subversion (see above). The existence
+   * check must query the "int8_t" type name, not "char": makesdna stores `int8_t` members under
+   * their own type name in the file SDNA, so a "char" query never matches and would reset the
+   * settings on every file load. */
+  if (!DNA_struct_member_exists_with_alias(
+          fd->filesdna, "MaterialMeshMapSettings", "int8_t", "curvature_radius"))
+  {
+    for (Material &material : bmain->materials) {
+      material.mesh_map_settings.curvature_radius = 8;
+      material.mesh_map_settings.curvature_scale = 1.0f;
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

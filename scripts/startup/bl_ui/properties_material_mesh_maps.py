@@ -102,6 +102,10 @@ class LAYER_MATERIAL_PT_mesh_maps(LayerMaterialButtonsPanel, Panel):
             col.prop(settings, "edge_radius")
             col.prop(settings, "position_normalization")
             col.prop(settings, "use_directx_normal")
+            col.prop(settings, "curvature_method")
+            if settings.curvature_method == 'NORMAL_FILTER':
+                col.prop(settings, "curvature_radius")
+                col.prop(settings, "curvature_scale")
 
     def _draw_high_poly(self, layout, context, ob, mat):
         source = next((item for item in ob.mesh_map_sources if item.material == mat), None)

@@ -824,6 +824,66 @@ TEST_F(MeshMapsTest, hash_normal_maps_follow_split_normals)
   EXPECT_TRUE(hashes_equal(ao_before, ao_after));
 }
 
+TEST_F(MeshMapsTest, hash_curvature_filter_inherits_the_tangent_slot_state)
+{
+  Material *ma = BKE_material_add(bmain, "MapsMat");
+  Mesh *mesh = add_quad_mesh("Quad");
+  Object *ob = add_mesh_object("Ob", mesh);
+
+  /* Pointiness curvature never reads the tangent slot: its hash must be identical with no state
+   * and with a valid one. */
+  ma->mesh_map_settings.curvature_method = MA_MESH_MAP_CURVATURE_POINTINESS;
+  uint32_t pointiness_no_state[2], pointiness_valid_state[2];
+  hash_of(*ob, *ma, MA_MESH_MAP_CURVATURE, pointiness_no_state);
+
+  ma->mesh_map_settings.curvature_method = MA_MESH_MAP_CURVATURE_NORMAL_FILTER;
+  uint32_t h_none[2], h_valid[2], h_stale[2];
+  hash_of(*ob, *ma, MA_MESH_MAP_CURVATURE, h_none);
+
+  ObjectMeshMapState *state = BKE_mesh_maps_object_state_ensure(
+      *ob, *ma, MA_MESH_MAP_NORMAL_TANGENT);
+  ASSERT_NE(state, nullptr);
+  uint32_t tangent_hash[2];
+  hash_of(*ob, *ma, MA_MESH_MAP_NORMAL_TANGENT, tangent_hash);
+  BKE_mesh_maps_object_state_mark_baked(*state, tangent_hash, 42);
+  ASSERT_EQ(state->status, OB_MESH_MAP_STATUS_VALID);
+  hash_of(*ob, *ma, MA_MESH_MAP_CURVATURE, h_valid);
+  EXPECT_FALSE(hashes_equal(h_none, h_valid));
+
+  /* The pointiness control again, now with the tangent state present and valid. */
+  ma->mesh_map_settings.curvature_method = MA_MESH_MAP_CURVATURE_POINTINESS;
+  hash_of(*ob, *ma, MA_MESH_MAP_CURVATURE, pointiness_valid_state);
+  EXPECT_TRUE(hashes_equal(pointiness_no_state, pointiness_valid_state));
+  ma->mesh_map_settings.curvature_method = MA_MESH_MAP_CURVATURE_NORMAL_FILTER;
+
+  /* A stale slot is not the valid baked atlas, so the curvature claim moves again. */
+  BKE_mesh_maps_object_state_status_set(*state, OB_MESH_MAP_STATUS_STALE);
+  hash_of(*ob, *ma, MA_MESH_MAP_CURVATURE, h_stale);
+  EXPECT_FALSE(hashes_equal(h_valid, h_stale));
+
+  /* The marker is binary: a missing state and every non-valid status mix the same hash. */
+  BKE_mesh_maps_object_state_status_set(*state, OB_MESH_MAP_STATUS_NONE);
+  hash_of(*ob, *ma, MA_MESH_MAP_CURVATURE, h_stale);
+  EXPECT_TRUE(hashes_equal(h_none, h_stale));
+
+  /* Each filter setting moves the curvature hash on its own. */
+  uint32_t before[2], after[2];
+  hash_of(*ob, *ma, MA_MESH_MAP_CURVATURE, before);
+  ma->mesh_map_settings.curvature_radius += 1;
+  hash_of(*ob, *ma, MA_MESH_MAP_CURVATURE, after);
+  EXPECT_FALSE(hashes_equal(before, after));
+
+  hash_of(*ob, *ma, MA_MESH_MAP_CURVATURE, before);
+  ma->mesh_map_settings.curvature_scale += 0.5f;
+  hash_of(*ob, *ma, MA_MESH_MAP_CURVATURE, after);
+  EXPECT_FALSE(hashes_equal(before, after));
+
+  hash_of(*ob, *ma, MA_MESH_MAP_CURVATURE, before);
+  ma->mesh_map_settings.use_directx_normal = true;
+  hash_of(*ob, *ma, MA_MESH_MAP_CURVATURE, after);
+  EXPECT_FALSE(hashes_equal(before, after));
+}
+
 TEST_F(MeshMapsTest, hash_is_zero_for_non_mesh_and_invalid_type)
 {
   Material *ma = BKE_material_add(bmain, "MapsMat");

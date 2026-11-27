@@ -1488,6 +1488,15 @@ enum eMaterialMeshMapPositionNormalization : int8_t {
   MA_MESH_MAP_POSITION_SPHERE = 2,
 };
 
+/** #MaterialMeshMapSettings::curvature_method: where the Curvature map's values come from. */
+enum eMaterialMeshMapCurvatureMethod : int8_t {
+  /** The mesh's Pointiness through Cycles; depends on the low-poly's density. */
+  MA_MESH_MAP_CURVATURE_POINTINESS = 0,
+  /** A divergence filter over the baked Tangent Normal atlas; density independent, and it
+   * requires that atlas baked first. */
+  MA_MESH_MAP_CURVATURE_NORMAL_FILTER = 1,
+};
+
 /** #MaterialPaintLayerIdColor::flag */
 enum eMaterialPaintLayerIdColorFlag : int8_t {
   /** The colour takes part in the Color ID match; a disabled one is skipped. */
@@ -2357,11 +2366,16 @@ struct MaterialMeshMapSettings {
    * OpenGL convention, which is what the shader's Normal Map node and the fork's viewers read.
    */
   int8_t use_directx_normal = 0;
-  /* Appended after the v1 tail pad, keeping the DNA append-only: the v1 members and their pads
-   * keep their sizes and order. Closes the struct's 4-byte alignment at 36 bytes, so the restored
-   * `_pad_tail[4]` of #Material still ends `Material` exactly on its pointer boundary (36 + 4 =
-   * 40) without letting the compiler fill in padding of its own. */
-  char _pad3[6] = {};
+  /* Appended in place of the v1 tail pad, so the earlier members and their pads keep their sizes
+   * and order. The two bytes come before the float so it lands on its 4-byte boundary, and the
+   * struct still ends at 36 bytes, so the `_pad_tail[4]` of #Material below still closes it on the
+   * pointer boundary (36 + 4 = 40). */
+  /** #eMaterialMeshMapCurvatureMethod. */
+  int8_t curvature_method = MA_MESH_MAP_CURVATURE_POINTINESS;
+  /** Texel radius the Normal Filter curvature samples along U and V. */
+  int8_t curvature_radius = 8;
+  /** Multiplier of the Normal Filter curvature's divergence before it maps into [0, 1]. */
+  float curvature_scale = 1.0f;
 };
 
 struct Material {

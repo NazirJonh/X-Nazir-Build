@@ -385,6 +385,95 @@ Object *mesh_map_bake_find_object(MeshMapBakeJob &job, const MeshMapBakePairStat
 }
 
 /**
+ * Fill a Curvature pair through the Normal Filter: read the object's baked Tangent Normal atlas
+ * tile by tile and write its divergence as the curvature value. The filter is atlas-to-atlas: the
+ * Tangent Normal atlas must exist at the same resolution, with a float buffer like every atlas.
+ *
+ * The Tangent Normal atlas is resolved through #BKE_mesh_maps_slot_find.
+ *
+ * Returns false with the pair failed when the Tangent Normal atlas is missing, is not float, sits
+ * at another resolution, or does not carry one of the tiles the curvature raster covers. A missing
+ * tile means the tangent bake covered another UV layout, so filtering would fill the covered
+ * texels with zeros and then call the pair a successful bake.
+ */
+bool mesh_map_bake_fill_curvature_filter(MeshMapBakeWorld &world,
+                                         Material &ma,
+                                         MeshMapBakePairState &pair,
+                                         ObjectMeshMapState &state)
+{
+  const MaterialMeshMapSlot *normal_slot = BKE_mesh_maps_slot_find(ma, MA_MESH_MAP_NORMAL_TANGENT);
+  Image *normal_atlas = normal_slot != nullptr ? normal_slot->image : nullptr;
+  if (normal_atlas == nullptr) {
+    BKE_mesh_maps_bake_state_fail(state);
+    BLI_strncpy(pair.error, "The Normal Filter needs the Tangent Normal map baked first",
+                sizeof(pair.error));
+    pair.failed = true;
+    return false;
+  }
+  if (!BKE_mesh_maps_bake_atlas_is_float(*normal_atlas)) {
+    BKE_mesh_maps_bake_state_fail(state);
+    BLI_strncpy(pair.error, "The Tangent Normal atlas is not a float buffer", sizeof(pair.error));
+    pair.failed = true;
+    return false;
+  }
+  int normal_width = 0;
+  int normal_height = 0;
+  BKE_image_get_size(normal_atlas, nullptr, &normal_width, &normal_height);
+  if (normal_width != world.resolution || normal_height != world.resolution) {
+    BKE_mesh_maps_bake_state_fail(state);
+    BLI_strncpy(pair.error, "The Tangent Normal atlas must be at the same resolution",
+                sizeof(pair.error));
+    pair.failed = true;
+    return false;
+  }
+  const int radius = std::clamp(int(ma.mesh_map_settings.curvature_radius),
+                                MESH_MAP_BAKE_CURVATURE_RADIUS_MIN,
+                                MESH_MAP_BAKE_CURVATURE_RADIUS_MAX);
+  const float scale = ma.mesh_map_settings.curvature_scale;
+  const bool directx = ma.mesh_map_settings.use_directx_normal != 0;
+  for (const int tile : IndexRange(world.tiles_num)) {
+    const BakeImage &image = world.images[tile];
+    if (BKE_image_get_tile(normal_atlas, image.tile_number) == nullptr) {
+      /* The curvature covers a tile the tangent bake never wrote (its UV layout differed), so the
+       * filter would leave that tile's covered texels at zero and still call the pair a bake. */
+      BKE_mesh_maps_bake_state_fail(state);
+      BLI_snprintf(pair.error,
+                   sizeof(pair.error),
+                   "The Tangent Normal atlas has no UDIM tile %d; bake Tangent Normal at this "
+                   "resolution first",
+                   image.tile_number);
+      pair.failed = true;
+      return false;
+    }
+    ImageUser normal_iuser;
+    BKE_imageuser_default(&normal_iuser);
+    normal_iuser.tile = image.tile_number;
+    ImageTileBufferScope normal_buffer(*normal_atlas, &normal_iuser);
+    if (normal_buffer == nullptr || normal_buffer->float_data() == nullptr) {
+      /* The tile exists but holds no readable float pixels: filtering nothing would silently
+       * produce a black curvature tile. */
+      BKE_mesh_maps_bake_state_fail(state);
+      BLI_snprintf(pair.error,
+                   sizeof(pair.error),
+                   "The Tangent Normal atlas tile %d has no float pixels",
+                   image.tile_number);
+      pair.failed = true;
+      return false;
+    }
+    BKE_mesh_maps_bake_fill_curvature_from_normal(world.pixels + image.offset,
+                                                  world.pixels_num,
+                                                  world.resolution,
+                                                  Span<float>(normal_buffer->float_data(),
+                                                              size_t(world.pixels_num) * 4),
+                                                  radius,
+                                                  scale,
+                                                  directx,
+                                                  world.result + size_t(image.offset) * 4);
+  }
+  return true;
+}
+
+/**
  * Build the private world for \a pair, rasterize its texels, fill the CPU ID result (or the render
  * world for a Cycles type) and leave the object state #OB_MESH_MAP_STATUS_BAKING (already entered).
  * On failure the state is marked #OB_MESH_MAP_STATUS_ERROR, \a pair records the message and false is
@@ -442,7 +531,7 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
   BKE_mesh_maps_object_hash(*ob_eval, *ma, pair.type, pair.start_hash);
   const float4x4 object_matrix = ob_eval->object_to_world();
 
-  const bool is_render = BKE_mesh_maps_bake_type_renders(pair.type);
+  const bool is_render = BKE_mesh_maps_bake_pair_renders(*ma, pair.type);
 
   /* The high-poly source of this material, if any. For a CPU pair its meshes are copied locally so
    * the ray pass can build its BVH trees off the user's data; for a render pair they are copied
@@ -800,6 +889,11 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
   job.world.tiles_num = int(job.world.images.size());
   BLI_assert(job.world.tiles_num >= 1);
 
+  if (!is_render && pair.type == MA_MESH_MAP_CURVATURE) {
+    /* The Normal Filter reads the baked Tangent Normal atlas instead of casting onto sources. */
+    return mesh_map_bake_fill_curvature_filter(job.world, *ma, pair, *state);
+  }
+
   job.world.highpoly_num = int(job.world.source_objects.size());
   if (job.world.highpoly_num > 0) {
     job.world.highpoly = MEM_new_array_zeroed<BakeHighPolyData>(job.world.highpoly_num, __func__);
@@ -961,8 +1055,12 @@ void mesh_map_bake_worker_run(MeshMapBakeJob &job, MeshMapBakeWorld &world)
 {
   if (BKE_mesh_maps_bake_type_renders(world.type)) {
     if (world.render == nullptr) {
-      /* The prepare would have failed already; guard so an inconsistent world cannot crash the
-       * worker. */
+      /* A rendered type normally holds a render world from the prepare. The one legitimate way to
+       * reach here without one is the Normal Filter curvature pair: its prepare succeeded and
+       * already filled the result on the CPU, so the margin below still applies to it, exactly
+       * as to the ID fills, before the return keeps the result for the commit. The guard only
+       * catches a truly inconsistent world beyond that. */
+      mesh_map_bake_apply_margin(world, job.margin_pixels);
       return;
     }
     const eScenePassType pass_type = BKE_mesh_maps_bake_pass_for_type(world.type);

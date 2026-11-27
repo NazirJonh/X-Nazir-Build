@@ -179,6 +179,22 @@ PointerRNA rna_Material_mesh_map_settings_get(PointerRNA *ptr)
 
 namespace blender {
 
+/* Values match #eMaterialMeshMapCurvatureMethod. */
+static const EnumPropertyItem rna_material_mesh_map_curvature_method_items[] = {
+    {MA_MESH_MAP_CURVATURE_POINTINESS,
+     "POINTINESS",
+     0,
+     "Pointiness",
+     "Cycles' Pointiness attribute; fast, but it follows the low-poly's density"},
+    {MA_MESH_MAP_CURVATURE_NORMAL_FILTER,
+     "NORMAL_FILTER",
+     0,
+     "Normal Filter",
+     "The divergence of the baked Tangent Normal atlas; density independent, and it needs that "
+     "map baked first"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 /* Values match #eMaterialMeshMapPositionNormalization. */
 static const EnumPropertyItem rna_material_mesh_map_position_normalization_items[] = {
     {MA_MESH_MAP_POSITION_RAW,
@@ -380,6 +396,31 @@ void rna_def_material_mesh_maps(BlenderRNA *brna, StructRNA *srna)
   RNA_def_property_float_sdna(prop, nullptr, "edge_radius");
   RNA_def_property_range(prop, 0.0f, FLT_MAX);
   rna_def_mesh_map_ui_update(prop, "Edge Radius", "Edge/bevel ray radius in object-space units");
+
+  prop = RNA_def_property(srna, "curvature_method", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "curvature_method");
+  RNA_def_property_enum_items(prop, rna_material_mesh_map_curvature_method_items);
+  rna_def_mesh_map_ui_update(prop,
+                             "Curvature Method",
+                             "Where the Curvature map's values come from");
+
+  prop = RNA_def_property(srna, "curvature_radius", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "curvature_radius");
+  RNA_def_property_range(prop,
+                         MESH_MAP_BAKE_CURVATURE_RADIUS_MIN,
+                         MESH_MAP_BAKE_CURVATURE_RADIUS_MAX);
+  rna_def_mesh_map_ui_update(
+      prop,
+      "Curvature Radius",
+      "Texel radius the Normal Filter samples along U and V; wider radii catch smoother bends");
+
+  prop = RNA_def_property(srna, "curvature_scale", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "curvature_scale");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  rna_def_mesh_map_ui_update(
+      prop,
+      "Curvature Scale",
+      "Multiplier of the Normal Filter's divergence before it maps into the map's range");
 }
 
 }  // namespace blender

@@ -24,6 +24,7 @@
 #include "BLI_math_vector_types.hh"
 #include "BLI_set.hh"
 #include "BLI_string.h"
+#include "BLI_task.hh"
 #include "BLI_utildefines.h"
 #include "BLI_ustring.hh"
 #include "BLI_virtual_array.hh"
@@ -136,6 +137,17 @@ bool BKE_mesh_maps_bake_type_scalar(const int8_t type)
 {
   const MeshMapTypeInfo *info = BKE_mesh_maps_type_info_get(type);
   return info != nullptr && (info->flags & MESH_MAP_TYPE_SCALAR) != 0;
+}
+
+bool BKE_mesh_maps_bake_pair_renders(const Material &ma, const int8_t type)
+{
+  if (type == MA_MESH_MAP_CURVATURE &&
+      ma.mesh_map_settings.curvature_method == MA_MESH_MAP_CURVATURE_NORMAL_FILTER)
+  {
+    /* The filter runs over the baked Tangent Normal atlas, no engine involved. */
+    return false;
+  }
+  return BKE_mesh_maps_bake_type_renders(type);
 }
 
 eScenePassType BKE_mesh_maps_bake_pass_for_type(const int8_t type)
@@ -631,6 +643,112 @@ void BKE_mesh_maps_bake_write_with_margin(const int8_t type,
   }
 }
 
+void BKE_mesh_maps_bake_fill_curvature_from_normal(const BakePixel *pixels,
+                                                   const size_t pixels_num,
+                                                   const int resolution,
+                                                   const Span<float> normal_rgba,
+                                                   const int radius,
+                                                   const float scale,
+                                                   const bool directx,
+                                                   float *result)
+{
+  const size_t texels = size_t(resolution) * size_t(resolution);
+  if (pixels == nullptr || result == nullptr || resolution <= 0 ||
+      normal_rgba.size() < texels * 4)
+  {
+    return;
+  }
+  /* The raster of one tile never holds more texels than the tile itself: bounding the walk keeps a
+   * caller that passed a whole-atlas count from reading and writing past this tile. */
+  const size_t count = std::min(pixels_num, texels);
+  const int r = std::clamp(
+      radius, MESH_MAP_BAKE_CURVATURE_RADIUS_MIN, MESH_MAP_BAKE_CURVATURE_RADIUS_MAX);
+  /* Decode one texel of the tangent normal atlas into its raw signed direction. The DirectX
+   * convention stores the green channel flipped, which the decode undoes. */
+  const auto decode_normal = [&](const size_t texel, float3 &r_n) {
+    const float *t = normal_rgba.data() + texel * 4;
+    r_n.x = t[0] * 2.0f - 1.0f;
+    r_n.y = (directx ? 1.0f - t[1] : t[1] * 2.0f) - 1.0f;
+    r_n.z = t[2] * 2.0f - 1.0f;
+  };
+  threading::parallel_for(IndexRange(int64_t(count)), 1024, [&](const IndexRange range) {
+    for (const int i : range) {
+      const size_t index = size_t(i);
+      if (pixels[index].primitive_id < 0) {
+        continue;
+      }
+      const int x = int(index % size_t(resolution));
+      const int y = int(index / size_t(resolution));
+      /* The raster's texel index is the atlas's own, so the neighbors are plain texel offsets.
+       * A side only counts when both of its samples are covered; with one covered side the
+       * difference is one-sided, and without any the texel stays neutral. */
+      const auto covered = [&](const int nx, const int ny) {
+        return nx >= 0 && ny >= 0 && nx < resolution && ny < resolution &&
+               pixels[size_t(ny) * size_t(resolution) + nx].primitive_id >= 0;
+      };
+      float3 center;
+      decode_normal(index, center);
+      /* Derivative estimates: a two-sided difference steps 2r texels, a one-sided one r, so
+       * both divide by their step and the radius drops out of the magnitude. */
+      float div_u = 0.0f;
+      float div_v = 0.0f;
+      int axes = 0;
+      float3 sample;
+      if (covered(x + r, y) && covered(x - r, y)) {
+        decode_normal(size_t(y) * size_t(resolution) + size_t(x + r), sample);
+        div_u += sample.x;
+        decode_normal(size_t(y) * size_t(resolution) + size_t(x - r), sample);
+        div_u -= sample.x;
+        div_u /= float(2 * r);
+        axes++;
+      }
+      else if (covered(x + r, y)) {
+        decode_normal(size_t(y) * size_t(resolution) + size_t(x + r), sample);
+        div_u += (sample.x - center.x) / float(r);
+        axes++;
+      }
+      else if (covered(x - r, y)) {
+        decode_normal(size_t(y) * size_t(resolution) + size_t(x - r), sample);
+        div_u += (center.x - sample.x) / float(r);
+        axes++;
+      }
+      if (covered(x, y + r) && covered(x, y - r)) {
+        decode_normal(size_t(y + r) * size_t(resolution) + x, sample);
+        div_v += sample.y;
+        decode_normal(size_t(y - r) * size_t(resolution) + x, sample);
+        div_v -= sample.y;
+        div_v /= float(2 * r);
+        axes++;
+      }
+      else if (covered(x, y + r)) {
+        decode_normal(size_t(y + r) * size_t(resolution) + x, sample);
+        div_v += (sample.y - center.y) / float(r);
+        axes++;
+      }
+      else if (covered(x, y - r)) {
+        decode_normal(size_t(y - r) * size_t(resolution) + x, sample);
+        div_v += (center.y - sample.y) / float(r);
+        axes++;
+      }
+      if (axes == 0) {
+        result[index * 4 + 0] = 0.5f;
+        result[index * 4 + 1] = 0.5f;
+        result[index * 4 + 2] = 0.5f;
+        result[index * 4 + 3] = 1.0f;
+        continue;
+      }
+      /* The trace of the tangent normal's image gradient: convex surfaces spread their normals
+       * (positive), concave ones converge (negative). */
+      const float curvature = std::clamp((div_u + div_v) * scale, -1.0f, 1.0f);
+      const float value = 0.5f + 0.5f * curvature;
+      result[index * 4 + 0] = value;
+      result[index * 4 + 1] = value;
+      result[index * 4 + 2] = value;
+      result[index * 4 + 3] = 1.0f;
+    }
+  });
+}
+
 int BKE_mesh_maps_bake_foreign_coverage(Main &bmain,
                                         Scene &scene,
                                         ViewLayer &view_layer,
@@ -924,6 +1042,51 @@ void BKE_mesh_maps_bake_target_objects(Main &bmain,
   }
 }
 
+/* The Normal Filter curvature reads the baked Tangent Normal atlas of the same object, so the
+ * ascending type order would fail the Curvature pair on a fresh material until a second run.
+ * Reordering here keeps the plan pure data that the operator and the tests agree on, and the
+ * stable reorder preserves the visible "bake all" order otherwise. */
+static void mesh_map_bake_plan_pairs_sort_dependencies(Vector<MeshMapBakePair> &r_pairs,
+                                                       const Material &ma)
+{
+  if (ma.mesh_map_settings.curvature_method != MA_MESH_MAP_CURVATURE_NORMAL_FILTER) {
+    /* Pointiness and the other methods render the Curvature pair on their own; the ascending
+     * order needs no edge enforced. */
+    return;
+  }
+  /* The builder appends every type of an object together, so the pairs form contiguous runs per
+   * object. Walk the runs and enforce the dependency inside each one. */
+  for (int i = 0; i < r_pairs.size(); i++) {
+    int last = i;
+    while (last + 1 < r_pairs.size() && r_pairs[last + 1].object == r_pairs[i].object) {
+      last++;
+    }
+    int first_curvature = -1;
+    int first_tangent = -1;
+    int last_tangent = -1;
+    for (int j = i; j <= last; j++) {
+      if (r_pairs[j].type == MA_MESH_MAP_CURVATURE && first_curvature == -1) {
+        first_curvature = j;
+      }
+      else if (r_pairs[j].type == MA_MESH_MAP_NORMAL_TANGENT) {
+        last_tangent = j;
+        if (first_tangent == -1) {
+          first_tangent = j;
+        }
+      }
+    }
+    if (first_curvature != -1 && first_tangent != -1 && first_tangent > first_curvature) {
+      /* Pull the tangent segment in front of the curvature segment: rotating
+       * [first_curvature, last_tangent + 1) at the first tangent keeps every other pair, both
+       * moved segments' relative order and the object order untouched. */
+      std::rotate(r_pairs.begin() + first_curvature,
+                  r_pairs.begin() + first_tangent,
+                  r_pairs.begin() + last_tangent + 1);
+    }
+    i = last;
+  }
+}
+
 void BKE_mesh_maps_bake_plan_pairs(Main &bmain,
                                    Object *active_object,
                                    Material &ma,
@@ -954,6 +1117,7 @@ void BKE_mesh_maps_bake_plan_pairs(Main &bmain,
       r_pairs.append(MeshMapBakePair{&ob, &ma, int8_t(type)});
     }
   }
+  mesh_map_bake_plan_pairs_sort_dependencies(r_pairs, ma);
 }
 
 void BKE_mesh_maps_bake_states_rollback(Span<ObjectMeshMapState *> states,

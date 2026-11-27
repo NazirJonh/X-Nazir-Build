@@ -601,6 +601,32 @@ TEST_F(MeshMapBakeTest, edge_samples_are_clamped)
   }
 }
 
+/** The Normal Filter curvature reads a tangent normal field: a ramp along U bends positive. */
+TEST_F(MeshMapBakeTest, curvature_from_normal_reads_divergence)
+{
+  const int res = 8;
+  Array<float> normals(res * res * 4, 0.0f);
+  BakePixel pixels[res * res] = {};
+  for (int y = 0; y < res; y++) {
+    for (int x = 0; x < res; x++) {
+      const size_t i = size_t(y) * res + x;
+      pixels[i].primitive_id = 0;
+      /* A normal that tilts along U: nx grows with x, the surface bends convex. */
+      normals[i * 4 + 0] = 0.5f + float(x) * 0.25f / float(res);
+      normals[i * 4 + 1] = 0.5f;
+      normals[i * 4 + 2] = 1.0f;
+      normals[i * 4 + 3] = 1.0f;
+    }
+  }
+  float result[res * res * 4] = {0.0f};
+  BKE_mesh_maps_bake_fill_curvature_from_normal(
+      pixels, res * res, res, Span<float>(normals.data(), normals.size()), 2, 1.0f, false, result);
+  /* The middle columns read above neutral (convex), the map stays scalar in R. */
+  EXPECT_GT(result[(4 * res + 4) * 4 + 0], 0.5f);
+  EXPECT_FLOAT_EQ(result[(4 * res + 4) * 4 + 1], result[(4 * res + 4) * 4 + 0]);
+  EXPECT_FLOAT_EQ(result[(4 * res + 4) * 4 + 3], 1.0f);
+}
+
 TEST_F(MeshMapBakeTest, scalar_types_match_paint_layers)
 {
   for (int type = 0; type < MA_MESH_MAP_TYPE_NUM; type++) {
@@ -1229,6 +1255,70 @@ TEST_F(MeshMapBakeTest, plan_pairs_active_and_all_scopes)
   EXPECT_TRUE(saw_a);
   EXPECT_TRUE(saw_b);
   EXPECT_FALSE(saw_c);
+}
+
+TEST_F(MeshMapBakeTest, plan_pairs_normal_filter_bakes_tangent_normal_before_curvature)
+{
+  Material *ma = add_material("MapsMat");
+  ma->mesh_map_settings.curvature_method = MA_MESH_MAP_CURVATURE_NORMAL_FILTER;
+  Mesh *mesh = add_pair_mesh("Pair");
+  Object *a = add_simple_object("A", mesh, ma);
+  Object *b = add_simple_object("B", mesh, ma);
+
+  /* The Normal Filter fills the Curvature pair from the Tangent Normal atlas of the same object,
+   * so the plan must bake that atlas first: the tangent pair is pulled in front of the curvature
+   * pair while every other pair keeps its ascending place. */
+  const uint32_t mask = (1u << MA_MESH_MAP_AO) | (1u << MA_MESH_MAP_CURVATURE) |
+                        (1u << MA_MESH_MAP_NORMAL_TANGENT);
+  Vector<MeshMapBakePair> active;
+  BKE_mesh_maps_bake_plan_pairs(*bmain, a, *ma, MA_MESH_MAP_BAKE_ACTIVE_OBJECT, mask, active);
+  ASSERT_EQ(active.size(), 3u);
+  EXPECT_EQ(active[0].type, MA_MESH_MAP_AO);
+  EXPECT_EQ(active[1].type, MA_MESH_MAP_NORMAL_TANGENT);
+  EXPECT_EQ(active[2].type, MA_MESH_MAP_CURVATURE);
+  for (const MeshMapBakePair &pair : active) {
+    EXPECT_EQ(pair.object, a);
+    EXPECT_EQ(pair.material, ma);
+  }
+
+  /* The all-objects sweep still groups every type of an object together and enforces the edge
+   * inside each group, so each object's atlas is ready before its own curvature reads it. */
+  Vector<MeshMapBakePair> all;
+  BKE_mesh_maps_bake_plan_pairs(*bmain, nullptr, *ma, MA_MESH_MAP_BAKE_ALL_OBJECTS, mask, all);
+  ASSERT_EQ(all.size(), 6u);
+  Object *objects[2] = {a, b};
+  for (int group = 0; group < 2; group++) {
+    for (int i = 0; i < 3; i++) {
+      const MeshMapBakePair &pair = all[group * 3 + i];
+      EXPECT_EQ(pair.object, objects[group]);
+      EXPECT_EQ(pair.material, ma);
+    }
+    EXPECT_EQ(all[group * 3 + 0].type, MA_MESH_MAP_AO);
+    EXPECT_EQ(all[group * 3 + 1].type, MA_MESH_MAP_NORMAL_TANGENT);
+    EXPECT_EQ(all[group * 3 + 2].type, MA_MESH_MAP_CURVATURE);
+  }
+
+  /* The default Pointiness curvature renders on its own, so the ascending order stays untouched. */
+  Material *pointiness = add_material("PointinessMat");
+  Vector<MeshMapBakePair> ascending;
+  BKE_mesh_maps_bake_plan_pairs(
+      *bmain, a, *pointiness, MA_MESH_MAP_BAKE_ACTIVE_OBJECT, mask, ascending);
+  ASSERT_EQ(ascending.size(), 3u);
+  EXPECT_EQ(ascending[0].type, MA_MESH_MAP_AO);
+  EXPECT_EQ(ascending[1].type, MA_MESH_MAP_CURVATURE);
+  EXPECT_EQ(ascending[2].type, MA_MESH_MAP_NORMAL_TANGENT);
+  for (const MeshMapBakePair &pair : ascending) {
+    EXPECT_EQ(pair.material, pointiness);
+  }
+
+  /* Without the tangent bit the plan holds no dependency edge, so the reorder leaves it alone. */
+  const uint32_t no_tangent_mask = (1u << MA_MESH_MAP_AO) | (1u << MA_MESH_MAP_CURVATURE);
+  Vector<MeshMapBakePair> without_tangent;
+  BKE_mesh_maps_bake_plan_pairs(
+      *bmain, a, *ma, MA_MESH_MAP_BAKE_ACTIVE_OBJECT, no_tangent_mask, without_tangent);
+  ASSERT_EQ(without_tangent.size(), 2u);
+  EXPECT_EQ(without_tangent[0].type, MA_MESH_MAP_AO);
+  EXPECT_EQ(without_tangent[1].type, MA_MESH_MAP_CURVATURE);
 }
 
 TEST_F(MeshMapBakeTest, states_rollback_restores_previous)

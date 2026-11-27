@@ -94,6 +94,14 @@ eScenePassType BKE_mesh_maps_bake_pass_for_type(int8_t type);
 bool BKE_mesh_maps_bake_normal_space_for_type(int8_t type, eBakeSpace &r_space);
 
 /**
+ * Whether \a type bakes through the engine for \a ma's settings. The static classification
+ * (#BKE_mesh_maps_bake_type_renders) answers without settings; the Curvature map switches to a
+ * CPU filter over the baked Tangent Normal atlas when
+ * #MaterialMeshMapSettings::curvature_method is #MA_MESH_MAP_CURVATURE_NORMAL_FILTER.
+ */
+bool BKE_mesh_maps_bake_pair_renders(const Material &ma, int8_t type);
+
+/**
  * The AO ray distance for \a mesh: \a settings.ao_distance when it is positive, otherwise half the
  * diagonal of the mesh's local bounding box (the "from the object bounds" the setting documents).
  * A degenerate or empty mesh yields a small positive fallback so the AO node never reads 0, which
@@ -223,6 +231,30 @@ void BKE_mesh_maps_bake_coverage_union(Span<uint8_t> source, MutableSpan<uint8_t
 
 /** How many texels both masks mark. The shorter of the two bounds the count. */
 size_t BKE_mesh_maps_bake_coverage_overlap(Span<uint8_t> a, Span<uint8_t> b);
+
+/**
+ * Fill the RGBA result of a Curvature map through the Normal Filter: the divergence of the
+ * baked Tangent Normal atlas, sampled \a radius texels along U and V of the same tile the
+ * curvature raster covers. The center and the available neighbors decode from the atlas's raw
+ * map space (the DirectX green flip \a directx decodes), the divergence maps through \a scale
+ * into a signed value written as `0.5 + 0.5 * clamp(value, -1, 1)` in R. Texels without enough
+ * covered neighbors stay neutral; uncovered texels are left alone.
+ *
+ * \a normal_rgba is one tile's `resolution * resolution * 4` floats of the Tangent Normal
+ * atlas; \a pixels is the curvature raster of the same tile, whose coverage gates the samples.
+ * A \a pixels_num larger than that tile (a whole-atlas count, say) is clamped to the tile, so the
+ * walk never leaves its block of the shared buffers.
+ *
+ * The caller resolves that Tangent Normal atlas through #BKE_mesh_maps_slot_find.
+ */
+void BKE_mesh_maps_bake_fill_curvature_from_normal(const BakePixel *pixels,
+                                                   size_t pixels_num,
+                                                   int resolution,
+                                                   Span<float> normal_rgba,
+                                                   int radius,
+                                                   float scale,
+                                                   bool directx,
+                                                   float *result);
 
 /**
  * Merge one object's bake into the shared atlas with a margin that respects the other objects.
@@ -425,6 +457,11 @@ void BKE_mesh_maps_bake_target_objects(Main &bmain,
  * #MA_MESH_MAP_BAKE_ACTIVE_OBJECT), types ascending. A type whose bit is unset in \a type_mask, or
  * that is reserved, is skipped. Only objects that use \a ma in a slot are considered for the
  * all-objects scope; \a active_object may be null for it.
+ *
+ * Exception to the ascending order: when \a ma's Curvature method is
+ * #MA_MESH_MAP_CURVATURE_NORMAL_FILTER, each object's Tangent Normal pair is moved in front of its
+ * Curvature pair, because the filter fills the Curvature pair from the Tangent Normal atlas baked
+ * in that same run. Otherwise the order stays types ascending.
  */
 void BKE_mesh_maps_bake_plan_pairs(Main &bmain,
                                    Object *active_object,

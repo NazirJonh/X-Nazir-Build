@@ -37,10 +37,14 @@ struct bNodeTree;
 /** \name Bake limits
  *
  * The bounds the bake settings clamp to, named here so the C++ clamps and the RNA ranges read
- * them from one place and cannot drift apart. In v1 only the Edge bevel samples are clamped on
- * the C++ side; the resolution, samples and margin bounds below are only read by the RNA ranges
- * until a C++ clamp needs them.
+ * them from one place and cannot drift apart. In v1 only the Edge bevel samples and the Curvature
+ * Normal Filter radius are clamped on the C++ side; the resolution, samples and margin bounds
+ * below are only read by the RNA ranges until a C++ clamp needs them.
  * \{ */
+
+/** The texel radius the Curvature Normal Filter samples along U and V. */
+constexpr int MESH_MAP_BAKE_CURVATURE_RADIUS_MIN = 1;
+constexpr int MESH_MAP_BAKE_CURVATURE_RADIUS_MAX = 64;
 
 /** The samples the Edge map's bevel node clamps to (the geometry node's own sample bound). */
 constexpr int MESH_MAP_BAKE_EDGE_BEVEL_SAMPLES_MIN = 2;

@@ -514,6 +514,36 @@ void BKE_mesh_maps_object_hash(const Object &ob_eval,
   if (type == MA_MESH_MAP_EDGE) {
     h = mesh_map_hash_bytes(h, &ma.mesh_map_settings.edge_radius, sizeof(float));
   }
+  if (type == MA_MESH_MAP_CURVATURE &&
+      ma.mesh_map_settings.curvature_method == MA_MESH_MAP_CURVATURE_NORMAL_FILTER)
+  {
+    h = mesh_map_hash_mix(h, uint64_t(uint8_t(ma.mesh_map_settings.curvature_method)));
+    h = mesh_map_hash_mix(h, uint64_t(uint8_t(ma.mesh_map_settings.curvature_radius)));
+    h = mesh_map_hash_bytes(h, &ma.mesh_map_settings.curvature_scale, sizeof(float));
+    h = mesh_map_hash_mix(h, uint64_t(ma.mesh_map_settings.use_directx_normal != 0 ? 1 : 0));
+    /* The filter reads the object's baked Tangent Normal contribution: when the object's
+     * normal state moves, the curvature built over it is stale too. */
+    uint32_t normal_hash[2] = {0, 0};
+    BKE_mesh_maps_object_hash(ob_eval, ma, MA_MESH_MAP_NORMAL_TANGENT, normal_hash);
+    h = mesh_map_hash_bytes(h, normal_hash, sizeof(normal_hash));
+    /* The bake states live on the original object, while the hash receives the evaluated one; the
+     * find takes a mutable reference yet only prunes null-material entries and otherwise reads, so
+     * the const-cast reflects the live state instead of a copy. */
+    const Object *ob_orig = DEG_get_original(&ob_eval);
+    ObjectMeshMapState *tangent_state = nullptr;
+    if (ob_orig != nullptr) {
+      tangent_state = BKE_mesh_maps_object_state_find(const_cast<Object &>(*ob_orig),
+                                                      ma,
+                                                      MA_MESH_MAP_NORMAL_TANGENT);
+    }
+    /* The filter composes over the baked Tangent Normal atlas, so the curvature's freshness
+     * inherits the source slot's: while the atlas is not the valid baked one, the curvature claim
+     * differs from the claim after a tangent re-bake. A missing state and any non-valid status mix
+     * the same "not valid" marker; only the valid baked slot mixes the "valid" one. */
+    const bool tangent_valid = tangent_state != nullptr &&
+                               tangent_state->status == OB_MESH_MAP_STATUS_VALID;
+    h = mesh_map_hash_mix(h, uint64_t(tangent_valid ? 1 : 0));
+  }
   if (type == MA_MESH_MAP_POSITION) {
     /* The raw mode stores the world position as it lies, and the box/sphere modes fit the
      * *world-space* bounds of the object. Translation and a uniform scale may cancel in the
@@ -701,6 +731,9 @@ void BKE_mesh_maps_material_slots_copy(Material &ma_dst, const Material &ma_src)
   ma_dst.mesh_map_settings.margin = ma_src.mesh_map_settings.margin;
   ma_dst.mesh_map_settings.ao_distance = ma_src.mesh_map_settings.ao_distance;
   ma_dst.mesh_map_settings.edge_radius = ma_src.mesh_map_settings.edge_radius;
+  ma_dst.mesh_map_settings.curvature_scale = ma_src.mesh_map_settings.curvature_scale;
+  ma_dst.mesh_map_settings.curvature_method = ma_src.mesh_map_settings.curvature_method;
+  ma_dst.mesh_map_settings.curvature_radius = ma_src.mesh_map_settings.curvature_radius;
   ma_dst.mesh_map_slots = {nullptr, nullptr};
   for (const MaterialMeshMapSlot &src : ma_src.mesh_map_slots) {
     MaterialMeshMapSlot *dst = MEM_dupalloc(&src);

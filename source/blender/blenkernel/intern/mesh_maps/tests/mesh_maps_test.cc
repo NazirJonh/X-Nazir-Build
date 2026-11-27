@@ -14,6 +14,8 @@
 #include <cstring>
 #include <string>
 
+#include <cstddef>
+
 #include "BLI_listbase_iterator.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_set.hh"
@@ -698,6 +700,50 @@ TEST_F(MeshMapsTest, hash_reads_only_its_own_settings)
   ma->mesh_map_settings.edge_radius += 1.0f;
   hash_of(*ob, *ma, MA_MESH_MAP_EDGE, edge_after);
   EXPECT_FALSE(hashes_equal(edge_before, edge_after));
+}
+
+TEST_F(MeshMapsTest, hash_tracks_source_ray_limits_and_skew)
+{
+  Material *ma = BKE_material_add(bmain, "MapsMat");
+  Object *ob = add_mesh_object("Low", add_quad_mesh("LowMesh"));
+  Object *high = add_mesh_object("High", add_quad_mesh("HighMesh"));
+  ObjectMeshMapSource *source = BKE_mesh_maps_source_ensure(*ob, *ma);
+  ASSERT_NE(source, nullptr);
+  source->high_poly = high;
+
+  uint32_t previous[2], current[2];
+  hash_of(*ob, *ma, MA_MESH_MAP_NORMAL_OBJECT, previous);
+
+  /* Each new ray control is part of the source hash: changing it changes what the bake reads. */
+  source->max_rear_ray_distance = 0.5f;
+  hash_of(*ob, *ma, MA_MESH_MAP_NORMAL_OBJECT, current);
+  EXPECT_FALSE(hashes_equal(previous, current));
+  memcpy(previous, current, sizeof(previous));
+
+  source->use_ignore_backfacing = 1;
+  hash_of(*ob, *ma, MA_MESH_MAP_NORMAL_OBJECT, current);
+  EXPECT_FALSE(hashes_equal(previous, current));
+  memcpy(previous, current, sizeof(previous));
+
+  source->skew = 0.5f;
+  hash_of(*ob, *ma, MA_MESH_MAP_NORMAL_OBJECT, current);
+  EXPECT_FALSE(hashes_equal(previous, current));
+
+  /* Re-hashing the unchanged source is stable. */
+  uint32_t again[2];
+  hash_of(*ob, *ma, MA_MESH_MAP_NORMAL_OBJECT, again);
+  EXPECT_TRUE(hashes_equal(current, again));
+}
+
+TEST_F(MeshMapsTest, object_mesh_map_source_dna_layout)
+{
+  /* The DNA rule: members aligned to their size and the struct a multiple of 8. These pin the
+   * layout the static_asserts in the bake bookkeeping also protect. */
+  EXPECT_EQ(sizeof(ObjectMeshMapSource), 72u);
+  EXPECT_EQ(sizeof(ObjectMeshMapSource) % 8u, 0u);
+  EXPECT_EQ(offsetof(ObjectMeshMapSource, max_rear_ray_distance), 56u);
+  EXPECT_EQ(offsetof(ObjectMeshMapSource, use_ignore_backfacing), 60u);
+  EXPECT_EQ(offsetof(ObjectMeshMapSource, skew), 64u);
 }
 
 TEST_F(MeshMapsTest, hash_transform_moves_only_normal_world)

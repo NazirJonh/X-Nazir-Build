@@ -1648,6 +1648,10 @@ static wmOperatorStatus bake(const BakeAPIRender *bkr,
     pixel_array_high = MEM_new_array_uninitialized<BakePixel>(targets.pixels_num,
                                                               "bake pixels high poly");
 
+    /* The full bake has no rear-ray limit, no back-face culling and no cage skew; only the ray
+     * distance comes from the operator, the rest of the struct keeps its zero defaults. */
+    const BakeRayLimits ray_limits{.max_ray_distance = bkr->max_ray_distance};
+
     if (!RE_bake_pixels_populate_from_objects(
             me_low_eval,
             pixel_array_low,
@@ -1657,7 +1661,7 @@ static wmOperatorStatus bake(const BakeAPIRender *bkr,
             targets.pixels_num,
             ob_cage != nullptr,
             bkr->cage_extrusion,
-            bkr->max_ray_distance,
+            ray_limits,
             ob_low_eval->object_to_world().ptr(),
             (ob_cage ? ob_cage->object_to_world().ptr() : ob_low_eval->object_to_world().ptr()),
             me_cage_eval))

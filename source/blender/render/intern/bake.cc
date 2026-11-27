@@ -49,6 +49,7 @@
  * For a complete implementation example look at the Cycles Bake commit.
  */
 
+#include <algorithm>
 #include <climits>
 #include <cstring>
 
@@ -334,15 +335,18 @@ static bool cast_ray_highpoly(bke::BVHTreeFromMesh *treeData,
                               MutableSpan<BVHTreeRayHit> hits,
                               const float co[3],
                               const float dir[3],
+                              const float front_normal[3],
                               const int pixel_id,
-                              const float max_ray_distance)
+                              const float max_ray_distance,
+                              const float max_rear_ray_distance,
+                              const bool ignore_backfacing)
 {
   int hit_mesh = -1;
-  float hit_distance_squared = max_ray_distance * max_ray_distance;
-  if (hit_distance_squared == 0.0f) {
-    /* No ray distance set, use maximum. */
-    hit_distance_squared = FLT_MAX;
-  }
+  /* The BVH cast itself is unlimited; each hit is gated by the limit that applies to it below.
+   * Keeping the nearest-hit threshold unlimited avoids treating one zero (unlimited) distance as
+   * a finite search bound when the other distance is set, and then dropping a valid frontal hit
+   * that lies beyond a short rear limit. */
+  float hit_distance_squared = FLT_MAX;
 
   for (int i = 0; i < highpoly_num; i++) {
     float co_high[3], dir_high[3];
@@ -375,7 +379,30 @@ static bool cast_ray_highpoly(bke::BVHTreeFromMesh *treeData,
       mul_v3_m4v3(hit_world, highpoly[i].obmat, hits[i].co);
       float distance_squared = len_squared_v3v3(hit_world, co);
 
-      if (distance_squared < hit_distance_squared) {
+      /* A hit on the far side of the low-poly surface obeys the rear distance, the rest the
+       * frontal one. A zero distance means unlimited; a zero rear one falls back to the frontal
+       * distance, so a single setting keeps behaving like one limit for everything. */
+      float offset[3];
+      sub_v3_v3v3(offset, hit_world, co);
+      const bool is_rear = dot_v3v3(offset, front_normal) < 0.0f;
+      const bool use_rear_limit = is_rear && max_rear_ray_distance > 0.0f;
+      const float limit = use_rear_limit ? max_rear_ray_distance : max_ray_distance;
+      const float limit_squared = limit > 0.0f ? limit * limit : FLT_MAX;
+
+      /* A face whose normal points along the ray was hit from the back. */
+      if (ignore_backfacing) {
+        const int primitive_id_high = hits[i].index;
+        const TriTessFace *triangle_high = &triangles[i][primitive_id_high];
+        float hit_normal[3];
+        mul_v3_mat3_m4v3(hit_normal, highpoly[i].obmat, triangle_high->normal);
+        normalize_v3(hit_normal);
+        if (dot_v3v3(hit_normal, dir) > 0.0f) {
+          hits[i].index = -1;
+          continue;
+        }
+      }
+
+      if (distance_squared < limit_squared && distance_squared < hit_distance_squared) {
         hit_mesh = i;
         hit_distance_squared = distance_squared;
       }
@@ -558,7 +585,7 @@ bool RE_bake_pixels_populate_from_objects(Mesh *me_low,
                                           const size_t pixels_num,
                                           const bool is_custom_cage,
                                           const float cage_extrusion,
-                                          const float max_ray_distance,
+                                          const BakeRayLimits &ray_limits,
                                           const float mat_low[4][4],
                                           const float mat_cage[4][4],
                                           Mesh *me_cage)
@@ -633,6 +660,17 @@ bool RE_bake_pixels_populate_from_objects(Mesh *me_low,
         calc_point_from_barycentric_cage(
             tris_low, tris_cage, mat_low, mat_cage, primitive_id, u, v, co, dir);
         tri_low = &tris_cage[primitive_id];
+        if (ray_limits.skew > 0.0f) {
+          /* Skew bends the cage's projection direction toward the low-poly's own normal, the
+           * direction an auto-cage casts along: 0 keeps the cage skew, 1 straightens fully. The
+           * low-poly triangle is read from `tris_low`, not the cage `tri_low` points at. */
+          float surface_dir[3];
+          mul_v3_mat3_m4v3(surface_dir, mat_low, tris_low[primitive_id].normal);
+          normalize_v3(surface_dir);
+          negate_v3(surface_dir);
+          interp_v3_v3v3(dir, dir, surface_dir, ray_limits.skew);
+          normalize_v3(dir);
+        }
       }
       else if (is_cage) {
         calc_point_from_barycentric_extrusion(
@@ -644,6 +682,15 @@ bool RE_bake_pixels_populate_from_objects(Mesh *me_low,
             tris_low, mat_low, imat_low, primitive_id, u, v, cage_extrusion, co, dir, false);
         tri_low = &tris_low[primitive_id];
       }
+
+      /* The low-poly surface normal in world space decides frontal from rear hits. The custom
+       * cage keeps its own triangles in `tris_low`, so the classification is against the actual
+       * low-poly surface, not the cage. */
+      const TriTessFace *face_for_front_normal = tris_low != nullptr ? &tris_low[primitive_id] :
+                                                                       tri_low;
+      float front_normal[3];
+      mul_v3_mat3_m4v3(front_normal, mat_low, face_for_front_normal->normal);
+      normalize_v3(front_normal);
 
       /* cast ray */
       if (!cast_ray_highpoly(treeData.data(),
@@ -657,8 +704,11 @@ bool RE_bake_pixels_populate_from_objects(Mesh *me_low,
                              hits,
                              co,
                              dir,
+                             front_normal,
                              i,
-                             max_ray_distance))
+                             ray_limits.max_ray_distance,
+                             ray_limits.max_rear_ray_distance,
+                             ray_limits.ignore_backfacing))
       {
         /* if it fails mask out the original pixel array */
         pixel_array_from[i].primitive_id = -1;

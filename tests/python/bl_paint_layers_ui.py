@@ -293,10 +293,10 @@ class PaintLayersUiTest(unittest.TestCase):
         self.assertNotIn('METALLIC', items)
         self.assertNotIn('EMISSION', items)
 
-    def test_base_color_cannot_leave_the_set(self):
+    def test_base_color_can_leave_the_set_when_another_channel_remains(self):
         self.material.paint_layers.new(source='IMAGE', name="Layer")
         self.material.paint_layers_channels = {'METALLIC'}
-        self.assertEqual(set(self.material.paint_layers_channels), {'BASE_COLOR', 'METALLIC'})
+        self.assertEqual(set(self.material.paint_layers_channels), {'METALLIC'})
 
     def test_heavy_hint_weighs_channels_the_row_wires(self):
         from bl_ui.properties_material_paint_layers import material_layer_channel_weight

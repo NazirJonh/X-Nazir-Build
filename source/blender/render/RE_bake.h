@@ -69,6 +69,19 @@ struct BakeHighPolyData {
   float imat[4][4];
 };
 
+/**
+ * The ray-cast knobs #RE_bake_pixels_populate_from_objects casts its high-poly rays with, grouped
+ * so callers pass one aggregate instead of four loose parameters. The distances are in world units
+ * (zero casts without a limit), the skew blends the cage's projection direction toward the
+ * low-poly's own normal, and #ignore_backfacing drops rear hits.
+ */
+struct BakeRayLimits {
+  float max_ray_distance = 0.0f;
+  float max_rear_ray_distance = 0.0f;
+  float skew = 0.0f;
+  bool ignore_backfacing = false;
+};
+
 /* `external_engine.cc` */
 
 bool RE_bake_has_engine(const struct Render *re);
@@ -95,7 +108,7 @@ bool RE_bake_pixels_populate_from_objects(struct Mesh *me_low,
                                           size_t pixels_num,
                                           bool is_custom_cage,
                                           float cage_extrusion,
-                                          float max_ray_distance,
+                                          const BakeRayLimits &ray_limits,
                                           const float mat_low[4][4],
                                           const float mat_cage[4][4],
                                           struct Mesh *me_cage);

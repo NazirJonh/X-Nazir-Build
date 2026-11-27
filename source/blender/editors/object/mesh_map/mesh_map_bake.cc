@@ -746,7 +746,7 @@ bool mesh_map_bake_fill_cpu_map(MeshMapBakeWorld &world,
                                 const MeshMapTypeInfo & /*type_info*/,
                                 const bool is_render,
                                 const float cage_extrusion,
-                                const float max_ray_distance,
+                                const BakeRayLimits &ray_limits,
                                 Depsgraph &user_depsgraph)
 {
   const size_t pixels_total = world.pixels_num * size_t(world.tiles_num);
@@ -797,7 +797,7 @@ bool mesh_map_bake_fill_cpu_map(MeshMapBakeWorld &world,
                                                 pixels_total,
                                                 is_custom_cage,
                                                 cage_extrusion,
-                                                max_ray_distance,
+                                                ray_limits,
                                                 mat_low,
                                                 mat_cage,
                                                 world.cage_mesh))
@@ -1063,12 +1063,17 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
   Vector<Object *> source_objects;
   Object *cage = nullptr;
   float cage_extrusion = 0.0f;
-  float max_ray_distance = 0.0f;
+  /* The ray-cast limits the high-poly cast runs with: zero defaults when the object holds no
+   * source, so the cast then reads the same limits an empty bake would. */
+  BakeRayLimits ray_limits{};
   if (!is_curvature_filter) {
     BKE_mesh_maps_source_resolve(*ob, *ma, source_objects, &cage);
     if (const ObjectMeshMapSource *source = BKE_mesh_maps_source_find(*ob, *ma)) {
       cage_extrusion = source->cage_extrusion;
-      max_ray_distance = source->max_ray_distance;
+      ray_limits.max_ray_distance = source->max_ray_distance;
+      ray_limits.max_rear_ray_distance = source->max_rear_ray_distance;
+      ray_limits.ignore_backfacing = source->use_ignore_backfacing != 0;
+      ray_limits.skew = std::clamp(source->skew, 0.0f, 1.0f);
     }
   }
 
@@ -1306,7 +1311,7 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
                                     *type_info,
                                     is_render,
                                     cage_extrusion,
-                                    max_ray_distance,
+                                    ray_limits,
                                     *user_depsgraph);
 }
 

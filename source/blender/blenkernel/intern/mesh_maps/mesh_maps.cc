@@ -658,6 +658,9 @@ void BKE_mesh_maps_object_hash(const Object &ob_eval,
     }
     h = mesh_map_hash_bytes(h, &source->cage_extrusion, sizeof(float));
     h = mesh_map_hash_bytes(h, &source->max_ray_distance, sizeof(float));
+    h = mesh_map_hash_bytes(h, &source->max_rear_ray_distance, sizeof(float));
+    h = mesh_map_hash_mix(h, uint64_t(source->use_ignore_backfacing != 0 ? 1 : 0));
+    h = mesh_map_hash_bytes(h, &source->skew, sizeof(float));
   }
 
   r_hash[0] = uint32_t(h & 0xFFFFFFFFu);

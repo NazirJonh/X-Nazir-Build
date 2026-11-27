@@ -92,6 +92,17 @@ BLI_STATIC_ASSERT(MESH_MAP_BAKE_TYPE_INFOS[MA_MESH_MAP_POSITION].emit_tree_build
 BLI_STATIC_ASSERT(MESH_MAP_BAKE_TYPE_INFOS[MA_MESH_MAP_ID_MATERIAL].emit_tree_builder == nullptr,
                   "A CPU fill builds no emission graph");
 
+/* The DNA layout rule: every member aligned to its size and the struct size a multiple of 8;
+ * makesdna enforces it when the SDNA is built, but this pins the C++ layout too, so an edit that
+ * breaks the rule also fails every normal compile of the bake bookkeeping. */
+BLI_STATIC_ASSERT(sizeof(ObjectMeshMapSource) == 72, "ObjectMeshMapSource DNA 8-byte alignment");
+BLI_STATIC_ASSERT(offsetof(ObjectMeshMapSource, max_rear_ray_distance) == 56,
+                  "ObjectMeshMapSource DNA layout changed");
+BLI_STATIC_ASSERT(offsetof(ObjectMeshMapSource, use_ignore_backfacing) == 60,
+                  "ObjectMeshMapSource DNA layout changed");
+BLI_STATIC_ASSERT(offsetof(ObjectMeshMapSource, skew) == 64,
+                  "ObjectMeshMapSource DNA layout changed");
+
 namespace {
 
 bool mesh_map_bake_type_valid(const int8_t type)

@@ -15,6 +15,7 @@ import bpy
 from bpy.types import Panel
 
 from bl_operators.material_mesh_maps import (
+    OBJECT_OT_mesh_map_cage_preview,
     mesh_map_objects_for_material,
     mesh_map_summary_status,
     mesh_map_type_items,
@@ -137,6 +138,16 @@ class LAYER_MATERIAL_PT_mesh_maps(LayerMaterialButtonsPanel, Panel):
                 hp.prop(source, "cage", text="Cage")
                 hp.prop(source, "cage_extrusion")
                 hp.prop(source, "max_ray_distance")
+                hp.prop(source, "max_rear_ray_distance")
+                hp.prop(source, "use_ignore_backfacing")
+                if source.cage is not None:
+                    hp.prop(source, "skew")
+                hp.operator(
+                    "object.mesh_map_cage_preview",
+                    text="Preview Cage",
+                    icon='XRAY',
+                    depress=OBJECT_OT_mesh_map_cage_preview.is_running(),
+                )
                 if source.resolved_object_count() == 0:
                     hp.label(text="The source resolves to no mesh objects", icon='ERROR')
                 elif source.cage is not None and not source.cage_matches(
@@ -145,6 +156,11 @@ class LAYER_MATERIAL_PT_mesh_maps(LayerMaterialButtonsPanel, Panel):
                         text="The cage must have the same face count as the low-poly object",
                         icon='ERROR')
                 hp.operator("object.mesh_map_source_remove", text="Remove", icon='X')
+                hp.operator(
+                    "object.mesh_map_source_match_by_name",
+                    text="Match by Name",
+                    icon='LINKED',
+                )
 
     def _draw_map_row(self, layout, mat, map_type, type_label, states):
         row = layout.row(align=True)

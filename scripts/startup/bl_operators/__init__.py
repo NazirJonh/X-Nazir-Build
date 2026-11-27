@@ -69,6 +69,7 @@ def register():
     from . import (
         bone_selection_sets,
         copy_global_transform,
+        material_mesh_maps,
         material_paint_layers,
         sculpt_insert_asset,
         sculpt_mask,
@@ -83,6 +84,7 @@ def register():
 
     bone_selection_sets.register()
     copy_global_transform.register()
+    material_mesh_maps.register()
     material_paint_layers.register()
     sculpt_insert_asset.register()
     sculpt_mask.register()
@@ -93,6 +95,7 @@ def unregister():
     from . import (
         bone_selection_sets,
         copy_global_transform,
+        material_mesh_maps,
         material_paint_layers,
         sculpt_insert_asset,
         sculpt_mask,
@@ -100,6 +103,7 @@ def unregister():
 
     bone_selection_sets.unregister()
     copy_global_transform.unregister()
+    material_mesh_maps.unregister()
     material_paint_layers.unregister()
     sculpt_insert_asset.unregister()
     sculpt_mask.unregister()

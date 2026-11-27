@@ -3897,6 +3897,31 @@ static void rna_def_object_mesh_maps(BlenderRNA *brna, StructRNA *srna)
                            "Max Ray Distance",
                            "Maximum cage-to-high-poly ray distance; zero is unlimited");
 
+  prop = RNA_def_property(srna, "max_rear_ray_distance", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_range(prop, 0.0f, 1.0e30f);
+  RNA_def_property_ui_text(prop,
+                           "Max Rear Ray Distance",
+                           "Maximum ray distance to hits behind the low-poly surface; zero falls "
+                           "back to the frontal distance");
+  RNA_def_property_update(prop, NC_OBJECT | ND_MODIFIER, nullptr);
+
+  prop = RNA_def_property(srna, "use_ignore_backfacing", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_ignore_backfacing", 1);
+  RNA_def_property_ui_text(
+      prop,
+      "Ignore Backfacing",
+      "Reject hits that land on the back-facing side of the high-poly surface");
+  RNA_def_property_update(prop, NC_OBJECT | ND_MODIFIER, nullptr);
+
+  prop = RNA_def_property(srna, "skew", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(
+      prop,
+      "Skew",
+      "Bend the custom cage's projection direction toward the low-poly's own surface normal; "
+      "1 straightens off-axis projection on curved surfaces");
+  RNA_def_property_update(prop, NC_OBJECT | ND_MODIFIER, nullptr);
+
   func = RNA_def_function(
       srna, "resolved_object_count", "rna_ObjectMeshMapSource_resolved_object_count");
   RNA_def_function_ui_description(

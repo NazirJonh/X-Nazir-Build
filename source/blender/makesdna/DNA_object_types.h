@@ -521,6 +521,20 @@ struct ObjectMeshMapSource {
   float cage_extrusion = 0.0f;
   /** Maximum ray distance from the cage to the high-poly; zero means unlimited. */
   float max_ray_distance = 0.0f;
+  /** Maximum ray distance to hits behind the low-poly surface; zero falls back to the frontal
+   * one. */
+  float max_rear_ray_distance = 0.0f;
+  /** Ignore hits landing on the back-facing side of the high-poly surface. */
+  int8_t use_ignore_backfacing = 0;
+  char _pad[3] = {};
+  /**
+   * How far the custom cage's projection direction bends toward the low-poly's own surface
+   * normal: 0 casts the way the cage skews, 1 casts straight down the normal, which straightens
+   * off-axis projection on curved surfaces. The auto-cage already casts along the normal.
+   */
+  float skew = 0.0f;
+  /** Keeps the struct size a multiple of 8, as DNA requires. */
+  char _pad2[4] = {};
 };
 
 /** #ObjectPaintLayerMask::flag */

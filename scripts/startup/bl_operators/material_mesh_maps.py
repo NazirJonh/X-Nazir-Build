@@ -10,7 +10,7 @@ operators; everything goes through the layered material's active slot, the same 
 and the C++ bake job pick."""
 
 import bpy
-from bpy.props import EnumProperty
+from bpy.props import EnumProperty, StringProperty
 from bpy.types import Operator
 
 from bl_operators.material_paint_layers import context_material
@@ -159,6 +159,218 @@ def mesh_map_objects_for_material(mat):
     return list(mat.mesh_map_bake_target_objects)
 
 
+class OBJECT_OT_mesh_map_source_match_by_name(Operator):
+    """Pair high-poly objects to the low-poly ones of this material by name suffixes"""
+
+    bl_idname = "object.mesh_map_source_match_by_name"
+    bl_label = "Match by Name"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    low_suffix: StringProperty(
+        name="Low Suffix", description="Name ending that marks a low-poly object", default="_low",
+        maxlen=64)
+    high_suffix: StringProperty(
+        name="High Suffix", description="Name ending that marks a high-poly object",
+        default="_high", maxlen=64)
+
+    @classmethod
+    def poll(cls, context):
+        return mesh_map_owner(context) is not None
+
+    def invoke(self, context, _event):
+        # The suffixes are the only decision; a props dialog keeps the panel at one button.
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, _context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.prop(self, "low_suffix")
+        layout.prop(self, "high_suffix")
+
+    def execute(self, context):
+        mat = mesh_map_owner(context)
+        if mat is None:
+            return {'CANCELLED'}
+        lows = mesh_map_objects_for_material(mat)
+        if not lows:
+            self.report({'ERROR'}, "No object of this material to pair")
+            return {'CANCELLED'}
+        paired = 0
+        unmatched = []
+        for low in lows:
+            # A high-poly object of the same material is a source, not a low-poly target: its name
+            # carries the high suffix. Skipping it also keeps the pair from matching itself.
+            if self.high_suffix and low.name.endswith(self.high_suffix):
+                continue
+            stem = low.name
+            if self.low_suffix and stem.endswith(self.low_suffix):
+                stem = stem[: -len(self.low_suffix)]
+            high = bpy.data.objects.get(stem + self.high_suffix)
+            if high is None or high.type != 'MESH' or high == low:
+                unmatched.append(low.name)
+                continue
+            source = low.mesh_map_sources.ensure(material=mat)
+            if source is None:
+                unmatched.append(low.name)
+                continue
+            # The RNA setters keep the object-XOR-collection invariant; setting both makes the
+            # result the same whichever form a previous assignment used.
+            source.high_poly = high
+            source.high_poly_collection = None
+            paired += 1
+        if paired:
+            if unmatched:
+                self.report({'WARNING'},
+                            "Paired {:d} object(s); without a high-poly match: {}".format(
+                                paired, ", ".join(unmatched)))
+            else:
+                self.report({'INFO'}, "Paired {:d} object(s)".format(paired))
+            return {'FINISHED'}
+        self.report({'WARNING'},
+                    "No match for: {}".format(", ".join(unmatched) if unmatched else "any object"))
+        return {'CANCELLED'}
+
+
+# Cage preview #############################################################
+
+# The preview draws the cage as a viewport overlay instead of touching the cage object's display
+# settings, so a save while previewing cannot turn the temporary wireframe into file data.
+_MESH_MAP_CAGE_PREVIEW_COLOR = (1.0, 0.3, 0.3, 0.9)
+
+_mesh_map_cage_preview_handle = None
+_mesh_map_cage_preview_batch = None
+_mesh_map_cage_preview_key = None
+
+
+def _mesh_map_cage_preview_stop():
+    """Remove the preview overlay and its cached batches; safe to call when nothing is shown."""
+    global _mesh_map_cage_preview_handle, _mesh_map_cage_preview_batch, _mesh_map_cage_preview_key
+    if _mesh_map_cage_preview_handle is not None:
+        bpy.types.SpaceView3D.draw_handler_remove(_mesh_map_cage_preview_handle, 'WINDOW')
+        _mesh_map_cage_preview_handle = None
+        _mesh_map_cage_preview_batch = None
+        _mesh_map_cage_preview_key = None
+
+
+def _mesh_map_cage_preview_load_post(_scene, _depsgraph):
+    # A new file's cages are not the ones the preview was switched on for: the draw callback would
+    # quietly draw nothing, but the handler and its cache have no business outliving the file.
+    _mesh_map_cage_preview_stop()
+
+
+def _mesh_map_cage_preview_batches(context):
+    """The line batches of every cage of the owner material, keyed by what built them."""
+    global _mesh_map_cage_preview_batch, _mesh_map_cage_preview_key
+    import gpu
+    from gpu_extras import batch as gpu_batch
+
+    mat = mesh_map_owner(context)
+    if mat is None:
+        return None
+    depsgraph = context.evaluated_depsgraph_get()
+    key_parts = []
+    batches = []
+    for ob in mesh_map_objects_for_material(mat):
+        for source in ob.mesh_map_sources:
+            if source.material != mat or source.cage is None:
+                continue
+            cage_eval = source.cage.evaluated_get(depsgraph)
+            mesh = cage_eval.to_mesh()
+            if mesh is None:
+                continue
+            try:
+                verts = [v.co.copy() for v in mesh.vertices]
+                edges = [(e.vertices[0], e.vertices[1]) for e in mesh.edges]
+            finally:
+                cage_eval.to_mesh_clear()
+            if not verts or not edges:
+                continue
+            matrix = cage_eval.matrix_world
+            key_parts.append((source.cage.name, len(verts), len(edges),
+                              matrix.translation.copy(), matrix.to_quaternion().copy(),
+                              matrix.to_scale().copy()))
+            coords = []
+            for a, b in edges:
+                coords.append(matrix @ verts[a])
+                coords.append(matrix @ verts[b])
+            shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+            batches.append(gpu_batch.batch_for_shader(shader, 'LINES', {"pos": coords}))
+    if not batches:
+        return None
+    key = tuple(key_parts)
+    if key != _mesh_map_cage_preview_key or _mesh_map_cage_preview_batch is None:
+        _mesh_map_cage_preview_key = key
+        _mesh_map_cage_preview_batch = batches
+    return _mesh_map_cage_preview_batch
+
+
+def _mesh_map_cage_preview_draw():
+    """The POST_VIEW overlay callback: draw every cage of the owner material as red lines."""
+    global _mesh_map_cage_preview_batch, _mesh_map_cage_preview_key
+    import gpu
+    try:
+        batches = _mesh_map_cage_preview_batches(bpy.context)
+    except Exception:
+        # A vanished owner or cage just stops the preview; it must never break the viewport.
+        _mesh_map_cage_preview_batch = None
+        _mesh_map_cage_preview_key = None
+        return
+    if not batches:
+        return
+    gpu.state.blend_set('ALPHA')
+    gpu.state.line_width_set(2.0)
+    shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+    shader.uniform_float("color", _MESH_MAP_CAGE_PREVIEW_COLOR)
+    for batch in batches:
+        batch.draw(shader)
+
+
+class OBJECT_OT_mesh_map_cage_preview(Operator):
+    """Draw the cage of this material's high-poly source as a red wireframe overlay"""
+
+    bl_idname = "object.mesh_map_cage_preview"
+    bl_label = "Preview Cage"
+    bl_options = {'REGISTER'}
+
+    @classmethod
+    def poll(cls, context):
+        mat = mesh_map_owner(context)
+        if mat is None:
+            return False
+        ob = context.object
+        for source in ob.mesh_map_sources if ob is not None else ():
+            if source.material == mat and source.cage is not None:
+                return True
+        return False
+
+    @staticmethod
+    def is_running():
+        return _mesh_map_cage_preview_handle is not None
+
+    def execute(self, context):
+        global _mesh_map_cage_preview_handle
+        if _mesh_map_cage_preview_handle is not None:
+            _mesh_map_cage_preview_stop()
+            self.report({'INFO'}, "Cage preview off")
+            return {'FINISHED'}
+        _mesh_map_cage_preview_handle = bpy.types.SpaceView3D.draw_handler_add(
+            _mesh_map_cage_preview_draw, (), 'WINDOW', 'POST_VIEW')
+        self.report({'INFO'}, "Cage preview on")
+        return {'FINISHED'}
+
+
+def register():
+    if _mesh_map_cage_preview_load_post not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_mesh_map_cage_preview_load_post)
+
+
+def unregister():
+    if _mesh_map_cage_preview_load_post in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_mesh_map_cage_preview_load_post)
+    # A draw handler left behind would keep calling into this module after it is gone.
+    _mesh_map_cage_preview_stop()
+
+
 def mesh_map_summary_status(ob, mat):
     """The worst mesh-map status of `ob` for `mat`, and how many states it has."""
     states = [state for state in ob.mesh_map_states if state.material == mat]
@@ -176,4 +388,6 @@ classes = (
     MATERIAL_OT_mesh_map_add_layer,
     OBJECT_OT_mesh_map_source_add,
     OBJECT_OT_mesh_map_source_remove,
+    OBJECT_OT_mesh_map_source_match_by_name,
+    OBJECT_OT_mesh_map_cage_preview,
 )

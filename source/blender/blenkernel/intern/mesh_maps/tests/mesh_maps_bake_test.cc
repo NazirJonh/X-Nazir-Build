@@ -18,10 +18,14 @@
 #include <cstring>
 #include <thread>
 
+#include <algorithm>
+#include <utility>
+
 #include "BLI_array.hh"
 #include "BLI_listbase.h"
 #include "BLI_listbase_iterator.hh"
 #include "BLI_math_base.h"
+#include "BLI_math_matrix.h"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 #include "BLI_string.h"
@@ -94,6 +98,74 @@ static void populate_geometry_pixels(Mesh &mesh,
   targets.pixels_num = int(pixels.size());
   targets.channels_num = 4;
   RE_bake_pixels_populate(&mesh, pixels.data(), size_t(pixels.size()), &targets, uv_name);
+}
+
+/**
+ * Populate \a pixels_low from \a low's active `UVMap` and cast it onto a single high-poly source
+ * with the given ray limits. The high-poly and the cage sit at the identity transform, so the
+ * mesh positions alone place them.
+ */
+static void cast_low_onto_highpoly(Mesh &low,
+                                   Mesh &high_mesh,
+                                   Object &high_ob,
+                                   const bool is_custom_cage,
+                                   Mesh *cage,
+                                   const float cage_extrusion,
+                                   const BakeRayLimits &ray_limits,
+                                   MutableSpan<BakePixel> pixels_low,
+                                   MutableSpan<BakePixel> pixels_high,
+                                   const int resolution)
+{
+  populate_geometry_pixels(low, pixels_low, resolution, "UVMap", 1001);
+
+  BakeHighPolyData highpoly = {};
+  highpoly.ob = &high_ob;
+  highpoly.ob_eval = &high_ob;
+  highpoly.mesh = &high_mesh;
+  const float identity[4][4] = {
+      {1.0f, 0.0f, 0.0f, 0.0f},
+      {0.0f, 1.0f, 0.0f, 0.0f},
+      {0.0f, 0.0f, 1.0f, 0.0f},
+      {0.0f, 0.0f, 0.0f, 1.0f},
+  };
+  copy_m4_m4(highpoly.obmat, identity);
+  copy_m4_m4(highpoly.imat, identity);
+
+  RE_bake_pixels_populate_from_objects(&low,
+                                       pixels_low.data(),
+                                       pixels_high.data(),
+                                       &highpoly,
+                                       1,
+                                       size_t(resolution) * size_t(resolution),
+                                       is_custom_cage,
+                                       cage_extrusion,
+                                       ray_limits,
+                                       identity,
+                                       identity,
+                                       cage);
+}
+
+/** How many texels the cast actually hit. */
+static int count_cast_hits(const Span<BakePixel> pixels)
+{
+  int hits = 0;
+  for (const BakePixel &pixel : pixels) {
+    if (pixel.primitive_id != -1) {
+      hits++;
+    }
+  }
+  return hits;
+}
+
+/** Move a quad's vertices by (\a dx, 0, \a dz) in place. */
+static void translate_quad(Mesh &mesh, const float dx, const float dz)
+{
+  MutableSpan<float3> positions = mesh.vert_positions_for_write();
+  for (float3 &position : positions) {
+    position.x += dx;
+    position.z += dz;
+  }
+  mesh.tag_positions_changed();
 }
 
 /** A zeroed float atlas tile of \a res x \a res texels; release with #IMB_freeImBuf. */
@@ -837,6 +909,162 @@ TEST_F(MeshMapBakeTest, fill_bent_normals_handles_mirrored_low_matrix)
   EXPECT_NEAR(result[1], 0.5f, 1e-6f);
   EXPECT_NEAR(result[2], 1.0f, 1e-6f);
   EXPECT_FLOAT_EQ(result[3], 1.0f);
+}
+
+/**
+ * A hit behind the low-poly surface obeys `max_rear_ray_distance`; zero falls back to the frontal
+ * limit. The auto-cage starts 0.2 above the low-poly, so the high-poly at z = 0 is 0.2 away and
+ * counts as a rear hit (the ray points down the surface normal).
+ */
+TEST_F(MeshMapBakeTest, populate_rear_ray_distance_limits_hits_behind_the_surface)
+{
+  Material *ma = add_material("MapsMat");
+  Mesh *low = add_quad_two_uv("LowQuad");
+  Mesh *high = add_quad_two_uv("HighQuad");
+  Object *high_ob = add_simple_object("High", high, ma);
+
+  const int resolution = 4;
+  Array<BakePixel> pixels_low(resolution * resolution);
+  Array<BakePixel> pixels_high(resolution * resolution);
+
+  BakeRayLimits limits;
+  limits.max_ray_distance = 0.0f;
+  limits.max_rear_ray_distance = 0.1f;
+  cast_low_onto_highpoly(
+      *low, *high, *high_ob, false, nullptr, 0.2f, limits, pixels_low, pixels_high, resolution);
+  EXPECT_EQ(count_cast_hits(pixels_high), 0);
+
+  /* A rear limit past the 0.2 ray lets the hits through. */
+  limits.max_rear_ray_distance = 0.5f;
+  cast_low_onto_highpoly(
+      *low, *high, *high_ob, false, nullptr, 0.2f, limits, pixels_low, pixels_high, resolution);
+  EXPECT_GT(count_cast_hits(pixels_high), 0);
+
+  /* Zero rear falls back to the frontal distance, so an unlimited frontal cast hits. */
+  limits.max_rear_ray_distance = 0.0f;
+  limits.max_ray_distance = 0.5f;
+  cast_low_onto_highpoly(
+      *low, *high, *high_ob, false, nullptr, 0.2f, limits, pixels_low, pixels_high, resolution);
+  EXPECT_GT(count_cast_hits(pixels_high), 0);
+
+  /* ...and a frontal limit shorter than the ray rejects it. */
+  limits.max_ray_distance = 0.1f;
+  cast_low_onto_highpoly(
+      *low, *high, *high_ob, false, nullptr, 0.2f, limits, pixels_low, pixels_high, resolution);
+  EXPECT_EQ(count_cast_hits(pixels_high), 0);
+}
+
+/**
+ * A zero frontal distance means unlimited. A finite rear limit must gate only rear hits, not
+ * shrink the search for the frontal ones: the custom cage below the surface casts upward, so the
+ * 0.2 hit is frontal and must survive a 0.1 rear limit.
+ */
+TEST_F(MeshMapBakeTest, populate_unlimited_frontal_ray_ignores_short_rear_limit)
+{
+  Material *ma = add_material("MapsMat");
+  Mesh *low = add_quad_two_uv("LowQuad");
+  Mesh *high = add_quad_two_uv("HighQuad");
+  Object *high_ob = add_simple_object("High", high, ma);
+  Mesh *cage = add_quad_two_uv("CageQuad");
+  for (MutableSpan<float3> positions = cage->vert_positions_for_write(); float3 &position :
+       positions)
+  {
+    position.z = -0.2f;
+  }
+  cage->tag_positions_changed();
+
+  const int resolution = 4;
+  Array<BakePixel> pixels_low(resolution * resolution);
+  Array<BakePixel> pixels_high(resolution * resolution);
+
+  BakeRayLimits limits;
+  limits.max_ray_distance = 0.0f;
+  limits.max_rear_ray_distance = 0.1f;
+  cast_low_onto_highpoly(
+      *low, *high, *high_ob, true, cage, 0.0f, limits, pixels_low, pixels_high, resolution);
+  EXPECT_GT(count_cast_hits(pixels_high), 0);
+}
+
+/** `ignore_backfacing` drops a high-poly face whose normal points along the ray. */
+TEST_F(MeshMapBakeTest, populate_ignore_backfacing_drops_reversed_faces)
+{
+  Material *ma = add_material("MapsMat");
+  Mesh *low = add_quad_two_uv("LowQuad");
+  Mesh *high = add_quad_two_uv("HighQuad");
+  Object *high_ob = add_simple_object("High", high, ma);
+  /* Reverse the high-poly winding: its face normal then points down the ray. */
+  MutableSpan<int> corner_verts = high->corner_verts_for_write();
+  std::swap(corner_verts[1], corner_verts[3]);
+  high->tag_topology_changed();
+
+  const int resolution = 4;
+  Array<BakePixel> pixels_low(resolution * resolution);
+  Array<BakePixel> pixels_high(resolution * resolution);
+
+  BakeRayLimits limits;
+  limits.max_ray_distance = 1.0f;
+  cast_low_onto_highpoly(
+      *low, *high, *high_ob, false, nullptr, 0.2f, limits, pixels_low, pixels_high, resolution);
+  EXPECT_GT(count_cast_hits(pixels_high), 0);
+
+  limits.ignore_backfacing = true;
+  cast_low_onto_highpoly(
+      *low, *high, *high_ob, false, nullptr, 0.2f, limits, pixels_low, pixels_high, resolution);
+  EXPECT_EQ(count_cast_hits(pixels_high), 0);
+}
+
+/**
+ * `skew` bends a custom cage's off-axis projection toward the low-poly normal: the same cage
+ * offset hits a different point of the high-poly (and reads a different barycentric UV) at
+ * skew 0 and skew 1.
+ */
+TEST_F(MeshMapBakeTest, populate_skew_bends_the_custom_cage_projection)
+{
+  Material *ma = add_material("MapsMat");
+  Mesh *low = add_quad_two_uv("LowQuad");
+  Mesh *high = add_quad_two_uv("HighQuad");
+  Mesh *cage = add_quad_two_uv("CageQuad");
+  Object *high_ob = add_simple_object("High", high, ma);
+  /* Offset the cage sideways and above: its projection is off the low-poly normal. */
+  translate_quad(*cage, 0.3f, 0.2f);
+
+  const int resolution = 8;
+  Array<BakePixel> pixels_low(resolution * resolution);
+  Array<BakePixel> pixels_high(resolution * resolution);
+  Array<BakePixel> skewed_low(resolution * resolution);
+  Array<BakePixel> skewed_high(resolution * resolution);
+
+  BakeRayLimits limits;
+  limits.max_ray_distance = 1.0f;
+  limits.skew = 0.0f;
+  cast_low_onto_highpoly(
+      *low, *high, *high_ob, true, cage, 0.0f, limits, pixels_low, pixels_high, resolution);
+
+  limits.skew = 1.0f;
+  cast_low_onto_highpoly(
+      *low, *high, *high_ob, true, cage, 0.0f, limits, skewed_low, skewed_high, resolution);
+
+  int compared = 0;
+  int shifted = 0;
+  float max_difference = 0.0f;
+  for (int i = 0; i < resolution * resolution; i++) {
+    if (pixels_high[i].primitive_id == -1 || skewed_high[i].primitive_id == -1) {
+      continue;
+    }
+    compared++;
+    /* The quad triangulates along its diagonal and a texel on either side of it can land on a
+     * different triangle, so a couple of texels shift by a different barycentric coordinate. The
+     * bulk of the atlas must still move by the cage's 0.3 x offset. */
+    const float difference = std::fabs(pixels_high[i].uv[0] - skewed_high[i].uv[0]) +
+                             std::fabs(pixels_high[i].uv[1] - skewed_high[i].uv[1]);
+    max_difference = std::max(max_difference, difference);
+    if (difference > 0.1f) {
+      shifted++;
+    }
+  }
+  EXPECT_GT(compared, 0);
+  EXPECT_GT(shifted, compared / 2);
+  EXPECT_GT(max_difference, 0.2f);
 }
 
 /** The default AO (global off) keeps the local flag: the bake traces the object alone. */

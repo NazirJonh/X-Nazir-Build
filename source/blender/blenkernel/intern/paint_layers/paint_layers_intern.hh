@@ -75,14 +75,15 @@ struct bNodeSocket;
 /**
  * Whether a #eMaterialMeshMapType is scalar -- its R is the whole value -- rather than an RGB map.
  *
- * A scalar atlas (AO, Curvature, Edge) contributes its R spread across the channel's RGB; an RGB
- * atlas (Normal, the two IDs) contributes its stored RGB as-is. The one classification the
- * generator and the CPU composite share, so a scalar map cannot render grey on one side and
- * coloured on the other.
+ * A scalar atlas (AO, Curvature, Edge, Thickness) contributes its R spread across the channel's
+ * RGB; an RGB atlas (Normal, the two IDs, Bent Normal) contributes its stored RGB as-is. The one
+ * classification the generator and the CPU composite share, so a scalar map cannot render grey on
+ * one side and coloured on the other.
  */
 inline bool paint_layer_mesh_map_is_scalar(const int8_t type)
 {
-  return ELEM(type, MA_MESH_MAP_AO, MA_MESH_MAP_CURVATURE, MA_MESH_MAP_EDGE);
+  return ELEM(
+      type, MA_MESH_MAP_AO, MA_MESH_MAP_CURVATURE, MA_MESH_MAP_EDGE, MA_MESH_MAP_THICKNESS);
 }
 
 /**

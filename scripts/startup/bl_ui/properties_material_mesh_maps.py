@@ -100,6 +100,7 @@ class LAYER_MATERIAL_PT_mesh_maps(LayerMaterialButtonsPanel, Panel):
             col.prop(settings, "margin")
             col.prop(settings, "ao_distance")
             col.prop(settings, "edge_radius")
+            col.prop(settings, "thickness_rays")
             col.prop(settings, "position_normalization")
             col.prop(settings, "use_directx_normal")
             col.prop(settings, "curvature_method")

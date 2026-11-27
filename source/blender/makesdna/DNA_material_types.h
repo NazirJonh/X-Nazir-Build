@@ -1466,13 +1466,15 @@ enum eMaterialMeshMapType : int8_t {
   MA_MESH_MAP_ID_OBJECT = 4,
   MA_MESH_MAP_ID_MATERIAL = 5,
   MA_MESH_MAP_EDGE = 6,
-  /** Reserved; the architecture must not exclude these. */
+  /** The averaged interior ray distance, baked on the CPU with a BVH over the sources. */
   MA_MESH_MAP_THICKNESS = 7,
   /** The world-space position, optionally normalized by the object's bounds. */
   MA_MESH_MAP_POSITION = 8,
   /** Tangent-space normal, built on the tangent frame of the mesh's active UV map. */
   MA_MESH_MAP_NORMAL_TANGENT = 9,
-  MA_MESH_MAP_TYPE_NUM = 10,
+  /** The average unoccluded direction per texel, in world space; CPU hemisphere rays. */
+  MA_MESH_MAP_BENT_NORMAL = 10,
+  MA_MESH_MAP_TYPE_NUM = 11,
 };
 
 /** #MaterialMeshMapSettings::position_normalization: what the Position map's texels store. */
@@ -2354,7 +2356,9 @@ struct MaterialMeshMapSettings {
   float ao_distance = 0.0f;
   /** Edge/bevel ray radius in object-space units. */
   float edge_radius = 0.01f;
-  char _pad2[4] = {};
+  /** CPU rays per texel, shared by the Thickness bake and the Bent Normal bake. */
+  int8_t cpu_rays = 8;
+  char _pad2[3] = {};
   /**
    * #eMaterialMeshMapPositionNormalization. The box and sphere fit the low-poly mesh of each
    * object in the material's shared atlas separately; use the raw position when several objects

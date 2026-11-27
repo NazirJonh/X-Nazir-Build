@@ -2638,6 +2638,21 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
     }
   }
 
+  /* The CPU ray count shared by the Thickness and Bent Normal bakes is new and defaults to 8: older
+   * files read zero, which the bakes would clamp back to one ray and a noisy map.
+   *
+   * NOTE: Keyed on the member existence instead of a file subversion (see above). The existence
+   * check must query the "int8_t" type name, not "char": makesdna stores `int8_t` members under
+   * their own type name in the file SDNA, so a "char" query never matches and would reset the
+   * settings on every file load. */
+  if (!DNA_struct_member_exists_with_alias(
+          fd->filesdna, "MaterialMeshMapSettings", "int8_t", "cpu_rays"))
+  {
+    for (Material &material : bmain->materials) {
+      material.mesh_map_settings.cpu_rays = 8;
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

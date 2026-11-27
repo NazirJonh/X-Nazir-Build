@@ -20,7 +20,10 @@
 #include "BLI_index_range.hh"
 #include "BLI_listbase_iterator.hh"
 #include "BLI_math_color.h"
+#include "BLI_math_matrix.h"
+#include "BLI_math_matrix.hh"
 #include "BLI_math_vector.h"
+#include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_set.hh"
 #include "BLI_string.h"
@@ -30,6 +33,7 @@
 #include "BLI_virtual_array.hh"
 
 #include "BKE_attribute.hh"
+#include "BKE_bvhutils.hh"
 #include "BKE_image.hh"
 #include "BKE_image_tile_buffer.hh"
 #include "BKE_lib_id.hh"
@@ -72,6 +76,12 @@ BLI_STATIC_ASSERT((MESH_MAP_BAKE_TYPE_INFOS[MA_MESH_MAP_AO].flags &
 BLI_STATIC_ASSERT((MESH_MAP_BAKE_TYPE_INFOS[MA_MESH_MAP_ID_OBJECT].flags &
                    (MESH_MAP_TYPE_CPU_FILL | MESH_MAP_TYPE_SCALAR)) == MESH_MAP_TYPE_CPU_FILL,
                   "The ID maps are CPU fills, not scalar atlases");
+BLI_STATIC_ASSERT((MESH_MAP_BAKE_TYPE_INFOS[MA_MESH_MAP_THICKNESS].flags &
+                   (MESH_MAP_TYPE_SCALAR | MESH_MAP_TYPE_CPU_FILL |
+                    MESH_MAP_TYPE_NEEDS_SOURCES)) ==
+                      (MESH_MAP_TYPE_SCALAR | MESH_MAP_TYPE_CPU_FILL |
+                       MESH_MAP_TYPE_NEEDS_SOURCES),
+                  "Thickness is the scalar ray-marched fill");
 BLI_STATIC_ASSERT(MESH_MAP_BAKE_TYPE_INFOS[MA_MESH_MAP_NORMAL_WORLD].pass == SCE_PASS_NORMAL,
                   "The normals bake through the native normal pass");
 BLI_STATIC_ASSERT(MESH_MAP_BAKE_TYPE_INFOS[MA_MESH_MAP_POSITION].emit_tree_builder != nullptr,
@@ -196,7 +206,7 @@ float BKE_mesh_maps_bake_ao_distance(const Mesh &mesh, const MaterialMeshMapSett
  * they built into an emission node. */
 
 bool mesh_map_bake_emit_source_ao(bNodeTree &tree,
-                                  const MaterialMeshMapSettings &settings,
+                                  const MaterialMeshMapSettings & /*settings*/,
                                   const float ao_distance,
                                   const int samples,
                                   bNodeSocket **r_source,
@@ -484,6 +494,431 @@ void BKE_mesh_maps_bake_fill_id_pixels(const BakePixel *pixels,
   }
 }
 
+bool BKE_mesh_maps_bake_type_cpu_rays_scalar(const int8_t type)
+{
+  /* Thickness is the scalar half of the ray-marched fills; Bent Normal is the vector half. */
+  const MeshMapTypeInfo *info = BKE_mesh_maps_type_info_get(type);
+  return info != nullptr && (info->flags & MESH_MAP_TYPE_NEEDS_SOURCES) != 0 &&
+         (info->flags & MESH_MAP_TYPE_SCALAR) != 0;
+}
+
+bool BKE_mesh_maps_bake_type_cpu_rays_vector(const int8_t type)
+{
+  const MeshMapTypeInfo *info = BKE_mesh_maps_type_info_get(type);
+  return info != nullptr && (info->flags & MESH_MAP_TYPE_NEEDS_SOURCES) != 0 &&
+         (info->flags & MESH_MAP_TYPE_SCALAR) == 0;
+}
+
+namespace {
+
+/** One interior surface with its BVH and the transforms between its local space and the world. */
+struct ThicknessTree {
+  bke::BVHTreeFromMesh data;
+  float4x4 matrix;
+  float4x4 inverse;
+};
+
+/** Deterministic direction in the hemisphere around \a normal, from the sample index \a k. */
+void thickness_ray_direction(const float3 &normal, const int k, const int texel, float3 &r_dir)
+{
+  /* A golden-ratio ladder over the [0, 1) square, offset by a hash of the texel so neighbouring
+   * texels do not share the same ladder phase. Deterministic across runs and threads. */
+  const float u = std::fmod((k + 0.5f) * 0.61803398875f +
+                                float(BLI_hash_int_2d(uint(texel), uint(k))) * (1.0f / 4294967296.0f),
+                            1.0f);
+  const float v = std::fmod((k + 0.5f) * 0.75487766624f +
+                                float(BLI_hash_int_2d(uint(texel), 0x9E3779B9u)) * (1.0f / 4294967296.0f),
+                            1.0f);
+  /* Equal-area hemisphere around +Z, then aligned onto the normal. */
+  const float phi = 2.0f * float(M_PI) * u;
+  const float cos_theta = 1.0f - v;
+  const float sin_theta = std::sqrt(std::max(1.0f - cos_theta * cos_theta, 0.0f));
+  float3 local(sin_theta * std::cos(phi), sin_theta * std::sin(phi), cos_theta);
+  float3 tangent;
+  float3 bitangent;
+  ortho_basis_v3v3_v3(tangent, bitangent, normal);
+  r_dir = tangent * local.x + bitangent * local.y + normal * local.z;
+  r_dir = math::normalize(r_dir);
+}
+
+/** Cast \a dir (world, normalized) through one source from \a from; the hit point comes back
+ * in world space, so matrix scale cannot skew the distances. */
+bool thickness_cast_tree(const ThicknessTree &tree,
+                         const float3 &from,
+                         const float3 &dir,
+                         int &r_tri,
+                         float3 &r_world_hit)
+{
+  const float3 local_from = math::transform_point(tree.inverse, from);
+  const float3 local_dir = math::transform_direction(tree.inverse, dir);
+  const float local_length = math::length(local_dir);
+  if (local_length <= 0.0f) {
+    return false;
+  }
+  const float3 local_dir_normalized = local_dir / local_length;
+  BVHTreeRayHit hit;
+  hit.index = -1;
+  hit.dist = FLT_MAX;
+  /* Pass the mesh callback, not null: without it the BVH reports the leaf's bounding-box distance
+   * and a box "hit" for rays that miss the triangle entirely, which would turn every thickness into
+   * a distance between AABBs and every Bent Normal into a box occlusion test. The radius must be
+   * zero (a thin ray): a non-zero radius makes the callback do a sphere cast, and `hit.dist` already
+   * carries the unlimited maximum distance. */
+  if (BLI_bvhtree_ray_cast(tree.data.tree,
+                           local_from,
+                           local_dir_normalized,
+                           0.0f,
+                           &hit,
+                           tree.data.raycast_callback,
+                           const_cast<bke::BVHTreeFromMesh *>(&tree.data)) < 0)
+  {
+    return false;
+  }
+  r_world_hit = math::transform_point(tree.matrix, local_from + local_dir_normalized * hit.dist);
+  r_tri = hit.index;
+  return true;
+}
+
+/** Everything the ray-marched fills need per texel, prepared once per fill: the interior BVH
+ * trees, the low-poly sample spans, the world-space offset that keeps a cast off the sampled
+ * surface, and the clamped ray count. */
+struct ThicknessPrepare {
+  Vector<ThicknessTree> trees;
+  Span<float3> positions;
+  Span<int3> corner_tris;
+  Span<int> corner_verts;
+  float surface_eps;
+  int ray_count;
+};
+
+ThicknessPrepare thickness_prepare(const Span<MeshMapBakeThicknessSource> sources,
+                                   const Mesh &low_mesh,
+                                   const float4x4 &low_matrix,
+                                   const int rays)
+{
+  ThicknessPrepare prepare;
+  prepare.positions = low_mesh.vert_positions();
+  prepare.corner_tris = low_mesh.corner_tris();
+  prepare.corner_verts = low_mesh.corner_verts();
+
+  /* No source given means the low-poly itself is the interior the rays march through. */
+  Vector<MeshMapBakeThicknessSource> fallback;
+  Span<MeshMapBakeThicknessSource> used_sources = sources;
+  if (used_sources.is_empty()) {
+    fallback.append({&low_mesh, low_matrix});
+    used_sources = fallback;
+  }
+
+  const auto add_tree = [&prepare](const Mesh &mesh, const float4x4 &matrix) {
+    if (mesh.faces_num == 0) {
+      return;
+    }
+    ThicknessTree tree;
+    tree.data = bke::bvhtree_from_mesh_corner_tris_ex(mesh.vert_positions(),
+                                                      mesh.faces(),
+                                                      mesh.corner_verts(),
+                                                      mesh.corner_tris(),
+                                                      IndexMask(mesh.faces_num));
+    if (tree.data.tree == nullptr) {
+      return;
+    }
+    tree.matrix = matrix;
+    tree.inverse = math::invert(matrix);
+    prepare.trees.append(std::move(tree));
+  };
+
+  prepare.trees.reserve(used_sources.size() + 1);
+  for (const MeshMapBakeThicknessSource &source : used_sources) {
+    if (source.mesh == nullptr) {
+      continue;
+    }
+    add_tree(*source.mesh, source.matrix);
+  }
+
+  /* A source set that resolved to nothing (an empty high-poly object, say) is no source at all:
+   * fall back to the low-poly so the map is the object's own volume instead of a silent zero. A
+   * BVH that fails on a non-empty source cannot be reported from here -- these fills return no
+   * status -- so it falls back the same way; the editor's cast no longer runs for the ray-marched
+   * CPU pairs and cannot report it either. A loud failure needs these entries to return one. */
+  if (prepare.trees.is_empty()) {
+    add_tree(low_mesh, low_matrix);
+  }
+
+  /* A cast that starts on the sampled surface must not find it again: skip hits closer than a
+   * small fraction of the low-poly's bounds. The bounds are built in world space because the
+   * marching compares world-space hit distances, so a scaled object matrix must not shrink or
+   * inflate the offset relative to them. */
+  BLI_assert(!prepare.positions.is_empty());
+  float3 bb_min = math::transform_point(low_matrix, prepare.positions[0]);
+  float3 bb_max = bb_min;
+  for (const float3 &position : prepare.positions) {
+    const float3 world = math::transform_point(low_matrix, position);
+    bb_min = math::min(bb_min, world);
+    bb_max = math::max(bb_max, world);
+  }
+  prepare.surface_eps = std::max(math::distance(bb_min, bb_max) * 1e-5f, 1e-6f);
+
+  prepare.ray_count = std::clamp(rays, MESH_MAP_BAKE_CPU_RAYS_MIN, MESH_MAP_BAKE_CPU_RAYS_MAX);
+  return prepare;
+}
+
+}  // namespace
+
+void BKE_mesh_maps_bake_fill_thickness(const BakePixel *pixels,
+                                       const size_t pixels_num,
+                                       const Mesh &low_mesh,
+                                       const float4x4 &low_matrix,
+                                       const Span<MeshMapBakeThicknessSource> sources,
+                                       const int rays,
+                                       float *result)
+{
+  if (pixels == nullptr || result == nullptr || low_mesh.faces_num == 0 ||
+      low_mesh.verts_num == 0)
+  {
+    return;
+  }
+
+  const ThicknessPrepare prepare = thickness_prepare(sources, low_mesh, low_matrix, rays);
+  if (prepare.trees.is_empty()) {
+    return;
+  }
+  const auto &[trees, positions, corner_tris, corner_verts, surface_eps, ray_count] = prepare;
+
+  threading::parallel_for(IndexRange(int(pixels_num)), 1024, [&](const IndexRange range) {
+    for (const int i : range) {
+      const size_t index = size_t(i);
+      const int primitive = pixels[index].primitive_id;
+      if (primitive < 0 || primitive >= corner_tris.size()) {
+        continue;
+      }
+      const int3 &tri = corner_tris[primitive];
+      /* The bake's barycentric convention: u * v0 + v * v1 + (1 - u - v) * v2. */
+      const float u = pixels[index].uv[0];
+      const float v = pixels[index].uv[1];
+      const float w = 1.0f - u - v;
+      const float3 local = positions[corner_verts[tri[0]]] * u +
+                           positions[corner_verts[tri[1]]] * v +
+                           positions[corner_verts[tri[2]]] * w;
+      const float3 origin = math::transform_point(low_matrix, local);
+      float3 v0, v1, v2;
+      mul_v3_m4v3(v0, low_matrix.ptr(), positions[corner_verts[tri[0]]]);
+      mul_v3_m4v3(v1, low_matrix.ptr(), positions[corner_verts[tri[1]]]);
+      mul_v3_m4v3(v2, low_matrix.ptr(), positions[corner_verts[tri[2]]]);
+      float3 normal = math::cross(v1 - v0, v2 - v0);
+      const float normal_length = math::length(normal);
+      if (normal_length <= 0.0f) {
+        continue;
+      }
+      normal /= normal_length;
+      /* A mirrored `low_matrix` (negative determinant) reflects the world-space winding, so the
+       * cross product above points *into* the surface. The sign is undone here so the single-ray
+       * probe and the hemisphere always face outward, not into the solid. */
+      if (is_negative_m4(low_matrix.ptr())) {
+        normal = -normal;
+      }
+
+      float sum = 0.0f;
+      int found = 0;
+      /* One ray is the documented "straight down the normal" probe; only two or more rays spread
+       * over the hemisphere. The slab test relies on the exact 1.0 this gives, and a single
+       * oblique ray would mostly miss the interior on a thin slab. */
+      const bool single_ray = ray_count == 1;
+      for (int k = 0; k < ray_count; k++) {
+        float3 ray_dir;
+        if (single_ray) {
+          ray_dir = -normal;
+        }
+        else {
+          thickness_ray_direction(-normal, k, i, ray_dir);
+        }
+        /* Start a hair off the surface so the cast cannot find the texel's own face, then march
+         * through surfaces the ray enters (their normal faces the ray) until one exits (its
+         * normal points along the ray, i.e. out of the solid). */
+        float3 from = origin + ray_dir * (surface_eps * 4.0f);
+        bool exited = false;
+        for (int march = 0; march < 8 && !exited; march++) {
+          int best_tree = -1;
+          int best_tri = -1;
+          float best_dist = FLT_MAX;
+          float3 best_hit(0.0f);
+          for (const int t : trees.index_range()) {
+            int hit_tri = -1;
+            float3 hit_world(0.0f);
+            if (!thickness_cast_tree(trees[t], from, ray_dir, hit_tri, hit_world)) {
+              continue;
+            }
+            const float dist = math::distance(hit_world, from);
+            if (dist < best_dist) {
+              best_dist = dist;
+              best_hit = hit_world;
+              best_tri = hit_tri;
+              best_tree = t;
+            }
+          }
+          if (best_tree < 0) {
+            break;
+          }
+          const ThicknessTree &tree = trees[best_tree];
+          const int3 &hit_tri = tree.data.corner_tris[best_tri];
+          /* Build the hit triangle's normal in world space from its transformed vertices rather
+           * than moving a local normal: the BVH runs in the source's local space, and the world
+           * cross product keeps the true orientation under non-uniform scale. A mirrored
+           * (negative-determinant) matrix reverses the world winding, so the cross product points
+           * into the solid; the sign is undone explicitly, or "entered" and "exited" swap and
+           * every texel reads a thickness of zero. */
+          const float3 world_v0 = math::transform_point(
+              tree.matrix, tree.data.vert_positions[tree.data.corner_verts[hit_tri[0]]]);
+          const float3 world_v1 = math::transform_point(
+              tree.matrix, tree.data.vert_positions[tree.data.corner_verts[hit_tri[1]]]);
+          const float3 world_v2 = math::transform_point(
+              tree.matrix, tree.data.vert_positions[tree.data.corner_verts[hit_tri[2]]]);
+          float3 world_no = math::cross(world_v1 - world_v0, world_v2 - world_v0);
+          if (math::length(world_no) > 0.0f) {
+            world_no = math::normalize(world_no);
+            if (is_negative_m4(tree.matrix.ptr())) {
+              world_no = -world_no;
+            }
+          }
+          if (math::dot(world_no, ray_dir) > 0.0f) {
+            /* An exiting surface: the distance back to the texel's origin is the thickness. */
+            sum += math::distance(best_hit, origin);
+            found++;
+            exited = true;
+            break;
+          }
+          from = best_hit + ray_dir * (surface_eps * 4.0f);
+        }
+      }
+      if (found > 0) {
+        const float thickness = sum / float(found);
+        float *destination = result + index * 4;
+        destination[0] = thickness;
+        destination[1] = thickness;
+        destination[2] = thickness;
+        destination[3] = 1.0f;
+      }
+      else {
+        /* A covered texel whose rays never leave the solid still belongs to the atlas: keep it
+         * opaque black so its coverage alpha agrees with every other map, instead of leaving the
+         * zeroed (transparent) buffer as if the texel were not covered. */
+        float *destination = result + index * 4;
+        destination[0] = 0.0f;
+        destination[1] = 0.0f;
+        destination[2] = 0.0f;
+        destination[3] = 1.0f;
+      }
+    }
+  });
+}
+
+/* The vector half of the ray-marched fills (see #BKE_mesh_maps_bake_fill_thickness): the same
+ * trees and the same hemisphere ladder, but a ray counts only when it escapes every source
+ * without a hit, and the texel stores the normalized average of the escaping directions encoded
+ * to 0..1. A texel whose rays all hit stays black: with nothing unoccluded there is no bent
+ * direction, and black reads as "no average" instead of a direction the surface never had. */
+void BKE_mesh_maps_bake_fill_bent_normals(const BakePixel *pixels,
+                                          const size_t pixels_num,
+                                          const Mesh &low_mesh,
+                                          const float4x4 &low_matrix,
+                                          const Span<MeshMapBakeThicknessSource> sources,
+                                          const int rays,
+                                          float *result)
+{
+  if (pixels == nullptr || result == nullptr || low_mesh.faces_num == 0 ||
+      low_mesh.verts_num == 0)
+  {
+    return;
+  }
+
+  const ThicknessPrepare prepare = thickness_prepare(sources, low_mesh, low_matrix, rays);
+  if (prepare.trees.is_empty()) {
+    return;
+  }
+  const auto &[trees, positions, corner_tris, corner_verts, surface_eps, ray_count] = prepare;
+
+  threading::parallel_for(IndexRange(int(pixels_num)), 1024, [&](const IndexRange range) {
+    for (const int i : range) {
+      const size_t index = size_t(i);
+      const int primitive = pixels[index].primitive_id;
+      if (primitive < 0 || primitive >= corner_tris.size()) {
+        continue;
+      }
+      const int3 &tri = corner_tris[primitive];
+      /* The bake's barycentric convention: u * v0 + v * v1 + (1 - u - v) * v2. */
+      const float u = pixels[index].uv[0];
+      const float v = pixels[index].uv[1];
+      const float w = 1.0f - u - v;
+      const float3 local = positions[corner_verts[tri[0]]] * u +
+                           positions[corner_verts[tri[1]]] * v +
+                           positions[corner_verts[tri[2]]] * w;
+      const float3 origin = math::transform_point(low_matrix, local);
+      float3 v0, v1, v2;
+      mul_v3_m4v3(v0, low_matrix.ptr(), positions[corner_verts[tri[0]]]);
+      mul_v3_m4v3(v1, low_matrix.ptr(), positions[corner_verts[tri[1]]]);
+      mul_v3_m4v3(v2, low_matrix.ptr(), positions[corner_verts[tri[2]]]);
+      float3 normal = math::cross(v1 - v0, v2 - v0);
+      const float normal_length = math::length(normal);
+      if (normal_length <= 0.0f) {
+        continue;
+      }
+      normal /= normal_length;
+      /* The same mirror sign as the Thickness fill: a negative-determinant `low_matrix` turns the
+       * cross product inward, and the hemisphere must still face outward. */
+      if (is_negative_m4(low_matrix.ptr())) {
+        normal = -normal;
+      }
+
+      float3 sum(0.0f);
+      int found = 0;
+      /* One ray is the surface normal itself (the unoccluded minimum), matching the Thickness
+       * fill's single-ray contract; more rays spread over the hemisphere. */
+      const bool single_ray = ray_count == 1;
+      for (int k = 0; k < ray_count; k++) {
+        float3 ray_dir;
+        /* The hemisphere points along the surface normal: the directions that escape are the
+         * ones the occlusion does not bend, so their average is the texel's bent direction. */
+        if (single_ray) {
+          ray_dir = normal;
+        }
+        else {
+          thickness_ray_direction(normal, k, i, ray_dir);
+        }
+        /* Start a hair off the surface so the cast cannot find the texel's own face. */
+        const float3 from = origin + ray_dir * (surface_eps * 4.0f);
+        bool occluded = false;
+        for (const int t : trees.index_range()) {
+          int hit_tri = -1;
+          float3 hit_world(0.0f);
+          if (thickness_cast_tree(trees[t], from, ray_dir, hit_tri, hit_world)) {
+            occluded = true;
+            break;
+          }
+        }
+        if (!occluded) {
+          sum += ray_dir;
+          found++;
+        }
+      }
+
+      float *destination = result + index * 4;
+      const float3 bent = found > 0 ? sum / float(found) : float3(0.0f);
+      const float bent_length = math::length(bent);
+      if (bent_length > 0.0f) {
+        const float3 direction = bent / bent_length;
+        destination[0] = 0.5f + 0.5f * direction.x;
+        destination[1] = 0.5f + 0.5f * direction.y;
+        destination[2] = 0.5f + 0.5f * direction.z;
+      }
+      else {
+        destination[0] = 0.0f;
+        destination[1] = 0.0f;
+        destination[2] = 0.0f;
+      }
+      destination[3] = 1.0f;
+    }
+  });
+}
+
 bool BKE_mesh_maps_bake_cage_matches(const Mesh &low, const Mesh &cage)
 {
   return low.faces_num == cage.faces_num && low.corners_num == cage.corners_num;
@@ -668,7 +1103,7 @@ void BKE_mesh_maps_bake_fill_curvature_from_normal(const BakePixel *pixels,
   const auto decode_normal = [&](const size_t texel, float3 &r_n) {
     const float *t = normal_rgba.data() + texel * 4;
     r_n.x = t[0] * 2.0f - 1.0f;
-    r_n.y = (directx ? 1.0f - t[1] : t[1] * 2.0f) - 1.0f;
+    r_n.y = directx ? 1.0f - 2.0f * t[1] : t[1] * 2.0f - 1.0f;
     r_n.z = t[2] * 2.0f - 1.0f;
   };
   threading::parallel_for(IndexRange(int64_t(count)), 1024, [&](const IndexRange range) {

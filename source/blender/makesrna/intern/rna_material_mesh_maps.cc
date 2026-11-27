@@ -57,7 +57,9 @@ const EnumPropertyItem rna_enum_material_mesh_map_type_items[] = {
     rna_material_mesh_map_type_item(MA_MESH_MAP_ID_OBJECT),
     rna_material_mesh_map_type_item(MA_MESH_MAP_ID_MATERIAL),
     rna_material_mesh_map_type_item(MA_MESH_MAP_EDGE),
+    rna_material_mesh_map_type_item(MA_MESH_MAP_THICKNESS),
     rna_material_mesh_map_type_item(MA_MESH_MAP_POSITION),
+    rna_material_mesh_map_type_item(MA_MESH_MAP_BENT_NORMAL),
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -396,6 +398,15 @@ void rna_def_material_mesh_maps(BlenderRNA *brna, StructRNA *srna)
   RNA_def_property_float_sdna(prop, nullptr, "edge_radius");
   RNA_def_property_range(prop, 0.0f, FLT_MAX);
   rna_def_mesh_map_ui_update(prop, "Edge Radius", "Edge/bevel ray radius in object-space units");
+
+  prop = RNA_def_property(srna, "thickness_rays", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "cpu_rays");
+  RNA_def_property_range(prop, MESH_MAP_BAKE_CPU_RAYS_MIN, MESH_MAP_BAKE_CPU_RAYS_MAX);
+  rna_def_mesh_map_ui_update(
+      prop,
+      "CPU Rays",
+      "Ray directions per texel the CPU Thickness and Bent Normal bakes cast; more rays give a "
+      "smoother, slower bake");
 
   prop = RNA_def_property(srna, "curvature_method", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "curvature_method");

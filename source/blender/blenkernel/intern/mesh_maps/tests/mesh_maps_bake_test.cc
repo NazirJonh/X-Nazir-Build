@@ -266,6 +266,64 @@ class MeshMapBakeTest : public bke::BlenderGTestBase {
     return mesh;
   }
 
+  /** Two quads a unit apart: the top face at z = 1, the bottom at z = 0, both wound CCW from
+   * +Z, so their world normals point out of the slab. */
+  Mesh *add_slab_mesh(const char *name)
+  {
+    Mesh *mesh = BKE_mesh_add(bmain, name);
+    mesh->verts_num = 8;
+    mesh->edges_num = 8;
+    mesh->faces_num = 2;
+    mesh->corners_num = 8;
+    BKE_mesh_face_offsets_ensure_alloc(mesh);
+    bke::mesh_ensure_required_data_layers(*mesh);
+
+    const float3 co[8] = {{0.0f, 0.0f, 1.0f},
+                          {1.0f, 0.0f, 1.0f},
+                          {1.0f, 1.0f, 1.0f},
+                          {0.0f, 1.0f, 1.0f},
+                          {0.0f, 0.0f, 0.0f},
+                          {0.0f, 1.0f, 0.0f},
+                          {1.0f, 1.0f, 0.0f},
+                          {1.0f, 0.0f, 0.0f}};
+    mesh->vert_positions_for_write().copy_from(Span<float3>(co, 8));
+    MutableSpan<int> offsets = mesh->face_offsets_for_write();
+    offsets[0] = 0;
+    offsets[1] = 4;
+    offsets[2] = 8;
+    MutableSpan<int> corner_verts = mesh->corner_verts_for_write();
+    MutableSpan<int> corner_edges = mesh->corner_edges_for_write();
+    const int cverts[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+    const int cedges[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+    for (int i = 0; i < 8; i++) {
+      corner_verts[i] = cverts[i];
+      corner_edges[i] = cedges[i];
+    }
+    MutableSpan<int2> edges = mesh->edges_for_write();
+    edges[0] = {0, 1};
+    edges[1] = {1, 2};
+    edges[2] = {2, 3};
+    edges[3] = {3, 0};
+    edges[4] = {4, 5};
+    edges[5] = {5, 6};
+    edges[6] = {6, 7};
+    edges[7] = {7, 4};
+    mesh->tag_topology_changed();
+    mesh->tag_positions_changed();
+    return mesh;
+  }
+
+  /** Mirror across the `x = 0.5` plane: a negative determinant that still keeps `[0, 1]`
+   * geometry over `[0, 1]`, so a mirrored source and an unmirrored low-poly overlap. */
+  static float4x4 mirror_x_about_half()
+  {
+    float4x4 matrix = float4x4::identity();
+    /* Column-major `float4x4`: `[0][0]` is the X scale, `[3][0]` the X translation. */
+    matrix[0][0] = -1.0f;
+    matrix[3][0] = 1.0f;
+    return matrix;
+  }
+
   static bNode *find_node(bNodeTree &tree, const int type)
   {
     for (bNode &node : tree.nodes) {
@@ -318,6 +376,9 @@ TEST_F(MeshMapBakeTest, plan_renders_cpu_and_scalar_per_type)
   const int8_t rendered[] = {
       MA_MESH_MAP_AO, MA_MESH_MAP_CURVATURE, MA_MESH_MAP_EDGE, MA_MESH_MAP_POSITION,
       MA_MESH_MAP_NORMAL_WORLD, MA_MESH_MAP_NORMAL_OBJECT, MA_MESH_MAP_NORMAL_TANGENT};
+  EXPECT_FALSE(BKE_mesh_maps_bake_type_renders(MA_MESH_MAP_BENT_NORMAL));
+  EXPECT_FALSE(BKE_mesh_maps_bake_type_cpu_simple(MA_MESH_MAP_BENT_NORMAL));
+  EXPECT_TRUE(BKE_mesh_maps_bake_type_cpu_rays_vector(MA_MESH_MAP_BENT_NORMAL));
   for (const int8_t type : rendered) {
     EXPECT_TRUE(BKE_mesh_maps_bake_type_renders(type)) << int(type);
     EXPECT_FALSE(BKE_mesh_maps_bake_type_cpu_simple(type)) << int(type);
@@ -327,9 +388,10 @@ TEST_F(MeshMapBakeTest, plan_renders_cpu_and_scalar_per_type)
     EXPECT_TRUE(BKE_mesh_maps_bake_type_cpu_simple(type)) << int(type);
     EXPECT_FALSE(BKE_mesh_maps_bake_type_renders(type)) << int(type);
   }
-  /* Thickness is still a reserved type: neither a render pass nor an ID fill. */
+  /* Thickness is CPU-only: neither a render pass nor an ID fill. */
   EXPECT_FALSE(BKE_mesh_maps_bake_type_renders(MA_MESH_MAP_THICKNESS));
   EXPECT_FALSE(BKE_mesh_maps_bake_type_cpu_simple(MA_MESH_MAP_THICKNESS));
+  EXPECT_TRUE(BKE_mesh_maps_bake_type_cpu_rays_scalar(MA_MESH_MAP_THICKNESS));
 }
 
 /** The two families are strictly disjoint: nothing is both rendered and CPU-filled. */
@@ -440,6 +502,8 @@ TEST_F(MeshMapBakeTest, type_predicates_and_mask_follow_the_table)
     EXPECT_EQ(BKE_mesh_maps_bake_type_cpu_simple(t),
               cpu_fill && !needs_sources && !needs_other_atlas)
         << type;
+    EXPECT_EQ(BKE_mesh_maps_bake_type_cpu_rays_scalar(t), needs_sources && scalar) << type;
+    EXPECT_EQ(BKE_mesh_maps_bake_type_cpu_rays_vector(t), needs_sources && !scalar) << type;
     /* Every described type is one the bake can produce when its flags say so, and every scalar
      * map is filled somehow: through the engine or on the CPU. */
     EXPECT_EQ(BKE_mesh_maps_bake_type_is_supported(t), info->flags != 0) << type;
@@ -447,8 +511,8 @@ TEST_F(MeshMapBakeTest, type_predicates_and_mask_follow_the_table)
     EXPECT_TRUE(!needs_sources || cpu_fill) << type;
     EXPECT_TRUE(!needs_other_atlas || cpu_fill) << type;
     /* A rendered map bakes through the row's pass; a CPU fill needs no pass and no space.
-     * The reserved Thickness placeholder has neither flag, so it is neither rendered nor a CPU
-     * fill and must not be mistaken for either. */
+     * Thickness and Bent Normal are CPU fills with no pass, and the ID maps likewise, so neither
+     * family is mistaken for a render. */
     EXPECT_EQ(rendered, info->pass != eScenePassType(0)) << type;
     EXPECT_EQ(cpu_fill, !rendered && info->flags != 0u) << type;
     eBakeSpace space = R_BAKE_SPACE_CAMERA;
@@ -601,6 +665,144 @@ TEST_F(MeshMapBakeTest, edge_samples_are_clamped)
   }
 }
 
+/** A slab: two quads a unit apart. A texel on the top face casts one ray down and reads 1. */
+TEST_F(MeshMapBakeTest, fill_thickness_measures_interior_distance)
+{
+  Mesh *mesh = add_slab_mesh("Slab");
+
+  /* One covered texel on the top face's first triangle, one uncovered. */
+  BakePixel pixels[2] = {};
+  pixels[0].primitive_id = 0;
+  pixels[0].uv[0] = 0.25f;
+  pixels[0].uv[1] = 0.25f;
+  pixels[1].primitive_id = -1;
+  float result[8] = {0.0f};
+  const float4x4 identity = float4x4::identity();
+  BKE_mesh_maps_bake_fill_thickness(pixels, 2, *mesh, identity, {}, 1, result);
+  EXPECT_FLOAT_EQ(result[0], 1.0f);
+  EXPECT_FLOAT_EQ(result[1], 1.0f);
+  EXPECT_FLOAT_EQ(result[7], 0.0f);
+}
+
+/**
+ * A mirrored low-poly matrix (negative determinant) flips the world-space winding of its faces, so
+ * a normal built from the transformed vertices points into the solid. The fill must undo that, or
+ * the ray walks the wrong way and every texel reads zero on physically thick geometry.
+ */
+TEST_F(MeshMapBakeTest, fill_thickness_handles_mirrored_low_matrix)
+{
+  Mesh *mesh = add_slab_mesh("Slab");
+  BakePixel pixels[1] = {};
+  pixels[0].primitive_id = 0;
+  pixels[0].uv[0] = 0.25f;
+  pixels[0].uv[1] = 0.25f;
+  float result[4] = {0.0f};
+  BKE_mesh_maps_bake_fill_thickness(pixels, 1, *mesh, mirror_x_about_half(), {}, 1, result);
+  EXPECT_FLOAT_EQ(result[0], 1.0f);
+  EXPECT_FLOAT_EQ(result[3], 1.0f);
+}
+
+/** The same sign problem on the hit side: a mirrored high-poly source must still classify its
+ * bottom face as an exit, not an entry. */
+TEST_F(MeshMapBakeTest, fill_thickness_handles_mirrored_source_matrix)
+{
+  Mesh *low = add_slab_mesh("LowSlab");
+  Mesh *source = add_slab_mesh("SourceSlab");
+  BakePixel pixels[1] = {};
+  pixels[0].primitive_id = 0;
+  pixels[0].uv[0] = 0.25f;
+  pixels[0].uv[1] = 0.25f;
+  MeshMapBakeThicknessSource sources[1] = {{source, mirror_x_about_half()}};
+  float result[4] = {0.0f};
+  BKE_mesh_maps_bake_fill_thickness(
+      pixels, 1, *low, float4x4::identity(), Span<MeshMapBakeThicknessSource>(sources, 1), 1, result);
+  EXPECT_FLOAT_EQ(result[0], 1.0f);
+  EXPECT_FLOAT_EQ(result[3], 1.0f);
+}
+
+/** A covered texel whose rays never exit the solid is still covered: keep it opaque black rather
+ * than the transparent zero the buffer starts with. */
+TEST_F(MeshMapBakeTest, fill_thickness_open_surface_is_opaque_black)
+{
+  Mesh *plane = add_quad_two_uv("Plane");
+  BakePixel pixels[1] = {};
+  pixels[0].primitive_id = 0;
+  pixels[0].uv[0] = 0.25f;
+  pixels[0].uv[1] = 0.25f;
+  float result[4] = {9.0f, 9.0f, 9.0f, 9.0f};
+  BKE_mesh_maps_bake_fill_thickness(
+      pixels, 1, *plane, float4x4::identity(), {}, 1, result);
+  EXPECT_FLOAT_EQ(result[0], 0.0f);
+  EXPECT_FLOAT_EQ(result[1], 0.0f);
+  EXPECT_FLOAT_EQ(result[2], 0.0f);
+  EXPECT_FLOAT_EQ(result[3], 1.0f);
+}
+
+/** An unoccluded open surface: the single ray is the outward normal, encoded as `0.5 + 0.5 * dir`. */
+TEST_F(MeshMapBakeTest, fill_bent_normals_encodes_the_escaping_direction)
+{
+  Mesh *plane = add_quad_two_uv("Plane");
+  BakePixel pixels[2] = {};
+  pixels[0].primitive_id = 0;
+  pixels[0].uv[0] = 0.25f;
+  pixels[0].uv[1] = 0.25f;
+  pixels[1].primitive_id = -1;
+  float result[8] = {0.0f};
+  BKE_mesh_maps_bake_fill_bent_normals(
+      pixels, 2, *plane, float4x4::identity(), {}, 1, result);
+  /* dir = (0, 0, 1) -> (0.5, 0.5, 1.0), opaque. */
+  EXPECT_FLOAT_EQ(result[0], 0.5f);
+  EXPECT_FLOAT_EQ(result[1], 0.5f);
+  EXPECT_FLOAT_EQ(result[2], 1.0f);
+  EXPECT_FLOAT_EQ(result[3], 1.0f);
+  for (int i = 4; i < 8; i++) {
+    EXPECT_FLOAT_EQ(result[i], 0.0f);
+  }
+}
+
+/** A fully occluded texel has no unoccluded direction: black, but still opaque. */
+TEST_F(MeshMapBakeTest, fill_bent_normals_occluded_texel_is_black_and_opaque)
+{
+  Mesh *plane = add_quad_two_uv("Plane");
+  Mesh *cover = add_quad_two_uv("Cover");
+  for (MutableSpan<float3> positions = cover->vert_positions_for_write(); float3 &position :
+       positions)
+  {
+    position.z = 0.5f;
+  }
+  cover->tag_positions_changed();
+
+  BakePixel pixels[1] = {};
+  pixels[0].primitive_id = 0;
+  pixels[0].uv[0] = 0.25f;
+  pixels[0].uv[1] = 0.25f;
+  MeshMapBakeThicknessSource sources[1] = {{cover, float4x4::identity()}};
+  float result[4] = {9.0f, 9.0f, 9.0f, 9.0f};
+  BKE_mesh_maps_bake_fill_bent_normals(
+      pixels, 1, *plane, float4x4::identity(), Span<MeshMapBakeThicknessSource>(sources, 1), 1, result);
+  EXPECT_FLOAT_EQ(result[0], 0.0f);
+  EXPECT_FLOAT_EQ(result[1], 0.0f);
+  EXPECT_FLOAT_EQ(result[2], 0.0f);
+  EXPECT_FLOAT_EQ(result[3], 1.0f);
+}
+
+/** A mirrored low-poly must still send the hemisphere outward, so the encoded Z stays positive. */
+TEST_F(MeshMapBakeTest, fill_bent_normals_handles_mirrored_low_matrix)
+{
+  Mesh *plane = add_quad_two_uv("Plane");
+  BakePixel pixels[1] = {};
+  pixels[0].primitive_id = 0;
+  pixels[0].uv[0] = 0.25f;
+  pixels[0].uv[1] = 0.25f;
+  float result[4] = {0.0f};
+  BKE_mesh_maps_bake_fill_bent_normals(
+      pixels, 1, *plane, mirror_x_about_half(), {}, 1, result);
+  EXPECT_NEAR(result[0], 0.5f, 1e-6f);
+  EXPECT_NEAR(result[1], 0.5f, 1e-6f);
+  EXPECT_NEAR(result[2], 1.0f, 1e-6f);
+  EXPECT_FLOAT_EQ(result[3], 1.0f);
+}
+
 /** The Normal Filter curvature reads a tangent normal field: a ramp along U bends positive. */
 TEST_F(MeshMapBakeTest, curvature_from_normal_reads_divergence)
 {
@@ -625,6 +827,59 @@ TEST_F(MeshMapBakeTest, curvature_from_normal_reads_divergence)
   EXPECT_GT(result[(4 * res + 4) * 4 + 0], 0.5f);
   EXPECT_FLOAT_EQ(result[(4 * res + 4) * 4 + 1], result[(4 * res + 4) * 4 + 0]);
   EXPECT_FLOAT_EQ(result[(4 * res + 4) * 4 + 3], 1.0f);
+}
+
+/**
+ * The DirectX decode flips the green channel before the 2x-1 expansion: it must be exactly
+ * `1 - 2 * encoded`, not `-encoded`. A vertical ramp turns the sign and magnitude of the V
+ * divergence into a numeric check of the decode.
+ */
+TEST_F(MeshMapBakeTest, curvature_from_normal_decodes_directx_green)
+{
+  const int res = 8;
+  Array<float> normals(res * res * 4, 0.0f);
+  BakePixel pixels[res * res] = {};
+  for (int y = 0; y < res; y++) {
+    for (int x = 0; x < res; x++) {
+      const size_t i = size_t(y) * res + x;
+      pixels[i].primitive_id = 0;
+      /* Encoded ty grows with y: GL decodes it as increasing, DirectX as decreasing. */
+      normals[i * 4 + 0] = 0.5f;
+      normals[i * 4 + 1] = 0.5f + float(y) * 0.25f / float(res);
+      normals[i * 4 + 2] = 1.0f;
+      normals[i * 4 + 3] = 1.0f;
+    }
+  }
+  const size_t center = (4 * res + 4) * 4;
+  float gl_result[res * res * 4] = {0.0f};
+  BKE_mesh_maps_bake_fill_curvature_from_normal(
+      pixels,
+      res * res,
+      res,
+      Span<float>(normals.data(), normals.size()),
+      2,
+      1.0f,
+      false,
+      gl_result);
+  /* GL: (-1 + 0.25*y) has slope 0.0625 per texel; over 2r = 4 texels the divergence is 0.0625. */
+  EXPECT_NEAR(gl_result[center + 0], 0.53125f, 1e-6f);
+  EXPECT_FLOAT_EQ(gl_result[center + 1], gl_result[center + 0]);
+
+  float dx_result[res * res * 4] = {0.0f};
+  BKE_mesh_maps_bake_fill_curvature_from_normal(
+      pixels,
+      res * res,
+      res,
+      Span<float>(normals.data(), normals.size()),
+      2,
+      1.0f,
+      true,
+      dx_result);
+  /* DirectX decode is `1 - 2*t = -0.0625*y`, so the same ramp bends the other way with the same
+   * magnitude. The old `-t` decode gave -0.03125 instead. */
+  EXPECT_NEAR(dx_result[center + 0], 0.46875f, 1e-6f);
+  EXPECT_FLOAT_EQ(dx_result[center + 1], dx_result[center + 0]);
+  EXPECT_FLOAT_EQ(dx_result[center + 3], 1.0f);
 }
 
 TEST_F(MeshMapBakeTest, scalar_types_match_paint_layers)
@@ -1087,6 +1342,41 @@ TEST_F(MeshMapBakeTest, commit_hash_from_viewport_keeps_state_valid)
 }
 
 /**
+ * The Normal Filter gate is "Tangent Normal status VALID *and* current", not just VALID: a state
+ * recorded from earlier content must stop matching when a setting the tangent hash folds in moves,
+ * even though `is_current` itself leaves the status VALID. This pins the second half of the gate.
+ */
+TEST_F(MeshMapBakeTest, valid_state_is_not_current_after_content_change)
+{
+  Mesh *mesh = add_quad_two_uv("Quad");
+  Material *ma = add_material("MapsMat");
+  Object *ob = add_simple_object("Ob", mesh, ma);
+  Scene *scene = add_scene_with_object("Scene", ob);
+  ViewLayer *view_layer = static_cast<ViewLayer *>(scene->view_layers.first);
+
+  Depsgraph *graph = nullptr;
+  Object *ob_eval = eval_object(*bmain, *scene, *view_layer, *ob, DAG_EVAL_VIEWPORT, graph);
+  ASSERT_NE(ob_eval, nullptr);
+  ObjectMeshMapState *state = BKE_mesh_maps_object_state_ensure(
+      *ob, *ma, MA_MESH_MAP_NORMAL_TANGENT);
+  ASSERT_NE(state, nullptr);
+
+  uint32_t hash[2];
+  BKE_mesh_maps_object_hash(*ob_eval, *ma, MA_MESH_MAP_NORMAL_TANGENT, hash);
+  BKE_mesh_maps_object_state_mark_baked(*state, hash, 1);
+  ASSERT_EQ(state->status, OB_MESH_MAP_STATUS_VALID);
+  EXPECT_TRUE(BKE_mesh_maps_object_state_is_current(*state, *ob_eval, *ma));
+
+  /* The DirectX flag is part of the Tangent Normal hash; flipping it makes the old bake stale. */
+  ma->mesh_map_settings.use_directx_normal = ma->mesh_map_settings.use_directx_normal ? 0 : 1;
+  EXPECT_FALSE(BKE_mesh_maps_object_state_is_current(*state, *ob_eval, *ma));
+  /* `is_current` reads; it must not have rewritten the status the filter checks first. */
+  EXPECT_EQ(state->status, OB_MESH_MAP_STATUS_VALID);
+
+  DEG_graph_free(graph);
+}
+
+/**
  * Guard: a modifier with different viewport and render levels evaluates to different geometry, so
  * a hash from a render depsgraph disagrees with the viewport one `refresh()` uses. This is why the
  * commit must hash from the viewport depsgraph.
@@ -1222,7 +1512,7 @@ TEST_F(MeshMapBakeTest, plan_pairs_active_and_all_scopes)
   Vector<MeshMapBakePair> active;
   BKE_mesh_maps_bake_plan_pairs(
       *bmain, a, *ma, MA_MESH_MAP_BAKE_ACTIVE_OBJECT, MESH_MAP_BAKE_TYPE_MASK_SUPPORTED, active);
-  ASSERT_EQ(active.size(), 9u);
+  ASSERT_EQ(active.size(), 11u);
   for (const MeshMapBakePair &pair : active) {
     EXPECT_EQ(pair.object, a);
     EXPECT_EQ(pair.material, ma);
@@ -1230,10 +1520,11 @@ TEST_F(MeshMapBakeTest, plan_pairs_active_and_all_scopes)
   EXPECT_EQ(active[0].type, MA_MESH_MAP_AO);
   EXPECT_EQ(active[6].type, MA_MESH_MAP_EDGE);
 
-  /* A mask keeps only its set, supported bits; the reserved Thickness bit is ignored. */
+  /* A mask keeps only its set, supported bits; a bit outside the enum is ignored. Thickness is a
+   * supported type now, so the ignored bit must be one no type names. */
   Vector<MeshMapBakePair> masked;
   const uint32_t mask = (1u << MA_MESH_MAP_AO) | (1u << MA_MESH_MAP_ID_MATERIAL) |
-                        (1u << MA_MESH_MAP_THICKNESS);
+                        (1u << MA_MESH_MAP_TYPE_NUM);
   BKE_mesh_maps_bake_plan_pairs(*bmain, a, *ma, MA_MESH_MAP_BAKE_ACTIVE_OBJECT, mask, masked);
   ASSERT_EQ(masked.size(), 2u);
   EXPECT_EQ(masked[0].type, MA_MESH_MAP_AO);
@@ -1242,8 +1533,8 @@ TEST_F(MeshMapBakeTest, plan_pairs_active_and_all_scopes)
   Vector<MeshMapBakePair> all;
   BKE_mesh_maps_bake_plan_pairs(
       *bmain, nullptr, *ma, MA_MESH_MAP_BAKE_ALL_OBJECTS, MESH_MAP_BAKE_TYPE_MASK_SUPPORTED, all);
-  /* A and B use `ma`; each contributes the nine supported types. */
-  ASSERT_EQ(all.size(), 18u);
+  /* A and B use `ma`; each contributes the eleven supported types. */
+  ASSERT_EQ(all.size(), 22u);
   bool saw_a = false;
   bool saw_b = false;
   bool saw_c = false;
@@ -1580,7 +1871,7 @@ TEST_F(MeshMapBakeTest, source_objects_are_not_foreign_or_baked)
   Vector<MeshMapBakePair> pairs;
   BKE_mesh_maps_bake_plan_pairs(
       *bmain, nullptr, *ma, MA_MESH_MAP_BAKE_ALL_OBJECTS, MESH_MAP_BAKE_TYPE_MASK_SUPPORTED, pairs);
-  ASSERT_EQ(pairs.size(), 9u);
+  ASSERT_EQ(pairs.size(), 11u);
   for (const MeshMapBakePair &pair : pairs) {
     EXPECT_EQ(pair.object, low);
   }

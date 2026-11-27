@@ -46,6 +46,8 @@ namespace blender {
  * the pointer boundary. The asserts fail to compile the day the pads drift. */
 static_assert(sizeof(MaterialMeshMapSettings) == 36,
               "MaterialMeshMapSettings DNA layout changed");
+static_assert(offsetof(MaterialMeshMapSettings, cpu_rays) == 24,
+              "MaterialMeshMapSettings DNA layout changed");
 static_assert(offsetof(MaterialMeshMapSettings, position_normalization) == 28,
               "MaterialMeshMapSettings DNA layout changed");
 static_assert(offsetof(MaterialMeshMapSettings, use_directx_normal) == 29,
@@ -544,6 +546,14 @@ void BKE_mesh_maps_object_hash(const Object &ob_eval,
                                tangent_state->status == OB_MESH_MAP_STATUS_VALID;
     h = mesh_map_hash_mix(h, uint64_t(tangent_valid ? 1 : 0));
   }
+  if (ELEM(type, MA_MESH_MAP_THICKNESS, MA_MESH_MAP_BENT_NORMAL)) {
+    h = mesh_map_hash_mix(h, uint64_t(uint8_t(ma.mesh_map_settings.cpu_rays)));
+    /* Thickness reads world-space distances and Bent Normal stores world-space directions, so the
+     * object transform is part of the claim in both: scaling changes the distance, and rotating
+     * turns every bent direction. With no high-poly source this is the only transform in the
+     * hash (the source block folds relative transforms only when a source exists). */
+    h = mesh_map_hash_bytes(h, ob_eval.object_to_world().ptr(), sizeof(float4x4));
+  }
   if (type == MA_MESH_MAP_POSITION) {
     /* The raw mode stores the world position as it lies, and the box/sphere modes fit the
      * *world-space* bounds of the object. Translation and a uniform scale may cancel in the
@@ -732,6 +742,7 @@ void BKE_mesh_maps_material_slots_copy(Material &ma_dst, const Material &ma_src)
   ma_dst.mesh_map_settings.ao_distance = ma_src.mesh_map_settings.ao_distance;
   ma_dst.mesh_map_settings.edge_radius = ma_src.mesh_map_settings.edge_radius;
   ma_dst.mesh_map_settings.curvature_scale = ma_src.mesh_map_settings.curvature_scale;
+  ma_dst.mesh_map_settings.cpu_rays = ma_src.mesh_map_settings.cpu_rays;
   ma_dst.mesh_map_settings.curvature_method = ma_src.mesh_map_settings.curvature_method;
   ma_dst.mesh_map_settings.curvature_radius = ma_src.mesh_map_settings.curvature_radius;
   ma_dst.mesh_map_slots = {nullptr, nullptr};

@@ -31,6 +31,7 @@
 
 #include "BKE_mesh_maps_types.hh"
 #include "BLI_function_ref.hh"
+#include "BLI_math_matrix_types.hh"
 #include "BLI_set.hh"
 #include "BLI_span.hh"
 #include "BLI_string_ref.hh"
@@ -168,6 +169,47 @@ void BKE_mesh_maps_bake_fill_id_pixels(const BakePixel *pixels,
                                        int channels,
                                        float *result);
 
+/** Whether \a type is the scalar half of the ray-marched CPU fills: interior distance rays. */
+bool BKE_mesh_maps_bake_type_cpu_rays_scalar(int8_t type);
+
+/** Whether \a type is the vector half of the ray-marched CPU fills: outward hemisphere rays. */
+bool BKE_mesh_maps_bake_type_cpu_rays_vector(int8_t type);
+
+/**
+ * One interior surface the Thickness map's rays march through, with its local-to-world matrix.
+ * The ray cast runs in the source's local space and reads the distance back in world units, so
+ * \a matrix may carry scale.
+ */
+struct MeshMapBakeThicknessSource {
+  const Mesh *mesh;
+  float4x4 matrix;
+};
+
+/**
+ * Fill the RGBA result of a CPU Thickness map: every covered texel gets the averaged distance
+ * the interior rays travel before they leave the solid, written to R (G and B are spread by the
+ * commit, as for every scalar map).
+ *
+ * The texel's origin and flat normal come from \a low_mesh and \a low_matrix (the surface the
+ * bake samples); each of \a rays directions is cast into the surfaces of \a sources through a
+ * BVH, marched through entering hits, and the first exiting hit's distance is the thickness of
+ * that direction. A texel whose rays all leave without an exit hit (an open surface, or another
+ * part covering the exit) writes black (0,0,0) with alpha 1, so its atlas coverage stays as
+ * opaque as every other map's.
+ *
+ * Uncovered texels are left alone; \a result holds `pixels_num * 4` floats.
+ *
+ * \param rays: directions per texel (1 traces straight down the normal). Clamped to
+ * #MESH_MAP_BAKE_CPU_RAYS_MIN..#MESH_MAP_BAKE_CPU_RAYS_MAX.
+ */
+void BKE_mesh_maps_bake_fill_thickness(const BakePixel *pixels,
+                                       size_t pixels_num,
+                                       const Mesh &low_mesh,
+                                       const float4x4 &low_matrix,
+                                       Span<MeshMapBakeThicknessSource> sources,
+                                       int rays,
+                                       float *result);
+
 /**
  * Whether a custom \a cage can be cast through for a low-poly \a low: the cage must have the same
  * face and corner counts, so each low-poly face has a matching cage face (mirrors the check the
@@ -231,6 +273,22 @@ void BKE_mesh_maps_bake_coverage_union(Span<uint8_t> source, MutableSpan<uint8_t
 
 /** How many texels both masks mark. The shorter of the two bounds the count. */
 size_t BKE_mesh_maps_bake_coverage_overlap(Span<uint8_t> a, Span<uint8_t> b);
+
+/**
+ * Fill the RGBA result of a CPU Bent Normal map: every covered texel gets the normalized average
+ * of the hemisphere directions around its surface normal that escape \a sources without a hit,
+ * written in world space (`0.5 + 0.5 * direction`, a texel whose rays all hit stays black). The
+ * origins and flat normals come from \a low_mesh and \a low_matrix; \a rays directions per
+ * texel are clamped to #MESH_MAP_BAKE_CPU_RAYS_MIN..#MESH_MAP_BAKE_CPU_RAYS_MAX. Uncovered texels
+ * are left alone.
+ */
+void BKE_mesh_maps_bake_fill_bent_normals(const BakePixel *pixels,
+                                          size_t pixels_num,
+                                          const Mesh &low_mesh,
+                                          const float4x4 &low_matrix,
+                                          Span<MeshMapBakeThicknessSource> sources,
+                                          int rays,
+                                          float *result);
 
 /**
  * Fill the RGBA result of a Curvature map through the Normal Filter: the divergence of the

@@ -132,8 +132,8 @@ void mesh_map_bake_populate_geometry_pixels(Mesh &mesh,
 
 /** One (object, type) of a run: the private world plus its bookkeeping. */
 struct MeshMapBakeWorld {
-  /* The private render world. Null for a CPU ID pair, which needs no engine and so keeps the
-   * 05-03 shape (a local mesh copy, no temporary Main). */
+  /* The private render world. Null for a CPU ID pair, which needs no engine: those bake from a
+   * local mesh copy, with no temporary Main to build. */
   Main *temp_main = nullptr;
   Scene *temp_scene = nullptr;
   ViewLayer *temp_view_layer = nullptr;
@@ -385,22 +385,176 @@ Object *mesh_map_bake_find_object(MeshMapBakeJob &job, const MeshMapBakePairStat
 }
 
 /**
+ * Copy the resolved high-poly source objects into the world. Shared by both branches (the copy
+ * logic and its failure path are identical; only the placement differs): a render pair gets temp
+ * objects inside the private scene, sharing \a temp_material so the EMIT passes trace the
+ * high-poly through the same value graph, while a CPU pair keeps the user's original objects
+ * (their names decide the ID colours) next to local mesh copies owned by the world. \a
+ * temp_material is null for the CPU branch.
+ *
+ * Returns false with the pair failed when a source mesh could not be copied.
+ */
+bool mesh_map_bake_prepare_sources(MeshMapBakeWorld &world,
+                                   const Vector<Object *> &source_objects,
+                                   const bool is_render,
+                                   Material *temp_material,
+                                   Depsgraph &user_depsgraph,
+                                   MeshMapBakePairState &pair,
+                                   ObjectMeshMapState &state)
+{
+  if (!is_render) {
+    /* CPU branch: the user's original objects go into `world.source_objects` so the
+     * ID colour reads their names, and their evaluated meshes go into `world.source_meshes` as
+     * local copies owned by the world (freed by a null-Main `BKE_id_free` in the world-free). */
+    world.source_objects.reserve(source_objects.size());
+    world.source_meshes.reserve(source_objects.size());
+  }
+  for (Object *source : source_objects) {
+    Object *source_eval = DEG_get_evaluated(&user_depsgraph, source);
+    if (source_eval == nullptr) {
+      source_eval = source;
+    }
+    Mesh *source_copy = mesh_map_bake_copy_mesh(mesh_map_bake_object_mesh(*source_eval));
+    if (source_copy == nullptr) {
+      BKE_mesh_maps_bake_state_fail(state);
+      BLI_strncpy(pair.error, "Could not copy a high-poly source mesh", sizeof(pair.error));
+      pair.failed = true;
+      return false;
+    }
+    if (is_render) {
+      BKE_libblock_management_main_add(world.temp_main, source_copy);
+      Object *temp_source = BKE_object_add_for_data(world.temp_main,
+                                                    world.temp_scene,
+                                                    world.temp_view_layer,
+                                                    OB_MESH,
+                                                    "Mesh Map Source",
+                                                    &source_copy->id,
+                                                    true);
+      BKE_object_apply_mat4(temp_source, source_eval->object_to_world().ptr(), false, false);
+      BKE_collection_object_add(
+          world.temp_main, world.temp_scene->master_collection, temp_source);
+      BKE_object_material_slot_add(world.temp_main, temp_source);
+      BKE_object_material_assign(
+          world.temp_main, temp_source, temp_material, 1, BKE_MAT_ASSIGN_OBJECT);
+      world.source_objects.append(temp_source);
+    }
+    else {
+      world.source_objects.append(source);
+    }
+    world.source_meshes.append(source_copy);
+  }
+  return true;
+}
+
+/**
+ * Copy the pair's cage into the world; an empty \a cage means an auto-cage and nothing to do. The
+ * match check and the copy are shared by both branches; only the placement differs: a render pair
+ * adds a temp object to the private scene (hidden from render, because the cage is only the ray
+ * origin), a CPU pair keeps the user's original object for the matrix. Either way the world keeps
+ * the cage mesh copy and the cage's evaluated matrix.
+ *
+ * Returns false with the pair failed when the cage does not match the low-poly or cannot be
+ * copied.
+ */
+bool mesh_map_bake_prepare_cage(MeshMapBakeWorld &world,
+                                Object *cage,
+                                const bool is_render,
+                                Depsgraph &user_depsgraph,
+                                MeshMapBakePairState &pair,
+                                ObjectMeshMapState &state)
+{
+  if (cage == nullptr) {
+    return true;
+  }
+  Object *cage_eval = DEG_get_evaluated(&user_depsgraph, cage);
+  if (cage_eval == nullptr) {
+    cage_eval = cage;
+  }
+  Mesh *cage_eval_mesh = mesh_map_bake_object_mesh(*cage_eval);
+  if (cage_eval_mesh == nullptr ||
+      !BKE_mesh_maps_bake_cage_matches(*world.mesh, *cage_eval_mesh))
+  {
+    BKE_mesh_maps_bake_state_fail(state);
+    BLI_strncpy(pair.error,
+                "The cage mesh must have the same number of faces as the low-poly object",
+                sizeof(pair.error));
+    pair.failed = true;
+    return false;
+  }
+  Mesh *cage_copy = mesh_map_bake_copy_mesh(cage_eval_mesh);
+  if (cage_copy == nullptr) {
+    BKE_mesh_maps_bake_state_fail(state);
+    BLI_strncpy(pair.error, "Could not copy the cage mesh", sizeof(pair.error));
+    pair.failed = true;
+    return false;
+  }
+  if (is_render) {
+    BKE_libblock_management_main_add(world.temp_main, cage_copy);
+    Object *temp_cage = BKE_object_add_for_data(world.temp_main,
+                                                world.temp_scene,
+                                                world.temp_view_layer,
+                                                OB_MESH,
+                                                "Mesh Map Cage",
+                                                &cage_copy->id,
+                                                true);
+    BKE_object_apply_mat4(temp_cage, cage_eval->object_to_world().ptr(), false, false);
+    BKE_collection_object_add(world.temp_main, world.temp_scene->master_collection, temp_cage);
+    /* The cage is only the ray origin; it must not render. */
+    temp_cage->visibility_flag |= OB_HIDE_RENDER;
+    world.cage_object = temp_cage;
+  }
+  else {
+    world.cage_object = cage;
+  }
+  world.cage_mesh = cage_copy;
+  world.cage_matrix = cage_eval->object_to_world();
+  return true;
+}
+
+/**
  * Fill a Curvature pair through the Normal Filter: read the object's baked Tangent Normal atlas
  * tile by tile and write its divergence as the curvature value. The filter is atlas-to-atlas: the
  * Tangent Normal atlas must exist at the same resolution, with a float buffer like every atlas.
  *
  * The Tangent Normal atlas is resolved through #BKE_mesh_maps_slot_find.
  *
- * Returns false with the pair failed when the Tangent Normal atlas is missing, is not float, sits
- * at another resolution, or does not carry one of the tiles the curvature raster covers. A missing
- * tile means the tangent bake covered another UV layout, so filtering would fill the covered
- * texels with zeros and then call the pair a successful bake.
+ * Returns false with the pair failed when the object's Tangent Normal state is not VALID or no
+ * longer matches the object's content, when the Tangent Normal atlas is missing, is not float,
+ * sits at another resolution, or does not carry one of the tiles the curvature raster covers. A
+ * missing tile means the tangent bake covered another UV layout, so filtering would fill the
+ * covered texels with zeros and then call the pair a successful bake.
  */
 bool mesh_map_bake_fill_curvature_filter(MeshMapBakeWorld &world,
                                          Material &ma,
                                          MeshMapBakePairState &pair,
-                                         ObjectMeshMapState &state)
+                                         ObjectMeshMapState &state,
+                                         Object &ob,
+                                         const Object &ob_eval)
 {
+  /* The atlas alone is not proof of a usable bake: a failed render leaves its tiles allocated but
+   * black, and a stale bake was made from the old geometry. Either would filter to neutral 0.5 in
+   * every covered texel and still be committed as a successful bake, so the state of the same
+   * object's Tangent Normal pair gates the filter. `is_current` catches VALID-but-old as well:
+   * the tangent hash is compared against the viewport evaluation the bake itself uses. */
+  ObjectMeshMapState *normal_state = BKE_mesh_maps_object_state_find(
+      ob, ma, MA_MESH_MAP_NORMAL_TANGENT);
+  if (normal_state == nullptr || normal_state->status != OB_MESH_MAP_STATUS_VALID) {
+    BKE_mesh_maps_bake_state_fail(state);
+    BLI_strncpy(pair.error,
+                "The Normal Filter needs the Tangent Normal map baked first (its state is not "
+                "valid)",
+                sizeof(pair.error));
+    pair.failed = true;
+    return false;
+  }
+  if (!BKE_mesh_maps_object_state_is_current(*normal_state, ob_eval, ma)) {
+    BKE_mesh_maps_bake_state_fail(state);
+    BLI_strncpy(pair.error,
+                "The Tangent Normal map is stale; bake it again before the Normal Filter",
+                sizeof(pair.error));
+    pair.failed = true;
+    return false;
+  }
   const MaterialMeshMapSlot *normal_slot = BKE_mesh_maps_slot_find(ma, MA_MESH_MAP_NORMAL_TANGENT);
   Image *normal_atlas = normal_slot != nullptr ? normal_slot->image : nullptr;
   if (normal_atlas == nullptr) {
@@ -460,6 +614,22 @@ bool mesh_map_bake_fill_curvature_filter(MeshMapBakeWorld &world,
       pair.failed = true;
       return false;
     }
+    /* The image's own size is checked once above, but a tiled image may hold a tile at another
+     * size; the filter writes a `resolution` block per tile, so a smaller tile must fail rather
+     * than be overrun. */
+    if (normal_buffer->x != world.resolution || normal_buffer->y != world.resolution) {
+      BKE_mesh_maps_bake_state_fail(state);
+      BLI_snprintf(pair.error,
+                   sizeof(pair.error),
+                   "The Tangent Normal atlas tile %d is %dx%d, expected %dx%d",
+                   image.tile_number,
+                   normal_buffer->x,
+                   normal_buffer->y,
+                   world.resolution,
+                   world.resolution);
+      pair.failed = true;
+      return false;
+    }
     BKE_mesh_maps_bake_fill_curvature_from_normal(world.pixels + image.offset,
                                                   world.pixels_num,
                                                   world.resolution,
@@ -474,10 +644,196 @@ bool mesh_map_bake_fill_curvature_filter(MeshMapBakeWorld &world,
 }
 
 /**
+ * Fill a Thickness or a Bent Normal pair: the two CPU ray fills share their exact shape and only
+ * the per-direction ray semantics differ, so one call serves both and \a type picks the fill. An
+ * empty \a sources means the pair has no high-poly source: the low-poly is its own interior.
+ */
+void mesh_map_bake_fill_thickness_or_bent(MeshMapBakeWorld &world,
+                                          const size_t pixels_total,
+                                          Material &ma,
+                                          const Span<MeshMapBakeThicknessSource> sources,
+                                          const int8_t type)
+{
+  /* The BKE fills clamp the ray count against the shared `MESH_MAP_BAKE_CPU_RAYS` limits
+   * themselves, so the editor passes the raw setting and the bounds exist in one place only. */
+  if (type == MA_MESH_MAP_THICKNESS) {
+    BKE_mesh_maps_bake_fill_thickness(world.pixels,
+                                      pixels_total,
+                                      *world.mesh,
+                                      world.low_matrix,
+                                      sources,
+                                      int(ma.mesh_map_settings.cpu_rays),
+                                      world.result);
+  }
+  else {
+    BKE_mesh_maps_bake_fill_bent_normals(world.pixels,
+                                         pixels_total,
+                                         *world.mesh,
+                                         world.low_matrix,
+                                         sources,
+                                         int(ma.mesh_map_settings.cpu_rays),
+                                         world.result);
+  }
+}
+
+/**
+ * Fill the pair's private result on the CPU, dispatching on the pair's type: Curvature (Normal
+ * Filter) reads the primary Tangent Normal atlas, Thickness and
+ * Bent Normal ray-march the high-poly sources, and the ID maps read the object or material
+ * colours. A render pair reaches only the high-poly cast: its result is filled by the worker
+ * instead.
+ *
+ * The per-type fill entry points keep their own signatures (documented in
+ * #BKE_mesh_maps_bake.hh), so the dispatch is the local switch below rather than a forced
+ * shared shape. Returns false with the pair failed; true means the result -- or the render world
+ * the worker fills -- is ready.
+ */
+bool mesh_map_bake_fill_cpu_map(MeshMapBakeWorld &world,
+                                MeshMapBakePairState &pair,
+                                ObjectMeshMapState &state,
+                                Material &ma,
+                                Object &ob,
+                                const Object &ob_eval,
+                                const MeshMapTypeInfo & /*type_info*/,
+                                const bool is_render,
+                                const float cage_extrusion,
+                                const float max_ray_distance,
+                                Depsgraph &user_depsgraph)
+{
+  const size_t pixels_total = world.pixels_num * size_t(world.tiles_num);
+  if (!is_render && pair.type == MA_MESH_MAP_CURVATURE) {
+    return mesh_map_bake_fill_curvature_filter(world, ma, pair, state, ob, ob_eval);
+  }
+
+  world.highpoly_num = int(world.source_objects.size());
+  if (world.highpoly_num > 0) {
+    world.highpoly = MEM_new_array_zeroed<BakeHighPolyData>(world.highpoly_num, __func__);
+    for (int i = 0; i < world.highpoly_num; i++) {
+      Object *source_obj = world.source_objects[i];
+      Depsgraph *source_depsgraph = is_render ? world.temp_depsgraph : &user_depsgraph;
+      Object *source_eval = DEG_get_evaluated(source_depsgraph, source_obj);
+      if (source_eval == nullptr) {
+        source_eval = source_obj;
+      }
+      /* A render world raycasts against the evaluated temp mesh; a CPU world against its own
+       * null-Main copy so the ray pass reads nothing but private data. */
+      Mesh *source_mesh = is_render ? mesh_map_bake_object_mesh(*source_eval) :
+                                      world.source_meshes[i];
+      world.highpoly[i].ob = source_obj;
+      world.highpoly[i].ob_eval = source_eval;
+      world.highpoly[i].mesh = source_mesh;
+      copy_m4_m4(world.highpoly[i].obmat, source_eval->object_to_world().ptr());
+      invert_m4_m4(world.highpoly[i].imat, world.highpoly[i].obmat);
+      world.highpoly[i].is_flip_object = is_negative_m4(source_eval->object_to_world().ptr());
+    }
+
+    /* Only the engine and the ID maps read the cast result: the render pairs bake the high-poly
+     * surface the low-poly was cast onto, and the CPU ID maps read the hit object/triangle. The
+     * ray-marched CPU fills (Thickness, Bent Normal) build their own BVH from `world.source_meshes`
+     * and never read `pixels_high`; `RE_bake_pixels_populate_from_objects` would only cost a full
+     * texel-by-source cast and, on a miss, rewrite `world.pixels` `primitive_id`s, punching holes
+     * in the raster the CPU fill relies on. */
+    const bool needs_cast = is_render ||
+                            ELEM(pair.type, MA_MESH_MAP_ID_OBJECT, MA_MESH_MAP_ID_MATERIAL);
+    if (needs_cast) {
+      world.pixels_high = MEM_new_array_uninitialized<BakePixel>(pixels_total, __func__);
+      const bool is_custom_cage = world.cage_mesh != nullptr;
+      const float(*mat_low)[4] = world.low_matrix.ptr();
+      const float(*mat_cage)[4] = is_custom_cage ? world.cage_matrix.ptr() : mat_low;
+      if (!RE_bake_pixels_populate_from_objects(world.mesh,
+                                                world.pixels,
+                                                world.pixels_high,
+                                                world.highpoly,
+                                                world.highpoly_num,
+                                                pixels_total,
+                                                is_custom_cage,
+                                                cage_extrusion,
+                                                max_ray_distance,
+                                                mat_low,
+                                                mat_cage,
+                                                world.cage_mesh))
+      {
+        BKE_mesh_maps_bake_state_fail(state);
+        BLI_strncpy(pair.error,
+                    "Could not cast the low-poly onto the high-poly source",
+                    sizeof(pair.error));
+        pair.failed = true;
+        return false;
+      }
+    }
+  }
+
+  if (is_render) {
+    /* A render pair reaches only the high-poly cast above: its result is filled by the worker
+     * instead. */
+    return true;
+  }
+
+  switch (pair.type) {
+    case MA_MESH_MAP_CURVATURE:
+      /* Handled above, before the high-poly setup: the Normal Filter reads the primary Tangent
+       * Normal atlas instead of the sources. */
+      break;
+    case MA_MESH_MAP_THICKNESS:
+    case MA_MESH_MAP_BENT_NORMAL: {
+      /* The interior the rays march through (or the hemisphere they see) is the high-poly set;
+       * with no sources the low-poly itself is the interior. The origin stays on the low-poly's
+       * surface, so the low-poly never joins its own source list. */
+      Vector<MeshMapBakeThicknessSource> thickness_sources;
+      thickness_sources.reserve(world.source_meshes.size());
+      for (const int i : IndexRange(world.highpoly_num)) {
+        /* The copied mesh is the evaluated one, so its placement must come from the evaluated
+         * object too: a constraint or driver that moves the source between the original and the
+         * evaluated state would otherwise shift the interior relative to the sampled surface. */
+        const Object *source_eval = world.highpoly[i].ob_eval;
+        thickness_sources.append({world.source_meshes[i], source_eval->object_to_world()});
+      }
+      mesh_map_bake_fill_thickness_or_bent(world, pixels_total, ma, thickness_sources, pair.type);
+      break;
+    }
+    default: {
+      /* The ID maps read the object or material colours: from the high-poly sources when given,
+       * from the low-poly's own faces otherwise. */
+      if (world.highpoly_num > 0) {
+        Vector<const Object *> id_objects;
+        Vector<const Mesh *> id_meshes;
+        id_objects.reserve(world.highpoly_num);
+        id_meshes.reserve(world.highpoly_num);
+        for (int i = 0; i < world.highpoly_num; i++) {
+          id_objects.append(world.source_objects[i]);
+          id_meshes.append(world.source_meshes[i]);
+        }
+        BKE_mesh_maps_bake_fill_id_from_high_poly(world.pixels_high,
+                                                  pixels_total,
+                                                  id_objects.data(),
+                                                  size_t(world.highpoly_num),
+                                                  id_meshes.data(),
+                                                  size_t(world.highpoly_num),
+                                                  pair.type,
+                                                  4,
+                                                  world.result);
+      }
+      else {
+        /* No source: the low-poly's own faces decide every covered texel. */
+        BKE_mesh_maps_bake_fill_id_pixels(
+            world.pixels, pixels_total, *world.mesh, ob, pair.type, 4, world.result);
+      }
+      break;
+    }
+  }
+  return true;
+}
+
+
+/**
  * Build the private world for \a pair, rasterize its texels, fill the CPU ID result (or the render
  * world for a Cycles type) and leave the object state #OB_MESH_MAP_STATUS_BAKING (already entered).
  * On failure the state is marked #OB_MESH_MAP_STATUS_ERROR, \a pair records the message and false is
  * returned. Main thread only.
+ *
+ * The phases live in the file-local helpers above: the source and cage copies shared by both
+ * branches in #mesh_map_bake_prepare_sources / #mesh_map_bake_prepare_cage, and the per-type CPU
+ * fills in #mesh_map_bake_fill_cpu_map.
  */
 bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
 {
@@ -488,7 +844,8 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
     pair.failed = true;
     return false;
   }
-  if (pair.type < 0 || pair.type >= MA_MESH_MAP_TYPE_NUM) {
+  const MeshMapTypeInfo *type_info = BKE_mesh_maps_type_info_get(pair.type);
+  if (type_info == nullptr) {
     BLI_strncpy(pair.error, "Unsupported mesh map type", sizeof(pair.error));
     pair.failed = true;
     return false;
@@ -532,18 +889,24 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
   const float4x4 object_matrix = ob_eval->object_to_world();
 
   const bool is_render = BKE_mesh_maps_bake_pair_renders(*ma, pair.type);
+  /* A Curvature pair on the Normal Filter runs on the CPU over the already-baked Tangent Normal
+   * atlas: it needs neither a high-poly source nor a cage, and copying/validating them would only
+   * add a failure path (a broken source or a mismatched cage) to a pair that reads neither. */
+  const bool is_curvature_filter = !is_render && pair.type == MA_MESH_MAP_CURVATURE;
 
   /* The high-poly source of this material, if any. For a CPU pair its meshes are copied locally so
    * the ray pass can build its BVH trees off the user's data; for a render pair they are copied
    * into the private Main so Cycles can see them inside the render depsgraph. */
   Vector<Object *> source_objects;
   Object *cage = nullptr;
-  BKE_mesh_maps_source_resolve(*ob, *ma, source_objects, &cage);
   float cage_extrusion = 0.0f;
   float max_ray_distance = 0.0f;
-  if (const ObjectMeshMapSource *source = BKE_mesh_maps_source_find(*ob, *ma)) {
-    cage_extrusion = source->cage_extrusion;
-    max_ray_distance = source->max_ray_distance;
+  if (!is_curvature_filter) {
+    BKE_mesh_maps_source_resolve(*ob, *ma, source_objects, &cage);
+    if (const ObjectMeshMapSource *source = BKE_mesh_maps_source_find(*ob, *ma)) {
+      cage_extrusion = source->cage_extrusion;
+      max_ray_distance = source->max_ray_distance;
+    }
   }
 
   Mesh *mesh_copy = mesh_map_bake_copy_mesh(mesh_map_bake_object_mesh(*ob_eval));
@@ -608,74 +971,15 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
 
     /* Copy each source object into the private scene, sharing the throw-away material so the EMIT
      * passes trace the high-poly through the same value graph. */
-    for (Object *source : source_objects) {
-      Object *source_eval = DEG_get_evaluated(user_depsgraph, source);
-      if (source_eval == nullptr) {
-        source_eval = source;
-      }
-      Mesh *source_copy = mesh_map_bake_copy_mesh(mesh_map_bake_object_mesh(*source_eval));
-      if (source_copy == nullptr) {
-        BKE_mesh_maps_bake_state_fail(*state);
-        BLI_strncpy(pair.error, "Could not copy a high-poly source mesh", sizeof(pair.error));
-        pair.failed = true;
-        return false;
-      }
-      BKE_libblock_management_main_add(job.world.temp_main, source_copy);
-      Object *temp_source = BKE_object_add_for_data(job.world.temp_main,
-                                                    job.world.temp_scene,
-                                                    job.world.temp_view_layer,
-                                                    OB_MESH,
-                                                    "Mesh Map Source",
-                                                    &source_copy->id,
-                                                    true);
-      BKE_object_apply_mat4(temp_source, source_eval->object_to_world().ptr(), false, false);
-      BKE_collection_object_add(
-          job.world.temp_main, job.world.temp_scene->master_collection, temp_source);
-      assign_material(temp_source);
-      job.world.source_objects.append(temp_source);
-      job.world.source_meshes.append(source_copy);
+    if (!mesh_map_bake_prepare_sources(
+            job.world, source_objects, true, temp_material, *user_depsgraph, pair, *state))
+    {
+      return false;
     }
 
     /* Cage: a custom cage must mirror the low-poly face count; an empty one means an auto-cage. */
-    if (cage != nullptr) {
-      Object *cage_eval = DEG_get_evaluated(user_depsgraph, cage);
-      if (cage_eval == nullptr) {
-        cage_eval = cage;
-      }
-      Mesh *cage_eval_mesh = mesh_map_bake_object_mesh(*cage_eval);
-      if (cage_eval_mesh == nullptr ||
-          !BKE_mesh_maps_bake_cage_matches(*mesh_copy, *cage_eval_mesh))
-      {
-        BKE_mesh_maps_bake_state_fail(*state);
-        BLI_strncpy(pair.error,
-                    "The cage mesh must have the same number of faces as the low-poly object",
-                    sizeof(pair.error));
-        pair.failed = true;
-        return false;
-      }
-      Mesh *cage_copy = mesh_map_bake_copy_mesh(cage_eval_mesh);
-      if (cage_copy == nullptr) {
-        BKE_mesh_maps_bake_state_fail(*state);
-        BLI_strncpy(pair.error, "Could not copy the cage mesh", sizeof(pair.error));
-        pair.failed = true;
-        return false;
-      }
-      BKE_libblock_management_main_add(job.world.temp_main, cage_copy);
-      Object *temp_cage = BKE_object_add_for_data(job.world.temp_main,
-                                                  job.world.temp_scene,
-                                                  job.world.temp_view_layer,
-                                                  OB_MESH,
-                                                  "Mesh Map Cage",
-                                                  &cage_copy->id,
-                                                  true);
-      BKE_object_apply_mat4(temp_cage, cage_eval->object_to_world().ptr(), false, false);
-      BKE_collection_object_add(
-          job.world.temp_main, job.world.temp_scene->master_collection, temp_cage);
-      /* The cage is only the ray origin; it must not render. */
-      temp_cage->visibility_flag |= OB_HIDE_RENDER;
-      job.world.cage_object = temp_cage;
-      job.world.cage_mesh = cage_copy;
-      job.world.cage_matrix = cage_eval->object_to_world();
+    if (!mesh_map_bake_prepare_cage(job.world, cage, true, *user_depsgraph, pair, *state)) {
+      return false;
     }
 
     job.world.temp_depsgraph = mesh_map_bake_depsgraph_new(
@@ -691,54 +995,15 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
     }
   }
   else {
-    /* CPU branch (05-03 shape): the user's original objects go into `world.source_objects` so the
-     * ID colour reads their names, and their evaluated meshes go into `world.source_meshes` as
-     * local copies owned by the world (freed by a null-Main `BKE_id_free` in the world-free). */
-    job.world.source_objects.reserve(source_objects.size());
-    job.world.source_meshes.reserve(source_objects.size());
-    for (Object *source : source_objects) {
-      Object *source_eval = DEG_get_evaluated(user_depsgraph, source);
-      if (source_eval == nullptr) {
-        source_eval = source;
-      }
-      Mesh *source_copy = mesh_map_bake_copy_mesh(mesh_map_bake_object_mesh(*source_eval));
-      if (source_copy == nullptr) {
-        BKE_mesh_maps_bake_state_fail(*state);
-        BLI_strncpy(pair.error, "Could not copy a high-poly source mesh", sizeof(pair.error));
-        pair.failed = true;
-        return false;
-      }
-      job.world.source_objects.append(source);
-      job.world.source_meshes.append(source_copy);
-    }
-
-    /* Cage: a custom cage must mirror the low-poly face count; an empty one means an auto-cage. */
-    if (cage != nullptr) {
-      Object *cage_eval = DEG_get_evaluated(user_depsgraph, cage);
-      if (cage_eval == nullptr) {
-        cage_eval = cage;
-      }
-      Mesh *cage_eval_mesh = mesh_map_bake_object_mesh(*cage_eval);
-      if (cage_eval_mesh == nullptr ||
-          !BKE_mesh_maps_bake_cage_matches(*mesh_copy, *cage_eval_mesh))
+    if (!is_curvature_filter) {
+      if (!mesh_map_bake_prepare_sources(
+              job.world, source_objects, false, nullptr, *user_depsgraph, pair, *state))
       {
-        BKE_mesh_maps_bake_state_fail(*state);
-        BLI_strncpy(pair.error,
-                    "The cage mesh must have the same number of faces as the low-poly object",
-                    sizeof(pair.error));
-        pair.failed = true;
         return false;
       }
-      Mesh *cage_copy = mesh_map_bake_copy_mesh(cage_eval_mesh);
-      if (cage_copy == nullptr) {
-        BKE_mesh_maps_bake_state_fail(*state);
-        BLI_strncpy(pair.error, "Could not copy the cage mesh", sizeof(pair.error));
-        pair.failed = true;
+      if (!mesh_map_bake_prepare_cage(job.world, cage, false, *user_depsgraph, pair, *state)) {
         return false;
       }
-      job.world.cage_object = cage;
-      job.world.cage_mesh = cage_copy;
-      job.world.cage_matrix = cage_eval->object_to_world();
     }
   }
 
@@ -889,84 +1154,17 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
   job.world.tiles_num = int(job.world.images.size());
   BLI_assert(job.world.tiles_num >= 1);
 
-  if (!is_render && pair.type == MA_MESH_MAP_CURVATURE) {
-    /* The Normal Filter reads the baked Tangent Normal atlas instead of casting onto sources. */
-    return mesh_map_bake_fill_curvature_filter(job.world, *ma, pair, *state);
-  }
-
-  job.world.highpoly_num = int(job.world.source_objects.size());
-  if (job.world.highpoly_num > 0) {
-    job.world.highpoly = MEM_new_array_zeroed<BakeHighPolyData>(job.world.highpoly_num, __func__);
-    for (int i = 0; i < job.world.highpoly_num; i++) {
-      Object *source_obj = job.world.source_objects[i];
-      Depsgraph *source_depsgraph = is_render ? job.world.temp_depsgraph : user_depsgraph;
-      Object *source_eval = DEG_get_evaluated(source_depsgraph, source_obj);
-      if (source_eval == nullptr) {
-        source_eval = source_obj;
-      }
-      /* A render world raycasts against the evaluated temp mesh; a CPU world against its own
-       * null-Main copy so the ray pass reads nothing but private data. */
-      Mesh *source_mesh = is_render ? mesh_map_bake_object_mesh(*source_eval) :
-                                      job.world.source_meshes[i];
-      job.world.highpoly[i].ob = source_obj;
-      job.world.highpoly[i].ob_eval = source_eval;
-      job.world.highpoly[i].mesh = source_mesh;
-      copy_m4_m4(job.world.highpoly[i].obmat, source_eval->object_to_world().ptr());
-      invert_m4_m4(job.world.highpoly[i].imat, job.world.highpoly[i].obmat);
-      job.world.highpoly[i].is_flip_object = is_negative_m4(
-          source_eval->object_to_world().ptr());
-    }
-
-    job.world.pixels_high = MEM_new_array_uninitialized<BakePixel>(pixels_total, __func__);
-    const bool is_custom_cage = job.world.cage_mesh != nullptr;
-    const float(*mat_low)[4] = job.world.low_matrix.ptr();
-    const float(*mat_cage)[4] = is_custom_cage ? job.world.cage_matrix.ptr() : mat_low;
-    if (!RE_bake_pixels_populate_from_objects(mesh_copy,
-                                              job.world.pixels,
-                                              job.world.pixels_high,
-                                              job.world.highpoly,
-                                              job.world.highpoly_num,
-                                              pixels_total,
-                                              is_custom_cage,
-                                              cage_extrusion,
-                                              max_ray_distance,
-                                              mat_low,
-                                              mat_cage,
-                                              job.world.cage_mesh))
-    {
-      BKE_mesh_maps_bake_state_fail(*state);
-      BLI_strncpy(pair.error,
-                  "Could not cast the low-poly onto the high-poly source",
-                  sizeof(pair.error));
-      pair.failed = true;
-      return false;
-    }
-    if (!is_render) {
-      Vector<const Object *> id_objects;
-      Vector<const Mesh *> id_meshes;
-      id_objects.reserve(job.world.highpoly_num);
-      id_meshes.reserve(job.world.highpoly_num);
-      for (int i = 0; i < job.world.highpoly_num; i++) {
-        id_objects.append(job.world.source_objects[i]);
-        id_meshes.append(job.world.source_meshes[i]);
-      }
-      BKE_mesh_maps_bake_fill_id_from_high_poly(job.world.pixels_high,
-                                                pixels_total,
-                                                id_objects.data(),
-                                                size_t(job.world.highpoly_num),
-                                                id_meshes.data(),
-                                                size_t(job.world.highpoly_num),
-                                                pair.type,
-                                                4,
-                                                job.world.result);
-    }
-  }
-  else if (!is_render) {
-    /* No source: the low-poly's own faces decide every covered texel. */
-    BKE_mesh_maps_bake_fill_id_pixels(
-        job.world.pixels, pixels_total, *mesh_copy, *ob, pair.type, 4, job.world.result);
-  }
-  return true;
+  return mesh_map_bake_fill_cpu_map(job.world,
+                                    pair,
+                                    *state,
+                                    *ma,
+                                    *ob,
+                                    *ob_eval,
+                                    *type_info,
+                                    is_render,
+                                    cage_extrusion,
+                                    max_ray_distance,
+                                    *user_depsgraph);
 }
 
 /**
@@ -1196,7 +1394,10 @@ void mesh_map_bake_commit_current(MeshMapBakeJob &job, MeshMapBakePairState &pai
   }
   if (world.engine_failed) {
     BKE_mesh_maps_bake_state_fail(*state);
-    job.error_num++;
+    BLI_strncpy(pair.error,
+                "The bake engine failed; the atlas was left untouched",
+                sizeof(pair.error));
+    pair.failed = true;
     return;
   }
 
@@ -1215,15 +1416,21 @@ void mesh_map_bake_commit_current(MeshMapBakeJob &job, MeshMapBakePairState &pai
   Image *atlas = BKE_mesh_maps_bake_atlas_ensure(*job.bmain, *ma, pair.type, job.resolution);
   if (atlas == nullptr) {
     BKE_mesh_maps_bake_state_fail(*state);
-    job.error_num++;
+    BLI_strncpy(pair.error,
+                "Could not create the mesh map atlas image at commit time",
+                sizeof(pair.error));
+    pair.failed = true;
     return;
   }
   /* The pixels are float; a byte atlas would swallow them, so a non-float image is a failed bake,
    * not a silent VALID. */
   if (!BKE_mesh_maps_bake_atlas_is_float(*atlas)) {
     BKE_mesh_maps_bake_state_fail(*state);
+    BLI_strncpy(pair.error,
+                "The mesh map atlas is not a float buffer; the baked pixels cannot be stored",
+                sizeof(pair.error));
+    pair.failed = true;
     WM_main_add_notifier(NC_MATERIAL | ND_SHADING, ma);
-    job.error_num++;
     return;
   }
   /* The atlas is shared: the object's own pixels always land, but its margin must not paint over
@@ -1482,6 +1689,8 @@ constexpr EnumPropertyItem mesh_map_bake_type_flag_items_array[] = {
     mesh_map_bake_type_flag_item(MA_MESH_MAP_NORMAL_TANGENT),
     mesh_map_bake_type_flag_item(MA_MESH_MAP_ID_OBJECT),
     mesh_map_bake_type_flag_item(MA_MESH_MAP_ID_MATERIAL),
+    mesh_map_bake_type_flag_item(MA_MESH_MAP_THICKNESS),
+    mesh_map_bake_type_flag_item(MA_MESH_MAP_BENT_NORMAL),
     {0, nullptr, 0, nullptr, nullptr},
 };
 

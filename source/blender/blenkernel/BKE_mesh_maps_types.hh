@@ -37,10 +37,14 @@ struct bNodeTree;
 /** \name Bake limits
  *
  * The bounds the bake settings clamp to, named here so the C++ clamps and the RNA ranges read
- * them from one place and cannot drift apart. In v1 only the Edge bevel samples and the Curvature
- * Normal Filter radius are clamped on the C++ side; the resolution, samples and margin bounds
- * below are only read by the RNA ranges until a C++ clamp needs them.
+ * them from one place and cannot drift apart. In v1 only the Edge bevel samples, the Curvature
+ * Normal Filter radius and the CPU ray count are clamped on the C++ side; the resolution, samples
+ * and margin bounds below are only read by the RNA ranges until a C++ clamp needs them.
  * \{ */
+
+/** Ray directions per texel the CPU Thickness and Bent Normal fills cast. */
+constexpr int MESH_MAP_BAKE_CPU_RAYS_MIN = 1;
+constexpr int MESH_MAP_BAKE_CPU_RAYS_MAX = 64;
 
 /** The texel radius the Curvature Normal Filter samples along U and V. */
 constexpr int MESH_MAP_BAKE_CURVATURE_RADIUS_MIN = 1;
@@ -72,7 +76,8 @@ constexpr float MESH_MAP_BAKE_MARGIN_MAX = 256.0f;
  * (the engine through the row's pass, the CPU through its fill entry points), what pass and space
  * the engine bakes, and the identifier and texts the RNA enum and the operators show. The
  * per-type CPU fill entry points themselves stay at their call sites until they can share one
- * signature (see #BKE_mesh_maps_bake_fill_id_pixels); the flags describe them until then.
+ * signature (see #BKE_mesh_maps_bake_fill_id_pixels, #BKE_mesh_maps_bake_fill_thickness and
+ * #BKE_mesh_maps_bake_fill_bent_normals); the flags describe them until then.
  * \{ */
 
 /** What one map type needs from the bake; bitwise-or of these is #MeshMapTypeInfo::flags. */
@@ -84,9 +89,9 @@ enum MeshMapTypeInfoFlag : uint32_t {
   MESH_MAP_TYPE_SCALAR = (1u << 1),
   /** Filled on the CPU, without an engine (the ID maps). */
   MESH_MAP_TYPE_CPU_FILL = (1u << 2),
-  /** The CPU fill casts rays through other surfaces. The ID maps are not flagged: their base fill
-   * reads the low-poly alone, and casting onto a high-poly source is a caller choice. Thickness
-   * and Bent Normal, the future ray-casting fills, would take this flag. */
+  /** The CPU fill casts rays through other surfaces (Thickness, Bent Normal). The ID maps are not
+   * flagged: their base fill reads the low-poly alone, and casting onto a high-poly source is a
+   * caller choice. */
   MESH_MAP_TYPE_NEEDS_SOURCES = (1u << 3),
   /** The CPU fill composes other atlases of the same material. Curvature's Normal Filter also
    * reads one, but only under a settings choice, so it stays a property of the settings, not of
@@ -228,13 +233,12 @@ inline constexpr MeshMapTypeInfo MESH_MAP_BAKE_TYPE_INFOS[MA_MESH_MAP_TYPE_NUM] 
      SCE_PASS_EMIT,
      eBakeSpace(0),
      mesh_map_bake_emit_source_edge},
-    /* MA_MESH_MAP_THICKNESS: reserved in the DNA, not baked yet -- the zero flags keep it out of
-     * the supported mask until its CPU fill lands. */
+    /* MA_MESH_MAP_THICKNESS. */
     {MA_MESH_MAP_THICKNESS,
      "THICKNESS",
      "Thickness",
      "Averaged interior distance map baked with CPU rays",
-     0u,
+     MESH_MAP_TYPE_SCALAR | MESH_MAP_TYPE_CPU_FILL | MESH_MAP_TYPE_NEEDS_SOURCES,
      eScenePassType(0),
      eBakeSpace(0),
      nullptr},
@@ -255,6 +259,15 @@ inline constexpr MeshMapTypeInfo MESH_MAP_BAKE_TYPE_INFOS[MA_MESH_MAP_TYPE_NUM] 
      MESH_MAP_TYPE_RENDERED,
      SCE_PASS_NORMAL,
      R_BAKE_SPACE_TANGENT,
+     nullptr},
+    /* MA_MESH_MAP_BENT_NORMAL. */
+    {MA_MESH_MAP_BENT_NORMAL,
+     "BENT_NORMAL",
+     "Bent Normal",
+     "Average unoccluded direction map, world space",
+     MESH_MAP_TYPE_CPU_FILL | MESH_MAP_TYPE_NEEDS_SOURCES,
+     eScenePassType(0),
+     eBakeSpace(0),
      nullptr},
 };
 
@@ -292,9 +305,10 @@ inline constexpr uint32_t MESH_MAP_BAKE_TYPE_MASK_SUPPORTED = []() {
 inline constexpr uint32_t MESH_MAP_BAKE_TYPE_MASK_ALL = MESH_MAP_BAKE_TYPE_MASK_SUPPORTED;
 
 /**
- * The two CPU ID maps only: what this bake can run without an engine (handy for scripts and tests
- * on machines that do not have Cycles built in). Spelled out because it names those two maps, not
- * every CPU fill.
+ * The two CPU ID maps only: the engine-free subset scripts and tests used before the ray-marched
+ * CPU maps existed. #MA_MESH_MAP_THICKNESS and #MA_MESH_MAP_BENT_NORMAL also run without an engine
+ * now, but this legacy mask keeps naming just the ID pair; callers that need every CPU fill read
+ * the type table instead.
  */
 inline constexpr uint32_t MESH_MAP_BAKE_TYPE_MASK_CPU = (1u << MA_MESH_MAP_ID_OBJECT) |
                                                         (1u << MA_MESH_MAP_ID_MATERIAL);

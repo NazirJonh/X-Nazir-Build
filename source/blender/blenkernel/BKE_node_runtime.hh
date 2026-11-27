@@ -319,6 +319,12 @@ class bNodeSocketRuntime : NonCopyable, NonMovable {
   Vector<bNodeSocket *> logically_linked_skipped_sockets;
   bNode *owner_node = nullptr;
   bNodeSocket *internal_link_input = nullptr;
+  /**
+   * The authored socket a constant written into this socket came from, set by the shader inliner
+   * while it builds a copied tree. Runtime only: a socket created after inlining has no origin,
+   * even when its address reuses that of a freed inlined socket.
+   */
+  const bNodeSocket *value_origin = nullptr;
   int index_in_node = -1;
   int index_in_all_sockets = -1;
   int index_in_inout_sockets = -1;

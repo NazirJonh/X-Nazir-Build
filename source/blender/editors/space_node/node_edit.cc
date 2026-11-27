@@ -35,6 +35,7 @@
 #include "BKE_screen.hh"
 
 #include "BLI_listbase.h"
+#include "BLI_map.hh"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
 #include "BLI_string.h"

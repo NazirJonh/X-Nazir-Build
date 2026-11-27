@@ -206,8 +206,8 @@ const char *GPU_material_get_name(GPUMaterial *material);
 Material *GPU_material_get_material(GPUMaterial *material);
 
 /**
- * The socket whose stored value \a socket's uniform was made from, while a material is being built;
- * null afterwards, and for a value that is not a plain copy of one.
+ * The socket whose stored value \a socket's uniform was made from, while a material that tracks
+ * values is being built; null otherwise, and for a value that is not a plain copy of one.
  */
 const bNodeSocket *GPU_material_uniform_value_origin(const GPUMaterial *mat,
                                                      const bNodeSocket *socket);

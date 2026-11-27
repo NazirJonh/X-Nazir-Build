@@ -4,7 +4,8 @@
 
 #pragma once
 
-#include "BLI_map.hh"
+#include <string>
+
 #include "BLI_vector.hh"
 
 #include "DNA_node_types.h"
@@ -39,33 +40,34 @@ struct InlineShaderNodeTreeParams {
   Vector<ErrorMessage> r_error_messages;
 
   /**
-   * Optional: when set, receives for every constant written into the inlined tree the socket whose
-   * stored value supplied it. A GPU material built for an engine that keeps socket values in a
-   * uniform buffer can then re-read those values on an edit instead of rebuilding the material.
+   * Optional: when set, the inliner records on every socket of the inlined tree that received a
+   * constant the source socket whose stored value supplied it (bke::bNodeSocketRuntime::value_origin).
+   * A GPU material built for an engine that keeps socket values in a uniform buffer can then
+   * re-read those values on an edit instead of rebuilding the material.
    *
-   * A socket without an entry either has no value of its own (a link) or its value is the result of
-   * a computation, which a value edit has to rebuild anyway.
+   * A socket without an origin either has no value of its own (a link) or its value is the result
+   * of a computation, which a value edit has to rebuild anyway.
    */
-  Map<const bNodeSocket *, const bNodeSocket *> *value_origin = nullptr;
+  bool track_value_origins = false;
 
   /**
    * Set when a node was constant-folded, i.e. the tree holds a value computed from other values
-   * instead of copied from a socket. #value_origin cannot name a source for such a value, so a
-   * reader that re-reads socket values must not trust the rest of the map either.
+   * instead of copied from a socket. An origin cannot name a source for such a value, so a reader
+   * that re-reads socket values must not trust the rest of the tree either.
    */
   bool r_had_folded_values = false;
 
   /**
-   * Used with #value_origin: a node that reads a value taken from a socket of one of these trees is
-   * copied to the result instead of being constant-folded (when it has a GPU function), so the value
-   * keeps its source socket and an edit can be applied without rebuilding.
+   * Used with #track_value_origins: a node that reads a value taken from a socket of one of these
+   * trees is copied to the result instead of being constant-folded (when it has a GPU function), so
+   * the value keeps its source socket and an edit can be applied without rebuilding.
    */
   Vector<const bNodeTree *> unfold_origin_trees;
 
   /**
-   * Filled when #value_origin is set: the source socket of every value a constant-folded node read.
-   * A folded result is only stale after an edit if one of these sockets is the one that was edited,
-   * so a reader can keep tracking values when none of them is.
+   * Filled when #track_value_origins is set: the source socket of every value a constant-folded
+   * node read. A folded result is only stale after an edit if one of these sockets is the one that
+   * was edited, so a reader can keep tracking values when none of them is.
    */
   Vector<const bNodeSocket *> r_folded_origins;
 };

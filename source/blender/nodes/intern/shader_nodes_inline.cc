@@ -1154,7 +1154,7 @@ class ShaderNodesInliner {
   /** True when an input value comes from a socket whose edits must stay traceable. */
   bool reads_unfoldable_origin(const NodeInContext &node)
   {
-    if (params_.value_origin == nullptr || params_.unfold_origin_trees.is_empty()) {
+    if (!params_.track_value_origins || params_.unfold_origin_trees.is_empty()) {
       return false;
     }
     for (const bNodeSocket *input_socket : node->input_sockets()) {
@@ -1216,7 +1216,7 @@ class ShaderNodesInliner {
       const SocketInContext input_socket_ctx = {node.context, input_socket};
       const SocketValue &socket_value = value_by_socket_.lookup(input_socket_ctx);
       const PrimitiveSocketValue value = *socket_value.to_primitive(*input_socket->typeinfo);
-      if (socket_value.origin != nullptr && params_.value_origin != nullptr) {
+      if (socket_value.origin != nullptr && params_.track_value_origins) {
         /* The folded result depends on this socket's value: a reader that re-reads values must
          * know, since it cannot name a source for the result. */
         params_.r_folded_origins.append(socket_value.origin);
@@ -1442,10 +1442,14 @@ class ShaderNodesInliner {
    */
   void record_value_origin(const bNodeSocket &dst_socket, const SocketValue &value)
   {
-    if (value.origin == nullptr || params_.value_origin == nullptr) {
+    if (value.origin == nullptr || !params_.track_value_origins) {
       return;
     }
-    params_.value_origin->add(&dst_socket, value.origin);
+    /* Stored on the socket itself (see bNodeSocketRuntime::value_origin): a pass that runs after
+     * inlining can create a socket at the address of a freed inlined one. */
+    if (dst_socket.runtime != nullptr) {
+      dst_socket.runtime->value_origin = value.origin;
+    }
   }
 
   NodeAndSocket primitive_value_to_output_socket(const PrimitiveSocketValue &value)

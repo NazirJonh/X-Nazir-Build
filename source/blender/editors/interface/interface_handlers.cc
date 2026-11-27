@@ -8154,6 +8154,17 @@ static bool numedit_but_RING_TRIANGLE(Button *but,
     if (snap != SNAP_OFF) {
       color_snap_hue(snap, &hsv[0]);
     }
+
+    /* A color without saturation (white or gray) has no hue to show, and a black color has no
+     * value: picking a hue on the ring would change nothing visible. Start from the color the
+     * ring shows under the cursor (full saturation and value), the value and saturation can
+     * then be adjusted in the triangle. */
+    if (hsv[1] <= 1e-5f) {
+      hsv[1] = 1.0f;
+    }
+    if (hsv[2] <= 1e-5f) {
+      hsv[2] = 1.0f;
+    }
   }
   else {
     hsvringtriangle_sv_from_pos(

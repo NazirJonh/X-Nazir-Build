@@ -19,7 +19,6 @@
 #include "DNA_world_types.h"
 
 #include "BLI_listbase.h"
-#include "BLI_map.hh"
 #include "BLI_math_vector.h"
 #include "BLI_string.h"
 #include "BLI_time.h"
@@ -175,8 +174,6 @@ struct GPUMaterial {
   bool values_required = false;
   /** True when this build recorded where its uniform values come from and can apply an edit. */
   bool values_tracked = false;
-  /** While building: where the values written into the inlined tree came from. */
-  const Map<const bNodeSocket *, const bNodeSocket *> *value_origin = nullptr;
 
   /**
    * A previous build kept only so the viewport keeps drawing it while this one compiles. It is
@@ -273,7 +270,6 @@ GPUMaterialFromNodeTreeResult GPU_material_from_nodetree(
   /* A layered material can take a value edit without a rebuild. Its generated tree names the row
    * values, so a socket written into the inlined tree has to be traced back to it; a build for any
    * other material records nothing and insists on being rebuilt, as before. */
-  Map<const bNodeSocket *, const bNodeSocket *> value_origin;
   const uint64_t value_generation = (ma != nullptr) ?
                                         BKE_material_paint_layers_topology_generation(*ma) :
                                         0;
@@ -288,14 +284,14 @@ GPUMaterialFromNodeTreeResult GPU_material_from_nodetree(
   nodes::InlineShaderNodeTreeParams inline_params;
   inline_params.allow_preserving_repeat_zones = true;
   inline_params.target_engine_ = engine == GPU_MAT_EEVEE ? SHD_OUTPUT_EEVEE : SHD_OUTPUT_ALL;
+  inline_params.track_value_origins = is_layered;
   if (is_layered) {
-    inline_params.value_origin = &value_origin;
     inline_params.unfold_origin_trees.append(ma->nodetree);
     inline_params.unfold_origin_trees.append(ma->paint_layers_tree);
   }
   nodes::inline_shader_node_tree(*ntree, *localtree, inline_params);
 
-  /* A folded value is computed from other values instead of copied from a socket, so the map cannot
+  /* A folded value is computed from other values instead of copied from a socket, so no origin can
    * name a source for it and a re-read would leave it stale. Such a tree asks for a rebuild. */
   /* Only a fold that read a socket a value edit writes is a problem: the same fold over a helper
    * group's own defaults stays right after any edit. */
@@ -315,9 +311,7 @@ GPUMaterialFromNodeTreeResult GPU_material_from_nodetree(
     result.errors.append({error.node, std::move(error.message)});
   }
 
-  mat->value_origin = mat->values_tracked ? &value_origin : nullptr;
   ntreeGPUMaterialNodes(localtree, mat);
-  mat->value_origin = nullptr;
 
   gpu_material_ramp_texture_build(mat);
   gpu_material_sky_texture_build(mat);
@@ -471,10 +465,12 @@ void GPU_materials_free_stale_images(ListBaseT<LinkData> *gpumaterials,
 const bNodeSocket *GPU_material_uniform_value_origin(const GPUMaterial *mat,
                                                      const bNodeSocket *socket)
 {
-  if (mat == nullptr || mat->value_origin == nullptr) {
+  if (mat == nullptr || !mat->values_tracked || socket == nullptr || socket->runtime == nullptr) {
     return nullptr;
   }
-  return mat->value_origin->lookup_default(socket, nullptr);
+  /* The origin lives on the socket itself (see bNodeSocketRuntime::value_origin), so a socket that
+   * reused the address of a freed inlined one cannot report the other socket's value. */
+  return socket->runtime->value_origin;
 }
 
 /** Read one float of a socket's stored value, without converting between socket types. */

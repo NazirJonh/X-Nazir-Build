@@ -234,6 +234,11 @@ struct MeshMapBakePairState {
   uint32_t object_session_uid = 0;
   int8_t type = MA_MESH_MAP_AO;
   int8_t previous_status = OB_MESH_MAP_STATUS_NONE;
+  /** The atlas side and the merge margin this pair bakes at, resolved from its slot. */
+  int resolution = 0;
+  int margin_pixels = 0;
+  /** The atlas copy the pair bakes into (#MaterialMeshMapSlot::uid); zero is the primary. */
+  int32_t slot_uid = 0;
   /** Whether #BKE_mesh_maps_bake_state_begin ran for this pair, so a cancel must restore it. */
   bool begun = false;
   uint32_t start_hash[2] = {0, 0};
@@ -248,12 +253,6 @@ struct MeshMapBakeJob {
   ViewLayer *view_layer = nullptr;
   Material *material = nullptr;
   uint32_t material_session_uid = 0;
-  /** The atlas side of the run, from the material's settings; the raster side lives in the
-   * world's #MeshMapBakeRaster snapshot. */
-  int atlas_resolution = 0;
-  /** The margin in atlas texels, from the material's settings; the raster-side margin is the
-   * world's #MeshMapBakeRaster snapshot. */
-  int margin_atlas_pixels = 0;
   ReportList *reports = nullptr;
 
   Vector<MeshMapBakePairState> pairs;
@@ -315,7 +314,7 @@ Mesh *mesh_map_bake_copy_mesh(Mesh *mesh_eval)
 }
 
 /** Cycles samples/denoise live on the scene's Python-side `cycles` group; set them when present. */
-void mesh_map_bake_apply_cycles_settings(Scene &scene, const MaterialMeshMapSettings &settings)
+void mesh_map_bake_apply_cycles_settings(Scene &scene, const bool denoise, const int samples)
 {
   PointerRNA scene_ptr = RNA_id_pointer_create(&scene.id);
   if (RNA_struct_find_property(&scene_ptr, "cycles") == nullptr) {
@@ -325,8 +324,8 @@ void mesh_map_bake_apply_cycles_settings(Scene &scene, const MaterialMeshMapSett
   if (cycles.data == nullptr) {
     return;
   }
-  RNA_int_set(&cycles, "samples", std::max(settings.samples, 1));
-  RNA_boolean_set(&cycles, "use_denoising", settings.use_denoise != 0);
+  RNA_int_set(&cycles, "samples", std::max(samples, 1));
+  RNA_boolean_set(&cycles, "use_denoising", denoise);
 }
 
 /** Build a render depsgraph for \a scene/\a view_layer, updated and ready to evaluate \a ob. */
@@ -581,8 +580,8 @@ bool mesh_map_bake_fill_curvature_filter(MeshMapBakeWorld &world,
    * every covered texel and still be committed as a successful bake, so the state of the same
    * object's Tangent Normal pair gates the filter. `is_current` catches VALID-but-old as well:
    * the tangent hash is compared against the viewport evaluation the bake itself uses. */
-  ObjectMeshMapState *normal_state = BKE_mesh_maps_object_state_find(
-      ob, ma, MA_MESH_MAP_NORMAL_TANGENT);
+  ObjectMeshMapState *normal_state = BKE_mesh_maps_object_state_find_uid(
+      ob, ma, MA_MESH_MAP_NORMAL_TANGENT, 0);
   if (normal_state == nullptr || normal_state->status != OB_MESH_MAP_STATUS_VALID) {
     BKE_mesh_maps_bake_state_fail(state);
     BLI_strncpy(pair.error,
@@ -875,6 +874,46 @@ bool mesh_map_bake_fill_cpu_map(MeshMapBakeWorld &world,
 
 
 /**
+ * Resolve the atlas the pair bakes into: the slot named by the pair's uid, and its float atlas at
+ * the pair's resolution, created on first use. Returns null -- with the pair and its state failed
+ * -- when the copy is gone or the atlas cannot be created.
+ */
+Image *mesh_map_bake_resolve_pair_atlas(Main &bmain,
+                                        Material &ma,
+                                        MeshMapBakePairState &pair,
+                                        ObjectMeshMapState &state)
+{
+  MaterialMeshMapSlot *pair_slot = BKE_mesh_maps_slot_find_uid(ma, pair.type, pair.slot_uid);
+  if (pair_slot == nullptr) {
+    if (pair.slot_uid == 0) {
+      /* The plan's primary pair for a type with no slot yet: the wrapper ensures the primary and
+       * creates its atlas, exactly as a fresh material's first bake always did. */
+      Image *atlas = BKE_mesh_maps_bake_atlas_ensure(
+          bmain, ma, pair.type, pair.resolution);
+      if (atlas == nullptr) {
+        BKE_mesh_maps_bake_state_fail(state);
+        BLI_strncpy(pair.error, "Could not create the mesh map atlas image", sizeof(pair.error));
+        pair.failed = true;
+        return nullptr;
+      }
+      return atlas;
+    }
+    BKE_mesh_maps_bake_state_fail(state);
+    BLI_strncpy(pair.error, "The atlas copy of this bake is gone", sizeof(pair.error));
+    pair.failed = true;
+    return nullptr;
+  }
+  Image *atlas = BKE_mesh_maps_bake_atlas_ensure_slot(bmain, *pair_slot, pair.resolution);
+  if (atlas == nullptr) {
+    BKE_mesh_maps_bake_state_fail(state);
+    BLI_strncpy(pair.error, "Could not create the mesh map atlas image", sizeof(pair.error));
+    pair.failed = true;
+    return nullptr;
+  }
+  return atlas;
+}
+
+/**
  * Build the private world for \a pair, rasterize its texels, fill the CPU ID result (or the render
  * world for a Cycles type) and leave the object state #OB_MESH_MAP_STATUS_BAKING (already entered).
  * On failure the state is marked #OB_MESH_MAP_STATUS_ERROR, \a pair records the message and false is
@@ -918,7 +957,8 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
 
   /* BAKING is entered lazily, when a pair is actually started, so pairs that never run keep their
    * previous status and the panel only shows "Baking..." for work in flight. */
-  ObjectMeshMapState *state = BKE_mesh_maps_object_state_ensure(*ob, *ma, pair.type);
+  ObjectMeshMapState *state = BKE_mesh_maps_object_state_ensure_uid(
+      *ob, *ma, pair.type, pair.slot_uid);
   if (state == nullptr) {
     BLI_strncpy(pair.error, "The object cannot hold a mesh map state", sizeof(pair.error));
     pair.failed = true;
@@ -1015,18 +1055,18 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
   const size_t budget_bytes = size_t(MESH_MAP_BAKE_MEMORY_LIMIT_MB) * 1024 * 1024;
   int supersampling = requested_supersampling;
   while (supersampling > 1) {
-    const bool fits = job.atlas_resolution * supersampling <=
+    const bool fits = pair.resolution * supersampling <=
                           MESH_MAP_BAKE_RENDER_RESOLUTION_LIMIT &&
                       BKE_mesh_maps_bake_estimate_bytes(
-                          job.atlas_resolution, supersampling, candidate_tiles) <= budget_bytes;
+                          pair.resolution, supersampling, candidate_tiles) <= budget_bytes;
     if (fits) {
       break;
     }
     supersampling--;
   }
-  const int render_resolution = job.atlas_resolution * supersampling;
+  const int render_resolution = pair.resolution * supersampling;
   const size_t estimate_bytes = BKE_mesh_maps_bake_estimate_bytes(
-      job.atlas_resolution, supersampling, candidate_tiles);
+      pair.resolution, supersampling, candidate_tiles);
   if (render_resolution > MESH_MAP_BAKE_RENDER_RESOLUTION_LIMIT ||
       estimate_bytes > budget_bytes)
   {
@@ -1047,7 +1087,7 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
   if (supersampling < requested_supersampling && job.reports != nullptr) {
     /* Both bounds clamp the factor down: name the one that actually refused the requested value. */
     const bool over_budget = BKE_mesh_maps_bake_estimate_bytes(
-                                 job.atlas_resolution, requested_supersampling, candidate_tiles) >
+                                 pair.resolution, requested_supersampling, candidate_tiles) >
                              budget_bytes;
     BKE_reportf(job.reports,
                 RPT_INFO,
@@ -1092,11 +1132,11 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
    * margin stays itself: the variant-A clear radius grows in atlas texels and has to match what
    * the merge and the extend are about to rewrite. */
   MeshMapBakeRaster &raster = job.world.raster;
-  raster.atlas_resolution = job.atlas_resolution;
+  raster.atlas_resolution = pair.resolution;
   raster.supersampling = supersampling;
   raster.raster_resolution = render_resolution;
-  raster.margin_atlas_pixels = job.margin_atlas_pixels;
-  raster.margin_raster_pixels = job.margin_atlas_pixels * supersampling;
+  raster.margin_atlas_pixels = pair.margin_pixels;
+  raster.margin_raster_pixels = pair.margin_pixels * supersampling;
   raster.margin_type = ma->mesh_map_settings.margin_type;
   raster.directx_normal = ma->mesh_map_settings.use_directx_normal != 0;
   raster.position_normalization = ma->mesh_map_settings.position_normalization;
@@ -1117,7 +1157,9 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
     job.world.temp_scene->r.ysch = render_resolution;
     job.world.temp_scene->r.size = 100;
     job.world.temp_scene->r.cfra = 1;
-    mesh_map_bake_apply_cycles_settings(*job.world.temp_scene, ma->mesh_map_settings);
+    mesh_map_bake_apply_cycles_settings(*job.world.temp_scene,
+                                        BKE_mesh_maps_bake_slot_denoise(*ma, pair.type),
+                                        BKE_mesh_maps_bake_slot_samples(*ma, pair.type));
 
     job.world.temp_object = BKE_object_add_for_data(job.world.temp_main,
                                                     job.world.temp_scene,
@@ -1144,11 +1186,12 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
     assign_material(job.world.temp_object);
     if (BKE_mesh_maps_bake_pass_for_type(pair.type) == SCE_PASS_EMIT) {
       const float ao_distance = BKE_mesh_maps_bake_ao_distance(*mesh_copy, ma->mesh_map_settings);
+      const int samples = BKE_mesh_maps_bake_slot_samples(*ma, pair.type);
       BKE_mesh_maps_bake_build_emit_tree(*temp_material->nodetree,
                                          pair.type,
                                          ma->mesh_map_settings,
                                          ao_distance,
-                                         ma->mesh_map_settings.samples);
+                                         samples);
       BKE_ntree_update_without_main(*temp_material->nodetree);
     }
 
@@ -1190,12 +1233,8 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
     }
   }
 
-  Image *atlas = BKE_mesh_maps_bake_atlas_ensure(
-      *job.bmain, *ma, pair.type, job.atlas_resolution);
+  Image *atlas = mesh_map_bake_resolve_pair_atlas(*job.bmain, *ma, pair, *state);
   if (atlas == nullptr) {
-    BKE_mesh_maps_bake_state_fail(*state);
-    BLI_strncpy(pair.error, "Could not create the mesh map atlas image", sizeof(pair.error));
-    pair.failed = true;
     return false;
   }
   job.world.atlas = atlas;
@@ -1288,7 +1327,7 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
   }
   for (const int tile_number : tile_numbers) {
     if (!BKE_paint_layers_map_coverage_tile_ensure(
-            *atlas, tile_number, job.atlas_resolution, job.atlas_resolution))
+            *atlas, tile_number, pair.resolution, pair.resolution))
     {
       BKE_mesh_maps_bake_state_fail(*state);
       BLI_snprintf(pair.error,
@@ -1661,7 +1700,8 @@ void mesh_map_bake_commit_current(MeshMapBakeJob &job, MeshMapBakePairState &pai
   if (ma == nullptr || ob == nullptr || !scene_alive || !view_layer_alive) {
     return;
   }
-  ObjectMeshMapState *state = BKE_mesh_maps_object_state_find(*ob, *ma, pair.type);
+  ObjectMeshMapState *state = BKE_mesh_maps_object_state_find_uid(
+      *ob, *ma, pair.type, pair.slot_uid);
   if (state == nullptr) {
     return;
   }
@@ -1686,8 +1726,14 @@ void mesh_map_bake_commit_current(MeshMapBakeJob &job, MeshMapBakePairState &pai
     return;
   }
 
-  Image *atlas = BKE_mesh_maps_bake_atlas_ensure(
-      *job.bmain, *ma, pair.type, world.raster.atlas_resolution);
+  MaterialMeshMapSlot *pair_slot = BKE_mesh_maps_slot_find_uid(*ma, pair.type, pair.slot_uid);
+  if (pair_slot == nullptr) {
+    BKE_mesh_maps_bake_state_fail(*state);
+    job.error_num++;
+    return;
+  }
+  Image *atlas = BKE_mesh_maps_bake_atlas_ensure_slot(
+      *job.bmain, *pair_slot, pair.resolution);
   if (atlas == nullptr) {
     BKE_mesh_maps_bake_state_fail(*state);
     BLI_strncpy(pair.error,
@@ -1852,7 +1898,9 @@ void mesh_map_bake_finalize(MeshMapBakeJob &job, const bool cancelled)
     if (ma == nullptr || ob == nullptr) {
       continue;
     }
-    if (ObjectMeshMapState *state = BKE_mesh_maps_object_state_find(*ob, *ma, pair.type)) {
+    if (ObjectMeshMapState *state = BKE_mesh_maps_object_state_find_uid(
+            *ob, *ma, pair.type, pair.slot_uid))
+    {
       BKE_mesh_maps_bake_state_cancel(*state, pair.previous_status);
     }
     job.cancelled_num++;
@@ -2010,14 +2058,6 @@ MeshMapBakeJob *mesh_map_bake_job_create(Main &bmain,
   job->view_layer = &view_layer;
   job->material = &ma;
   job->material_session_uid = ma.id.session_uid;
-  /* RNA clamps both, but hand-written DNA can carry anything and the budget math multiplies them:
-   * hold them to the constant bounds instead of trusting the DNA. */
-  job->atlas_resolution = std::clamp(ma.mesh_map_settings.resolution,
-                                     MESH_MAP_BAKE_RESOLUTION_MIN,
-                                     MESH_MAP_BAKE_RESOLUTION_MAX);
-  job->margin_atlas_pixels = std::clamp(int(std::lround(ma.mesh_map_settings.margin)),
-                                        0,
-                                        int(MESH_MAP_BAKE_MARGIN_MAX));
   job->reports = reports;
   job->pairs.reserve(plan.size());
 
@@ -2026,6 +2066,18 @@ MeshMapBakeJob *mesh_map_bake_job_create(Main &bmain,
     pair.object = p.object;
     pair.object_session_uid = p.object->id.session_uid;
     pair.type = p.type;
+    pair.slot_uid = p.slot_uid;
+    /* Each pair bakes at its own slot's resolution and merge margin: a slot override changes
+     * them for this map only, so the snapshot travels with the pair instead of the job. RNA
+     * clamps the overrides, but hand-written DNA can carry anything and the budget math
+     * multiplies them: hold them to the constant bounds instead of trusting the DNA. */
+    pair.resolution = std::clamp(BKE_mesh_maps_bake_slot_resolution(ma, p.type),
+                                 MESH_MAP_BAKE_RESOLUTION_MIN,
+                                 MESH_MAP_BAKE_RESOLUTION_MAX);
+    pair.margin_pixels = std::clamp(
+        int(std::lround(BKE_mesh_maps_bake_slot_margin(ma, p.type))),
+        0,
+        int(MESH_MAP_BAKE_MARGIN_MAX));
     job->pairs.append(pair);
   }
   return job;
@@ -2133,14 +2185,30 @@ MeshMapBakeJob *mesh_map_bake_build_job(bContext *C,
     BKE_report(op->reports, RPT_ERROR, "A mesh map bake is already running for this material");
     return nullptr;
   }
-  return mesh_map_bake_job_create(*CTX_data_main(C),
-                                  *CTX_data_scene(C),
-                                  *CTX_data_view_layer(C),
-                                  ob,
-                                  *ma,
-                                  object_scope,
-                                  type_mask,
-                                  op->reports);
+  MeshMapBakeJob *job = mesh_map_bake_job_create(*CTX_data_main(C),
+                                                 *CTX_data_scene(C),
+                                                 *CTX_data_view_layer(C),
+                                                 ob,
+                                                 *ma,
+                                                 object_scope,
+                                                 type_mask,
+                                                 op->reports);
+  if (job != nullptr) {
+    /* A negative UID bakes every copy of the included types; zero or more bakes exactly that
+     * copy, which the panel's per-slot quick bake uses. */
+    const int slot_uid = RNA_int_get(op->ptr, "slot_uid");
+    if (slot_uid >= 0) {
+      job->pairs.remove_if([&](const MeshMapBakePairState &pair) {
+        return pair.slot_uid != int32_t(slot_uid);
+      });
+      if (job->pairs.is_empty()) {
+        BKE_report(op->reports, RPT_ERROR, "No atlas copy matches this bake");
+        MEM_delete(job);
+        return nullptr;
+      }
+    }
+  }
+  return job;
 }
 
 wmOperatorStatus mesh_map_bake_exec(bContext *C, wmOperator *op)
@@ -2251,6 +2319,15 @@ void OBJECT_OT_mesh_map_bake(wmOperatorType *ot)
               "Object material slot to bake into, 0 for the active one",
               0,
               32767);
+  RNA_def_int(ot->srna,
+              "slot_uid",
+              -1,
+              -1,
+              INT32_MAX,
+              "Atlas Copy",
+              "Bake only this atlas copy's UID; negative bakes every copy of the type",
+              -1,
+              INT32_MAX);
 }
 
 void OBJECT_OT_mesh_map_bake_all(wmOperatorType *ot)
@@ -2287,6 +2364,15 @@ void OBJECT_OT_mesh_map_bake_all(wmOperatorType *ot)
               "Object material slot to bake into, 0 for the active one",
               0,
               32767);
+  RNA_def_int(ot->srna,
+              "slot_uid",
+              -1,
+              -1,
+              INT32_MAX,
+              "Atlas Copy",
+              "Bake only this atlas copy's UID; negative bakes every copy of the type",
+              -1,
+              INT32_MAX);
 }
 
 void OBJECT_OT_mesh_map_clear(wmOperatorType *ot)

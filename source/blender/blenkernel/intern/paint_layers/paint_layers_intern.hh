@@ -89,21 +89,26 @@ inline bool paint_layer_mesh_map_is_scalar(const int8_t type)
 /**
  * The atlas a MESH_MAP \a layer reads, when one is assigned, or null.
  *
- * A MESH_MAP row reads the material's atlas slot for its #MaterialPaintLayer::mesh_map_type; every
- * channel of the row reads the same Image. The one definition the generator and the CPU composite
- * both use, so the two cannot disagree about whether the row contributes at all. Null -- no slot or
- * no image -- means the row contributes nothing on either side.
+ * A MESH_MAP row reads the material's atlas slot for its #MaterialPaintLayer::mesh_map_type and
+ * its #MaterialPaintLayer::mesh_map_slot_uid; every channel of the row reads the same Image. The
+ * one definition the generator and the CPU composite both use, so the two cannot disagree about
+ * whether the row contributes at all. Null -- no slot or no image -- means the row contributes
+ * nothing on either side. A copy that was removed leaves the row empty instead of silently
+ * reading another copy's atlas.
  */
 inline Image *paint_layer_mesh_map_image(const Material &ma, const MaterialPaintLayer &layer)
 {
   if (layer.source != MA_PAINT_LAYER_SOURCE_MESH_MAP) {
     return nullptr;
   }
-  const MaterialMeshMapSlot *slot = BKE_mesh_maps_slot_find(ma, layer.mesh_map_type);
-  if (slot == nullptr) {
-    return nullptr;
+  /* A row names its atlas copy; zero is the type's primary, which #find returns first. */
+  if (layer.mesh_map_slot_uid == 0) {
+    const MaterialMeshMapSlot *slot = BKE_mesh_maps_slot_find(ma, layer.mesh_map_type);
+    return slot != nullptr ? slot->image : nullptr;
   }
-  return slot->image;
+  const MaterialMeshMapSlot *slot = BKE_mesh_maps_slot_find_uid(
+      ma, layer.mesh_map_type, layer.mesh_map_slot_uid);
+  return slot != nullptr ? slot->image : nullptr;
 }
 
 /**

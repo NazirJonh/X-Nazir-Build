@@ -37,7 +37,17 @@ struct Object;
 struct ObjectMeshMapSource;
 struct ObjectMeshMapState;
 
-/** The slot of \a ma for mesh map \a type, or null. A type outside the enum reads as null. */
+/**
+ * The slot of \a ma for mesh map \a type, or null. A type outside the enum reads as null.
+ *
+ * The type's primary (uid 0) slot wherever it sits, falling back to the first slot of the type
+ * when no uid-0 slot exists (the fallback is also what keeps #BKE_mesh_maps_slot_ensure from
+ * appending a second slot of the type). The primary normally sits first, because it is ensured
+ * before any copy is appended. That is what makes this the source resolver: the Packing channel
+ * atlases and the Curvature Normal Filter's Tangent Normal atlas are read through this function,
+ * so a bake source is always the type's primary (uid 0) atlas and the copies of the source type
+ * are never read as sources while the primary stands.
+ */
 MaterialMeshMapSlot *BKE_mesh_maps_slot_find(Material &ma, int8_t type);
 const MaterialMeshMapSlot *BKE_mesh_maps_slot_find(const Material &ma, int8_t type);
 
@@ -50,6 +60,41 @@ const MaterialMeshMapSlot *BKE_mesh_maps_slot_find(const Material &ma, int8_t ty
 MaterialMeshMapSlot *BKE_mesh_maps_slot_ensure(Material &ma, int8_t type);
 
 /**
+ * The slot of \a type whose \a uid names it, or null. Uid zero is the type's primary atlas, the
+ * one #BKE_mesh_maps_slot_find returns first.
+ *
+ * The lookup is a linear scan on the exact uid, so it never assumes the uids of one type are
+ * contiguous: values are only ever handed out by #BKE_mesh_maps_slot_new and never reused, and
+ * the holes a removal leaves behind are expected. A uid whose copy was removed resolves to null,
+ * which is what empties the copy's readers instead of silently rebinding them to another copy.
+ */
+MaterialMeshMapSlot *BKE_mesh_maps_slot_find_uid(Material &ma, int8_t type, int32_t uid);
+const MaterialMeshMapSlot *BKE_mesh_maps_slot_find_uid(const Material &ma,
+                                                       int8_t type,
+                                                       int32_t uid);
+
+/**
+ * Append a new copy of \a type with \a name (empty means the type's label) and a fresh uid from
+ * #Material::mesh_map_slot_uid_next. The copy starts with no atlas; bake it to fill one.
+ *
+ * The uid is only ever taken from the running counter and the counter never walks back, so a
+ * removed copy's uid is not reused and nothing that keyed it can come back pointing at a
+ * different copy. The copy is appended after the primary, so #BKE_mesh_maps_slot_find keeps
+ * resolving the primary first.
+ */
+MaterialMeshMapSlot *BKE_mesh_maps_slot_new(Material &ma, int8_t type, const char *name);
+
+/**
+ * Remove \a slot, releasing its atlas's user; true when it belonged to \a ma.
+ *
+ * The slot record and its Image user are all it touches. The per-object states and the MESH_MAP
+ * rows keyed on the slot's uid stay as they are: they stop resolving (the uid lookups return
+ * null), so a reader goes empty rather than reading another copy's atlas, and the stale state a
+ * removed copy leaves behind is reset by the next clear of its type or freed with the object.
+ */
+bool BKE_mesh_maps_slot_remove(Material &ma, MaterialMeshMapSlot *slot);
+
+/**
  * Point \a ma's mesh map \a type at \a image, or detach it with a null one. User counts are
  * maintained here, exactly as #BKE_paint_layers_channel_set_image does for a channel map.
  *
@@ -58,15 +103,43 @@ MaterialMeshMapSlot *BKE_mesh_maps_slot_ensure(Material &ma, int8_t type);
 bool BKE_mesh_maps_slot_image_set(Material &ma, int8_t type, Image *image);
 
 /**
+ * Point \a slot itself at \a image (or detach it), maintaining the Image user exactly like
+ * #BKE_mesh_maps_slot_image_set. Used when the caller already holds the exact copy's slot, so the
+ * type's primary is never touched.
+ */
+bool BKE_mesh_maps_slot_image_set_slot(MaterialMeshMapSlot &slot, Image *image);
+
+/**
  * The per-object state of mesh map \a type for object \a ob and material \a ma, or null.
  *
  * Entries whose material was removed (the pointer remapped to null) are skipped and dropped, so a
- * stale key can never dangle.
+ * stale key can never dangle. The uid is not part of this key: the first state of (material, type)
+ * in list order comes back, whichever copy it belongs to, so a caller that needs one copy's state
+ * in particular uses the find_uid/ensure_uid forms below.
  */
 ObjectMeshMapState *BKE_mesh_maps_object_state_find(Object &ob, const Material &ma, int8_t type);
 
-/** The state of \a ob for (\a ma, \a type), creating an empty one when absent. */
+/** The state of \a ob for (\a ma, \a type), creating an empty one (the primary's) when absent. */
 ObjectMeshMapState *BKE_mesh_maps_object_state_ensure(Object &ob, Material &ma, int8_t type);
+
+/**
+ * The state of one atlas copy, or null. Uid zero is the primary atlas's state.
+ *
+ * States key on (material, type, slot_uid), so every atlas copy of one type carries its own
+ * validity and hash and baking a copy never flips the primary's status. The content hash itself
+ * is keyed by type alone (see the hash section below), so the copies of one type share the same
+ * hash value. A state whose copy has been removed stays behind keyed on the dead uid -- inert,
+ * because nothing resolves to it anymore -- until the next clear of the type resets it or the
+ * object is freed.
+ */
+ObjectMeshMapState *BKE_mesh_maps_object_state_find_uid(Object &ob,
+                                                        const Material &ma,
+                                                        int8_t type,
+                                                        int32_t slot_uid);
+ObjectMeshMapState *BKE_mesh_maps_object_state_ensure_uid(Object &ob,
+                                                          Material &ma,
+                                                          int8_t type,
+                                                          int32_t slot_uid);
 
 /** Set the #eObjectMeshMapStatus of \a state. */
 void BKE_mesh_maps_object_state_status_set(ObjectMeshMapState &state, int8_t status);

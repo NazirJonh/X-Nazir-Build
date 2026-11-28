@@ -2261,8 +2261,13 @@ struct MaterialPaintLayer {
    * offsets of the older fields do not move.
    */
   float mask_contrast = 0.0f;
-  /** Keeps the struct size a multiple of 8 so an array of rows stays aligned. */
-  char _pad[4] = {};
+  /**
+   * The mesh map copy this row reads: the #MaterialMeshMapSlot::uid of the atlas it samples.
+   * Zero is the type's primary atlas; a row pointing at a removed copy contributes nothing rather
+   * than silently reading another atlas. It reuses the former tail padding, so the offsets of the
+   * fields after it do not move and a file written before the field reads a zero uid.
+   */
+  int32_t mesh_map_slot_uid = 0;
   /**
    * The owned payload of a #MA_PAINT_LAYER_SOURCE_TEXT row, or null for every other source. Owned
    * by the row (freed, copied and written with it); the Text object it names is a user, reported
@@ -2337,10 +2342,27 @@ struct MaterialPaintLayer {
   struct bNodeTree *kind_tree = nullptr;
 };
 
+/** #MaterialMeshMapSlot::flag */
+enum eMaterialMeshMapSlotFlag : int8_t {
+  /** The slot's atlas gets its own resolution instead of #MaterialMeshMapSettings.resolution. */
+  MA_MESH_MAP_SLOT_USE_RESOLUTION = 1 << 0,
+  /** The slot's bake gets its own sample count instead of #MaterialMeshMapSettings.samples. */
+  MA_MESH_MAP_SLOT_USE_SAMPLES = 1 << 1,
+  /** The slot's merge gets its own margin instead of #MaterialMeshMapSettings.margin. */
+  MA_MESH_MAP_SLOT_USE_MARGIN = 1 << 2,
+  /** The slot's render denoises instead of following #MaterialMeshMapSettings.use_denoise. */
+  MA_MESH_MAP_SLOT_USE_DENOISE = 1 << 3,
+};
+ENUM_OPERATORS(eMaterialMeshMapSlotFlag)
+
 /**
  * One shared atlas of a material: a #MaterialMeshMapSlot per #eMaterialMeshMapType, holding the
  * Image the material's MESH_MAP rows read. The pixels are a material resource because one material
  * is one generated shader shared by every object that uses it.
+ *
+ * A type also carries copies of its primary slot, appended after it and told apart by #uid. The
+ * copies own their own atlases, but they are never bake sources: the Packing channels and the
+ * Curvature Normal Filter read the primary (uid 0) atlas of the source type alone.
  */
 struct MaterialMeshMapSlot {
   DNA_DEFINE_CXX_METHODS(MaterialMeshMapSlot)
@@ -2348,9 +2370,31 @@ struct MaterialMeshMapSlot {
   struct MaterialMeshMapSlot *next = nullptr, *prev = nullptr;
   /** #eMaterialMeshMapType. */
   int8_t type = MA_MESH_MAP_AO;
-  char _pad[7] = {};
+  /** #eMaterialMeshMapSlotFlag. */
+  int8_t flag = 0;
+  char _pad[6] = {};
+  /**
+   * The copy's identity: zero is the type's primary atlas, every copy takes the next value of
+   * #Material::mesh_map_slot_uid_next. States and MESH_MAP rows key on it, so a removed copy
+   * leaves its readers empty instead of silently reading another copy's atlas.
+   */
+  int32_t uid = 0;
+  /** The copy's own name; empty means the type's label. */
+  char name[64] = "";
+  /** DNA requires #image at an 8-byte boundary; the name ends at a 4-byte one. */
+  char _pad2[4] = {};
   /** The shared atlas for this map type, or null while nothing is baked. */
   struct Image *image = nullptr;
+  /** Atlas side used when #MA_MESH_MAP_SLOT_USE_RESOLUTION is set. */
+  int resolution_override = 0;
+  /** Bake samples used when #MA_MESH_MAP_SLOT_USE_SAMPLES is set. */
+  int samples_override = 0;
+  /** UV margin in pixels used when #MA_MESH_MAP_SLOT_USE_MARGIN is set. */
+  float margin_override = 16.0f;
+  /** Denoise state used when #MA_MESH_MAP_SLOT_USE_DENOISE is set. */
+  int8_t denoise_override = 0;
+  /** Reserve; filled by a later update without changing the slot's size. */
+  char _pad3[3] = {};
 };
 
 /**
@@ -2403,7 +2447,7 @@ struct MaterialMeshMapSettings {
   int8_t use_directx_normal = 0;
   /* Appended in place of the v1 tail pad, so the earlier members and their pads keep their sizes
    * and order. The two bytes come before the float so it lands on its 4-byte boundary, and the
-   * struct still ends at 36 bytes, so the `_pad_tail[4]` of #Material below still closes it on the
+   * struct still ends at 36 bytes, so the #Material::mesh_map_slot_uid_next below closes it on the
    * pointer boundary (36 + 4 = 40). */
   /** #eMaterialMeshMapCurvatureMethod. */
   int8_t curvature_method = MA_MESH_MAP_CURVATURE_POINTINESS;
@@ -2635,12 +2679,18 @@ struct Material {
    * cache stale and schedules a re-bake.
    */
   uint64_t paint_layers_source_hash = 0;
-  /** The material's mesh map atlases, one #MaterialMeshMapSlot per #eMaterialMeshMapType. */
+  /** The material's mesh map atlases, one primary #MaterialMeshMapSlot per #eMaterialMeshMapType
+   * followed by any copies of it. The primary (uid 0) comes first, and the bake sources -- the
+   * Packing channels and the Curvature Normal Filter's Tangent Normal atlas -- resolve through it
+   * alone: the copies are read only when a row or a bake pair names them by uid. */
   ListBaseT<MaterialMeshMapSlot> mesh_map_slots = {nullptr, nullptr};
-  /** Bake/viewport settings shared by every mesh map of this material. */
+  /** Bake/viewport settings shared by every mesh map of this material. A slot can override the
+   * resolution, samples and margin per map (#eMaterialMeshMapSlotFlag); everything else is shared. */
   MaterialMeshMapSettings mesh_map_settings;
-  /** Explicit tail padding: the struct's pointer alignment must not leave uninitialized bytes. */
-  char _pad_tail[4] = {};
+  /** The next #MaterialMeshMapSlot::uid a copy takes; zero is the primary atlas of each type.
+   * It fills the four bytes the tail padding used to occupy, so #Material's size is unchanged and
+   * still ends on its pointer boundary. */
+  int mesh_map_slot_uid_next = 1;
 };
 
 }  // namespace blender

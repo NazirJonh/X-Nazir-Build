@@ -76,6 +76,30 @@ class MeshMapToolsTest(unittest.TestCase):
         # The replaced collection source is cleared by the same object-XOR-collection rule.
         self.assertIsNone(source.high_poly_collection)
 
+    def test_slot_new_remove_and_layer_reads_its_uid(self):
+        self.low.active_material = self.material
+        primary = self.material.mesh_map_slots.ensure(type='AO')
+        self.assertIsNotNone(primary)
+        self.assertEqual(primary.uid, 0)
+
+        result = bpy.ops.material.mesh_map_slot_new(type='AO', name="AO Copy")
+        self.assertEqual(result, {'FINISHED'})
+        copy = next(slot for slot in self.material.mesh_map_slots
+                    if slot.type == 'AO' and slot.uid != 0)
+        self.assertEqual(copy.name, "AO Copy")
+        self.assertGreater(copy.uid, 0)
+
+        result = bpy.ops.material.mesh_map_add_layer(type='AO', slot_uid=copy.uid)
+        self.assertEqual(result, {'FINISHED'})
+        layer = self.material.paint_layers.active
+        self.assertEqual(layer.mesh_map_type, 'AO')
+        self.assertEqual(layer.mesh_map_slot_uid, copy.uid)
+
+        result = bpy.ops.material.mesh_map_slot_remove(type='AO', slot_uid=copy.uid)
+        self.assertEqual(result, {'FINISHED'})
+        self.assertFalse(any(slot.type == 'AO' and slot.uid == copy.uid
+                             for slot in self.material.mesh_map_slots))
+
     def test_cage_preview_toggles_and_load_post_resets_it(self):
         from bl_operators import material_mesh_maps as ops
 

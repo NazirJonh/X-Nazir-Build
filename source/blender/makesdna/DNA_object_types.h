@@ -489,11 +489,14 @@ struct ObjectMeshMapState {
   uint32_t hash[2] = {};
   /** Unix time of the last successful bake, or zero. Stored as int: RNA has no 64-bit int. */
   int baked_time = 0;
+  /** The atlas copy this state describes (#MaterialMeshMapSlot::uid); zero is the primary. */
+  int32_t slot_uid = 0;
   /** #eMaterialMeshMapType. */
   int8_t type = 0;
   /** #eObjectMeshMapStatus. */
   int8_t status = OB_MESH_MAP_STATUS_NONE;
-  char _pad[2] = {};
+  /** Explicit tail padding: keeps the struct a multiple of 8 with the copy uid above. */
+  char _pad[6] = {};
 };
 
 /**

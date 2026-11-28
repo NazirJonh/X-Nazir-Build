@@ -102,6 +102,30 @@ eScenePassType BKE_mesh_maps_bake_pass_for_type(int8_t type);
 bool BKE_mesh_maps_bake_normal_space_for_type(int8_t type, eBakeSpace &r_space);
 
 /**
+ * The atlas side a bake of \a type on \a ma allocates: the slot's own resolution when
+ * #MA_MESH_MAP_SLOT_USE_RESOLUTION is set, otherwise #MaterialMeshMapSettings.resolution.
+ */
+int BKE_mesh_maps_bake_slot_resolution(const Material &ma, int8_t type);
+
+/**
+ * The sample count a bake of \a type on \a ma renders with: the slot's own samples when
+ * #MA_MESH_MAP_SLOT_USE_SAMPLES is set, otherwise #MaterialMeshMapSettings.samples.
+ */
+int BKE_mesh_maps_bake_slot_samples(const Material &ma, int8_t type);
+
+/**
+ * The UV margin in pixels a merge of \a type on \a ma expands: the slot's own margin when
+ * #MA_MESH_MAP_SLOT_USE_MARGIN is set, otherwise #MaterialMeshMapSettings.margin.
+ */
+float BKE_mesh_maps_bake_slot_margin(const Material &ma, int8_t type);
+
+/**
+ * Whether a render of \a type on \a ma denoises: the slot's own denoise when
+ * #MA_MESH_MAP_SLOT_USE_DENOISE is set, otherwise #MaterialMeshMapSettings.use_denoise.
+ */
+bool BKE_mesh_maps_bake_slot_denoise(const Material &ma, int8_t type);
+
+/**
  * Peak bytes one prepared pair needs, checked against #MESH_MAP_BAKE_MEMORY_LIMIT_MB before the
  * pair allocates: the raster's BakePixel + result + margin mask plus the margin phase's
  * raster-sized float ImBuf (69 bytes per raster texel per candidate tile -- `sizeof(BakePixel)`
@@ -555,8 +579,21 @@ int BKE_mesh_maps_bake_foreign_coverage(
  * An atlas built by a binary before the transparent-background change keeps an alpha-1 background,
  * and this call returns an existing atlas as is, so the invariant does not hold for it; such an
  * atlas is rebuilt by a Clear or a resolution change (pixels are not versioned).
+ *
+ * The slot is resolved like #BKE_mesh_maps_slot_find does: the primary (uid 0) atlas while it
+ * exists. A copy is never targeted while the primary stands -- copies own their atlases through
+ * #BKE_mesh_maps_bake_atlas_ensure_slot. Only a type left with no uid-0 slot at all lets its
+ * first remaining slot take the atlas here, exactly as the find resolves it.
  */
 Image *BKE_mesh_maps_bake_atlas_ensure(Main &bmain, Material &ma, int8_t type, int resolution);
+
+/**
+ * The same, for an exact atlas copy: the image lands on \a slot itself, so every copy owns its
+ * atlas.
+ */
+Image *BKE_mesh_maps_bake_atlas_ensure_slot(Main &bmain,
+                                            struct MaterialMeshMapSlot &slot,
+                                            int resolution);
 
 /**
  * The indices of \a tiles -- one `pixels_per_tile` block of \a pixels each, in order -- that hold
@@ -639,11 +676,13 @@ int8_t BKE_mesh_maps_bake_state_commit(ObjectMeshMapState &state,
  * rendering.
  * \{ */
 
-/** One (object, map type) of a bake-all run. */
+/** One (object, atlas copy) of a bake-all run. */
 struct MeshMapBakePair {
   Object *object;
   Material *material;
   int8_t type;
+  /** The atlas copy the pair bakes into (#MaterialMeshMapSlot::uid); zero is the primary. */
+  int32_t slot_uid;
 };
 
 /** Which objects a bake-all run targets. */
@@ -716,13 +755,17 @@ void BKE_mesh_maps_bake_states_rollback(Span<ObjectMeshMapState *> states,
                                         Span<int8_t> previous_statuses);
 
 /**
- * Clear \a ma's atlas for \a type: every texel becomes the pristine transparent black (RGBA = 0),
- * and every object state for (\a ma, \a type) in \a bmain goes back to #OB_MESH_MAP_STATUS_NONE
- * with its hash and time reset.
+ * Clear \a ma's atlases for \a type: every texel of every slot of the type -- the primary and
+ * each copy -- becomes the pristine transparent black (RGBA = 0), and every object state for
+ * (\a ma, \a type) in \a bmain, per-copy states included, goes back to
+ * #OB_MESH_MAP_STATUS_NONE with its hash and time reset.
  * Returns how many object states were reset.
  *
  * The whole atlas is cleared, not one object's pixels: the atlas is a shared material resource, and
  * a partial clear would leave other objects' states claiming VALID pixels that are now half gone.
+ * The same holds across the copies: a clear that skipped a copy's atlas would leave that copy's
+ * state claiming VALID pixels the clear just wiped. Two slots of the type that share one Image
+ * clear it once.
  */
 int BKE_mesh_maps_bake_clear_type(Main &bmain, Material &ma, int8_t type);
 

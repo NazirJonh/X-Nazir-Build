@@ -32,6 +32,8 @@ void rna_Material_mesh_map_slots_begin(CollectionPropertyIterator *iter, Pointer
 int rna_Material_mesh_map_slots_length(PointerRNA *ptr);
 MaterialMeshMapSlot *rna_Material_mesh_map_slots_ensure(Material *ma, int type);
 MaterialMeshMapSlot *rna_Material_mesh_map_slots_find(Material *ma, int type);
+MaterialMeshMapSlot *rna_Material_mesh_map_slots_new(Material *ma, int type, const char *name);
+bool rna_Material_mesh_map_slots_remove(Material *ma, MaterialMeshMapSlot *slot);
 bool rna_Material_mesh_map_type_is_bakeable(Material *ma, int type);
 void rna_Material_mesh_map_bake_target_objects_begin(CollectionPropertyIterator *iter,
                                                      PointerRNA *ptr);

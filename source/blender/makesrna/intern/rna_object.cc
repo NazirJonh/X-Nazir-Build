@@ -2735,12 +2735,14 @@ static int rna_Object_mesh_map_states_length(PointerRNA *ptr)
 
 static ObjectMeshMapState *rna_Object_mesh_map_states_ensure(Object *ob,
                                                              Material *material,
-                                                             int type)
+                                                             int type,
+                                                             int slot_uid)
 {
   if (ob == nullptr || material == nullptr) {
     return nullptr;
   }
-  return BKE_mesh_maps_object_state_ensure(*ob, *material, int8_t(type));
+  return BKE_mesh_maps_object_state_ensure_uid(
+      *ob, *material, int8_t(type), int32_t(slot_uid));
 }
 
 /**
@@ -3774,7 +3776,8 @@ static void rna_def_object_mesh_maps(BlenderRNA *brna, StructRNA *srna)
   RNA_def_struct_ui_text(coll_srna, "Mesh Map States", "Collection of mesh map bake states");
 
   func = RNA_def_function(coll_srna, "ensure", "rna_Object_mesh_map_states_ensure");
-  RNA_def_function_ui_description(func, "Get the state for a material and map type, creating it");
+  RNA_def_function_ui_description(
+      func, "Get the state for a material, map type and atlas copy, creating it");
   parm = RNA_def_pointer(
       func, "material", "Material", "Material", "The material whose atlas this state describes");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
@@ -3785,6 +3788,15 @@ static void rna_def_object_mesh_maps(BlenderRNA *brna, StructRNA *srna)
                       "Type",
                       "The mesh map type");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(func,
+                     "slot_uid",
+                     0,
+                     0,
+                     INT32_MAX,
+                     "Atlas Copy",
+                     "The atlas copy's UID; zero is the type's primary atlas",
+                     0,
+                     INT32_MAX);
   parm = RNA_def_pointer(func, "state", "ObjectMeshMapState", "", "The mesh map state");
   RNA_def_function_return(func, parm);
 
@@ -3966,6 +3978,13 @@ static void rna_def_object_mesh_maps(BlenderRNA *brna, StructRNA *srna)
   RNA_def_property_enum_funcs(prop, "rna_ObjectMeshMapState_status_get", nullptr, nullptr);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Status", "Bake state of this map");
+
+  prop = RNA_def_property(srna, "slot_uid", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "slot_uid");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Atlas Copy",
+                           "The atlas copy this state describes; zero is the primary atlas");
 
   prop = RNA_def_property(srna, "hash", PROP_STRING, PROP_NONE);
   RNA_def_property_string_funcs(prop,

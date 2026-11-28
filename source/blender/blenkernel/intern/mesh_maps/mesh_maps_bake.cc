@@ -95,6 +95,7 @@ BLI_STATIC_ASSERT(MESH_MAP_BAKE_TYPE_INFOS[MA_MESH_MAP_ID_MATERIAL].emit_tree_bu
 /* The DNA layout rule: every member aligned to its size and the struct size a multiple of 8;
  * makesdna enforces it when the SDNA is built, but this pins the C++ layout too, so an edit that
  * breaks the rule also fails every normal compile of the bake bookkeeping. */
+BLI_STATIC_ASSERT(sizeof(MaterialMeshMapSlot) == 120, "MaterialMeshMapSlot DNA 8-byte alignment");
 BLI_STATIC_ASSERT(sizeof(ObjectMeshMapSource) == 72, "ObjectMeshMapSource DNA 8-byte alignment");
 BLI_STATIC_ASSERT(offsetof(ObjectMeshMapSource, max_rear_ray_distance) == 56,
                   "ObjectMeshMapSource DNA layout changed");
@@ -161,6 +162,48 @@ bool BKE_mesh_maps_bake_type_scalar(const int8_t type)
 {
   const MeshMapTypeInfo *info = BKE_mesh_maps_type_info_get(type);
   return info != nullptr && (info->flags & MESH_MAP_TYPE_SCALAR) != 0;
+}
+
+int BKE_mesh_maps_bake_slot_resolution(const Material &ma, const int8_t type)
+{
+  const MaterialMeshMapSlot *slot = BKE_mesh_maps_slot_find(ma, type);
+  if (slot != nullptr && bool(slot->flag & MA_MESH_MAP_SLOT_USE_RESOLUTION) &&
+      slot->resolution_override > 0)
+  {
+    return slot->resolution_override;
+  }
+  return std::max(ma.mesh_map_settings.resolution, 1);
+}
+
+int BKE_mesh_maps_bake_slot_samples(const Material &ma, const int8_t type)
+{
+  const MaterialMeshMapSlot *slot = BKE_mesh_maps_slot_find(ma, type);
+  if (slot != nullptr && bool(slot->flag & MA_MESH_MAP_SLOT_USE_SAMPLES) &&
+      slot->samples_override > 0)
+  {
+    return slot->samples_override;
+  }
+  return std::max(ma.mesh_map_settings.samples, 1);
+}
+
+float BKE_mesh_maps_bake_slot_margin(const Material &ma, const int8_t type)
+{
+  const MaterialMeshMapSlot *slot = BKE_mesh_maps_slot_find(ma, type);
+  if (slot != nullptr && bool(slot->flag & MA_MESH_MAP_SLOT_USE_MARGIN) &&
+      slot->margin_override >= 0.0f)
+  {
+    return slot->margin_override;
+  }
+  return ma.mesh_map_settings.margin;
+}
+
+bool BKE_mesh_maps_bake_slot_denoise(const Material &ma, const int8_t type)
+{
+  const MaterialMeshMapSlot *slot = BKE_mesh_maps_slot_find(ma, type);
+  if (slot != nullptr && bool(slot->flag & MA_MESH_MAP_SLOT_USE_DENOISE)) {
+    return slot->denoise_override != 0;
+  }
+  return ma.mesh_map_settings.use_denoise != 0;
 }
 
 size_t BKE_mesh_maps_bake_estimate_bytes(const int atlas_resolution,
@@ -1653,26 +1696,23 @@ int BKE_mesh_maps_bake_foreign_coverage(Main &bmain,
   return foreign_num;
 }
 
-Image *BKE_mesh_maps_bake_atlas_ensure(Main &bmain,
-                                       Material &ma,
-                                       const int8_t type,
-                                       const int resolution)
+Image *BKE_mesh_maps_bake_atlas_ensure_slot(Main &bmain,
+                                           MaterialMeshMapSlot &slot,
+                                           const int resolution)
 {
+  const int8_t type = slot.type;
   if (!mesh_map_bake_type_valid(type) || resolution <= 0) {
     return nullptr;
   }
-  const MaterialMeshMapSlot *slot = BKE_mesh_maps_slot_find(ma, type);
-  if (slot != nullptr && slot->image != nullptr) {
+  if (slot.image != nullptr) {
     int width = 0;
     int height = 0;
-    BKE_image_get_size(slot->image, nullptr, &width, &height);
+    BKE_image_get_size(slot.image, nullptr, &width, &height);
     /* The atlas became a tiled image (the bake is one raster per UDIM tile), so a plain atlas from
      * an older file is replaced like one of another resolution: the fresh one takes the slot, and
      * the next bake fills its tiles from scratch. */
-    if (width == resolution && height == resolution &&
-        slot->image->source == IMA_SRC_TILED)
-    {
-      return slot->image;
+    if (width == resolution && height == resolution && slot.image->source == IMA_SRC_TILED) {
+      return slot.image;
     }
   }
   /* A pristine atlas is transparent black so alpha reads as the written mask; RGB stays 0 so
@@ -1695,10 +1735,31 @@ Image *BKE_mesh_maps_bake_atlas_ensure(Main &bmain,
     return nullptr;
   }
   image->alpha_mode = IMA_ALPHA_STRAIGHT;
-  if (!BKE_mesh_maps_slot_image_set(ma, type, image)) {
-    return nullptr;
+  /* The atlas lands on this copy's slot, not the type's primary: copies own their images. */
+  if (slot.image != nullptr) {
+    id_us_min(&slot.image->id);
   }
+  slot.image = image;
+  id_us_plus(&image->id);
   return image;
+}
+
+Image *BKE_mesh_maps_bake_atlas_ensure(Main &bmain,
+                                       Material &ma,
+                                       const int8_t type,
+                                       const int resolution)
+{
+  MaterialMeshMapSlot *slot = BKE_mesh_maps_slot_find(ma, type);
+  if (slot == nullptr) {
+    if (!mesh_map_bake_type_valid(type) || resolution <= 0) {
+      return nullptr;
+    }
+    slot = BKE_mesh_maps_slot_ensure(ma, type);
+    if (slot == nullptr) {
+      return nullptr;
+    }
+  }
+  return BKE_mesh_maps_bake_atlas_ensure_slot(bmain, *slot, resolution);
 }
 
 Vector<int> BKE_mesh_maps_bake_tiles_with_pixels(const Span<BakePixel> pixels,
@@ -1940,7 +2001,19 @@ void BKE_mesh_maps_bake_plan_pairs(Main &bmain,
       if (!BKE_mesh_maps_bake_type_is_supported(int8_t(type))) {
         continue;
       }
-      r_pairs.append(MeshMapBakePair{&ob, &ma, int8_t(type)});
+      /* Every atlas copy of the type bakes on its own: the primary first, then each copy in the
+       * slot order the material keeps. A type with no slot yet still contributes one primary pair,
+       * so a fresh material bakes exactly as before; the pair's atlas creation ensures the slot. */
+      bool has_slot = false;
+      for (MaterialMeshMapSlot &slot : ma.mesh_map_slots) {
+        if (slot.type == int8_t(type)) {
+          r_pairs.append(MeshMapBakePair{&ob, &ma, int8_t(type), slot.uid});
+          has_slot = true;
+        }
+      }
+      if (!has_slot) {
+        r_pairs.append(MeshMapBakePair{&ob, &ma, int8_t(type), 0});
+      }
     }
   }
   mesh_map_bake_plan_pairs_sort_dependencies(r_pairs, ma);
@@ -1964,45 +2037,52 @@ int BKE_mesh_maps_bake_clear_type(Main &bmain, Material &ma, const int8_t type)
   }
   int states_reset = 0;
   for (Object &ob : bmain.objects) {
-    ObjectMeshMapState *state = BKE_mesh_maps_object_state_find(ob, ma, type);
-    if (state == nullptr) {
-      continue;
+    for (ObjectMeshMapState &state : ob.mesh_map_states) {
+      if (state.material != &ma || state.type != type) {
+        continue;
+      }
+      state.status = OB_MESH_MAP_STATUS_NONE;
+      state.hash[0] = 0;
+      state.hash[1] = 0;
+      state.baked_time = 0;
+      states_reset++;
     }
-    state->status = OB_MESH_MAP_STATUS_NONE;
-    state->hash[0] = 0;
-    state->hash[1] = 0;
-    state->baked_time = 0;
-    states_reset++;
   }
 
-  MaterialMeshMapSlot *slot = BKE_mesh_maps_slot_find(ma, type);
-  if (slot == nullptr || slot->image == nullptr) {
-    return states_reset;
+  /* Every atlas copy of the type clears: a partial clear would leave a copy's state claiming
+   * VALID pixels the clear just wiped. Two slots may share one Image, so each distinct image
+   * clears exactly once. */
+  Vector<Image *> images;
+  for (MaterialMeshMapSlot &slot : ma.mesh_map_slots) {
+    if (slot.type == type && slot.image != nullptr && !images.contains(slot.image)) {
+      images.append(slot.image);
+    }
   }
-  Image *image = slot->image;
-  /* Every tile the atlas holds is cleared: the atlas is a tiled image, so a bake that covered a
+  /* Every tile each atlas holds is cleared: the atlas is a tiled image, so a bake that covered a
    * face on another UDIM tile has its texels there, not only in the base one. A tile without a
    * buffer holds no texels to clear and is skipped rather than generated for. */
-  BKE_image_tile_buffers_foreach(*image, [&](const int /*tile_number*/, ImBuf &ibuf) {
-    if (ibuf.float_data() != nullptr) {
-      float *data = ibuf.float_data_for_write();
-      const int channels = 4;
-      const size_t num = size_t(ibuf.x) * size_t(ibuf.y);
-      for (size_t i = 0; i < num; i++) {
-        float *texel = data + i * size_t(channels);
-        texel[0] = 0.0f;
-        texel[1] = 0.0f;
-        texel[2] = 0.0f;
-        texel[3] = 0.0f;
+  for (Image *image : images) {
+    BKE_image_tile_buffers_foreach(*image, [&](const int /*tile_number*/, ImBuf &ibuf) {
+      if (ibuf.float_data() != nullptr) {
+        float *data = ibuf.float_data_for_write();
+        const int channels = 4;
+        const size_t num = size_t(ibuf.x) * size_t(ibuf.y);
+        for (size_t i = 0; i < num; i++) {
+          float *texel = data + i * size_t(channels);
+          texel[0] = 0.0f;
+          texel[1] = 0.0f;
+          texel[2] = 0.0f;
+          texel[3] = 0.0f;
+        }
+        ibuf.userflags |= IB_DISPLAY_BUFFER_INVALID;
+        BKE_image_mark_dirty(image, &ibuf);
       }
-      ibuf.userflags |= IB_DISPLAY_BUFFER_INVALID;
-      BKE_image_mark_dirty(image, &ibuf);
-    }
-    return true;
-  });
-  BKE_image_partial_update_mark_full_update(image);
-  BKE_image_free_gputextures(image);
-  BKE_image_memorypack(image);
+      return true;
+    });
+    BKE_image_partial_update_mark_full_update(image);
+    BKE_image_free_gputextures(image);
+    BKE_image_memorypack(image);
+  }
   return states_reset;
 }
 

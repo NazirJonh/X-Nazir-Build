@@ -111,6 +111,16 @@ MaterialMeshMapSlot *rna_Material_mesh_map_slots_find(Material *ma, int type)
   return BKE_mesh_maps_slot_find(*ma, int8_t(type));
 }
 
+MaterialMeshMapSlot *rna_Material_mesh_map_slots_new(Material *ma, int type, const char *name)
+{
+  return BKE_mesh_maps_slot_new(*ma, int8_t(type), name);
+}
+
+bool rna_Material_mesh_map_slots_remove(Material *ma, MaterialMeshMapSlot *slot)
+{
+  return BKE_mesh_maps_slot_remove(*ma, slot);
+}
+
 bool rna_Material_mesh_map_type_is_bakeable(Material * /*ma*/, int type)
 {
   return BKE_mesh_maps_bake_type_is_supported(int8_t(type));
@@ -162,8 +172,11 @@ PointerRNA rna_MaterialMeshMapSlot_atlas_image_get(PointerRNA *ptr)
 void rna_MaterialMeshMapSlot_image_set(PointerRNA *ptr, PointerRNA value, ReportList *)
 {
   MaterialMeshMapSlot *slot = static_cast<MaterialMeshMapSlot *>(ptr->data);
-  Material *ma = id_cast<Material *>(ptr->owner_id);
-  BKE_mesh_maps_slot_image_set(*ma, slot->type, static_cast<Image *>(value.data));
+  if (slot == nullptr) {
+    return;
+  }
+  /* The exact slot, not the type's primary: a copy owns its own atlas. */
+  BKE_mesh_maps_slot_image_set_slot(*slot, static_cast<Image *>(value.data));
 }
 
 PointerRNA rna_Material_mesh_map_settings_get(PointerRNA *ptr)
@@ -296,6 +309,30 @@ void rna_def_material_mesh_maps(BlenderRNA *brna, StructRNA *srna)
   parm = RNA_def_pointer(func, "slot", "MaterialMeshMapSlot", "", "The mesh map slot, or none");
   RNA_def_function_return(func, parm);
 
+  func = RNA_def_function(coll_srna, "new", "rna_Material_mesh_map_slots_new");
+  RNA_def_function_ui_description(
+      func,
+      "Append a new copy of a map type with its own atlas, named 'name'; the copy starts empty "
+      "and bakes on its own");
+  parm = RNA_def_enum(func,
+                      "type",
+                      rna_enum_material_mesh_map_type_items,
+                      MA_MESH_MAP_AO,
+                      "Type",
+                      "The mesh map type the copy bakes");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(func, "name", nullptr, 64, "Name", "The copy's name; empty uses the type");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "slot", "MaterialMeshMapSlot", "", "The new copy's slot");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(coll_srna, "remove", "rna_Material_mesh_map_slots_remove");
+  RNA_def_function_ui_description(func, "Remove a slot and release its atlas");
+  parm = RNA_def_pointer(func, "slot", "MaterialMeshMapSlot", "", "The slot to remove");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_boolean(func, "result", false, "", "Whether the slot was removed");
+  RNA_def_function_return(func, parm);
+
   func = RNA_def_function(
       srna, "mesh_map_type_is_bakeable", "rna_Material_mesh_map_type_is_bakeable");
   RNA_def_function_ui_description(
@@ -339,6 +376,17 @@ void rna_def_material_mesh_maps(BlenderRNA *brna, StructRNA *srna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Type", "The mesh map this slot holds");
 
+  prop = RNA_def_property(slot_srna, "uid", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "uid");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "UID", "The atlas copy's identity; zero is the type's primary atlas");
+
+  prop = RNA_def_property(slot_srna, "name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "name");
+  RNA_def_property_string_maxlength(prop, 64);
+  rna_def_mesh_map_ui_update(prop, "Name", "The copy's own name; empty shows the type's label");
+
   prop = RNA_def_property(slot_srna, "image", PROP_POINTER, PROP_NONE);
   RNA_def_property_struct_type(prop, "Image");
   RNA_def_property_pointer_sdna(prop, nullptr, "image");
@@ -355,6 +403,49 @@ void rna_def_material_mesh_maps(BlenderRNA *brna, StructRNA *srna)
       prop, "rna_MaterialMeshMapSlot_atlas_image_get", nullptr, nullptr, nullptr);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Atlas Image", "The shared atlas this slot holds, or none");
+
+  /* The per-map overrides: each flag moves its own value out of the shared settings for this map
+   * only, so a bake of one map can deviate (a cheaper AO, a larger margin on the UV-heavy maps)
+   * without touching the other atlases. */
+  prop = RNA_def_property(slot_srna, "use_resolution_override", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", MA_MESH_MAP_SLOT_USE_RESOLUTION);
+  rna_def_mesh_map_ui_update(
+      prop, "Override Resolution", "Bake this map's atlas at its own resolution");
+
+  prop = RNA_def_property(slot_srna, "resolution_override", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "resolution_override");
+  RNA_def_property_range(prop, MESH_MAP_BAKE_RESOLUTION_MIN, MESH_MAP_BAKE_RESOLUTION_MAX);
+  rna_def_mesh_map_ui_update(prop, "Resolution", "Square side this map's atlas is allocated at");
+
+  prop = RNA_def_property(slot_srna, "use_samples_override", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", MA_MESH_MAP_SLOT_USE_SAMPLES);
+  rna_def_mesh_map_ui_update(
+      prop, "Override Samples", "Bake this map's renders with their own sample count");
+
+  prop = RNA_def_property(slot_srna, "samples_override", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "samples_override");
+  RNA_def_property_range(prop, MESH_MAP_BAKE_SAMPLES_MIN, MESH_MAP_BAKE_SAMPLES_MAX);
+  rna_def_mesh_map_ui_update(prop, "Samples", "Cycles samples this map's bake renders with");
+
+  prop = RNA_def_property(slot_srna, "use_margin_override", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", MA_MESH_MAP_SLOT_USE_MARGIN);
+  rna_def_mesh_map_ui_update(prop, "Override Margin", "Merge this map with its own UV margin");
+
+  prop = RNA_def_property(slot_srna, "margin_override", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "margin_override");
+  RNA_def_property_range(prop, 0.0f, MESH_MAP_BAKE_MARGIN_MAX);
+  rna_def_mesh_map_ui_update(prop, "Margin", "UV margin in pixels used while merging this map");
+
+  prop = RNA_def_property(slot_srna, "use_denoise_override", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", MA_MESH_MAP_SLOT_USE_DENOISE);
+  rna_def_mesh_map_ui_update(prop,
+                             "Override Denoise",
+                             "Denoise this map's renders on their own, regardless of the shared "
+                             "settings");
+
+  prop = RNA_def_property(slot_srna, "denoise_override", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "denoise_override", 1);
+  rna_def_mesh_map_ui_update(prop, "Denoise", "Ask Cycles to denoise this map's renders");
 
   /* settings */
   prop = RNA_def_property(srna, "mesh_map_settings", PROP_POINTER, PROP_NONE);

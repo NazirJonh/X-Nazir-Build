@@ -2977,4 +2977,150 @@ TEST_F(MeshMapBakeTest, fill_id_from_high_poly_skips_out_of_range_object)
   }
 }
 
+/**
+ * The atlas copies of one type are never bake sources: the Curvature Normal Filter resolves its
+ * source atlas through #BKE_mesh_maps_slot_find, so the source is the source type's primary
+ * (uid 0) atlas even while a copy of that type holds different pixels. Removing a copy empties
+ * its readers -- the uid stops resolving for slots, for the MESH_MAP rows and for the fresh uids
+ * -- instead of rebinding them to another copy's atlas.
+ */
+TEST_F(MeshMapBakeTest, a_copy_never_reads_another_copy_s_atlas)
+{
+  Material *ma = add_material("MapsMat");
+
+  /* The primary AO atlas carries one value, a copy of the same type carries another. */
+  Image *ao_primary = BKE_mesh_maps_bake_atlas_ensure(*bmain, *ma, MA_MESH_MAP_AO, 8);
+  ASSERT_NE(ao_primary, nullptr);
+  MaterialMeshMapSlot *ao_copy = BKE_mesh_maps_slot_new(*ma, MA_MESH_MAP_AO, "AO Copy");
+  ASSERT_NE(ao_copy, nullptr);
+  /* Copies never take the primary's uid. */
+  EXPECT_GT(ao_copy->uid, 0);
+  Image *ao_copy_atlas = BKE_mesh_maps_bake_atlas_ensure_slot(*bmain, *ao_copy, 8);
+  ASSERT_NE(ao_copy_atlas, nullptr);
+  EXPECT_NE(ao_copy_atlas, ao_primary);
+
+  /* The editors' source resolution, pinned here: a type with copies present still resolves to
+   * the primary (uid 0) slot and its image, never to the copy. */
+  const MaterialMeshMapSlot *source_slot = BKE_mesh_maps_slot_find(*ma, MA_MESH_MAP_AO);
+  ASSERT_NE(source_slot, nullptr);
+  EXPECT_EQ(source_slot->uid, 0);
+  EXPECT_EQ(source_slot->image, ao_primary);
+
+  /* The per-copy state keys on the copy's uid, apart from the primary's. The primary's state is
+   * created first, so the uid-less ensure keeps resolving it. */
+  Object *ob = add_empty("Ob");
+  ObjectMeshMapState *primary_state = BKE_mesh_maps_object_state_ensure(*ob, *ma, MA_MESH_MAP_AO);
+  ASSERT_NE(primary_state, nullptr);
+  ObjectMeshMapState *copy_state = BKE_mesh_maps_object_state_ensure_uid(
+      *ob, *ma, MA_MESH_MAP_AO, ao_copy->uid);
+  ASSERT_NE(copy_state, nullptr);
+  EXPECT_NE(copy_state, primary_state);
+
+  /* Removing the copy empties its readers instead of rebinding them: the uid stops resolving,
+   * the primary still stands first, and a fresh copy takes a fresh uid past the hole. */
+  const int32_t removed_uid = ao_copy->uid;
+  EXPECT_TRUE(BKE_mesh_maps_slot_remove(*ma, ao_copy));
+  EXPECT_EQ(BKE_mesh_maps_slot_find_uid(*ma, MA_MESH_MAP_AO, removed_uid), nullptr);
+  const MaterialMeshMapSlot *primary_after = BKE_mesh_maps_slot_find(*ma, MA_MESH_MAP_AO);
+  ASSERT_NE(primary_after, nullptr);
+  EXPECT_EQ(primary_after->uid, 0);
+  EXPECT_EQ(primary_after->image, ao_primary);
+  MaterialMeshMapSlot *next_copy = BKE_mesh_maps_slot_new(*ma, MA_MESH_MAP_AO, "AO Copy 2");
+  ASSERT_NE(next_copy, nullptr);
+  EXPECT_GT(next_copy->uid, removed_uid);
+
+  /* A MESH_MAP row keyed on the removed copy reads nothing: no slot, no image. */
+  MaterialPaintLayer row;
+  row.source = MA_PAINT_LAYER_SOURCE_MESH_MAP;
+  row.mesh_map_type = MA_MESH_MAP_AO;
+  row.mesh_map_slot_uid = removed_uid;
+  EXPECT_EQ(paint_layer_mesh_map_image(*ma, row), nullptr);
+  row.mesh_map_slot_uid = 0;
+  EXPECT_EQ(paint_layer_mesh_map_image(*ma, row), primary_after->image);
+
+  /* The removed copy's state stays behind keyed on the dead uid -- inert, and unreachable by
+   * the fresh copy's uid -- until the next clear of the type resets it. */
+  EXPECT_EQ(BKE_mesh_maps_object_state_find_uid(*ob, *ma, MA_MESH_MAP_AO, removed_uid),
+            copy_state);
+  EXPECT_EQ(BKE_mesh_maps_object_state_find_uid(*ob, *ma, MA_MESH_MAP_AO, next_copy->uid),
+            nullptr);
+  /* Clearing the type resets both -- the primary's and the dead copy's. */
+  EXPECT_EQ(BKE_mesh_maps_bake_clear_type(*bmain, *ma, MA_MESH_MAP_AO), 2);
+  EXPECT_EQ(copy_state->status, OB_MESH_MAP_STATUS_NONE);
+  EXPECT_EQ(copy_state->hash[0], 0u);
+  EXPECT_EQ(primary_state->status, OB_MESH_MAP_STATUS_NONE);
+}
+
+/** The find names the type's uid-0 slot wherever it sits, and a copy that was appended before
+ * any primary exists keeps standing in without a second slot of the type behind it. */
+TEST_F(MeshMapBakeTest, slot_find_prefers_the_uid_0_slot_wherever_it_sits)
+{
+  Material *ma = add_material("MapsMat");
+  MaterialMeshMapSlot *primary = BKE_mesh_maps_slot_ensure(*ma, MA_MESH_MAP_AO);
+  ASSERT_NE(primary, nullptr);
+  EXPECT_EQ(primary->uid, 0);
+  MaterialMeshMapSlot *copy = BKE_mesh_maps_slot_new(*ma, MA_MESH_MAP_AO, "AO Copy");
+  ASSERT_NE(copy, nullptr);
+
+  /* The normal order: primary first, copies after. */
+  EXPECT_EQ(BKE_mesh_maps_slot_find(*ma, MA_MESH_MAP_AO), primary);
+
+  /* A copy appended before any primary exists is the type's first slot: the find falls back to
+   * it, and ensure keeps returning it instead of appending a second slot of the type. */
+  Material *other = add_material("OtherMat");
+  MaterialMeshMapSlot *orphan = BKE_mesh_maps_slot_new(*other, MA_MESH_MAP_AO, "AO Copy");
+  ASSERT_NE(orphan, nullptr);
+  EXPECT_EQ(BKE_mesh_maps_slot_find(*other, MA_MESH_MAP_AO), orphan);
+  EXPECT_EQ(BKE_mesh_maps_slot_ensure(*other, MA_MESH_MAP_AO), orphan);
+  EXPECT_EQ(BKE_mesh_maps_slot_find(*other, MA_MESH_MAP_AO), orphan);
+}
+
+/** A slot's overrides move the effective resolution, samples, margin and denoise for that map
+ * only, and the bake plan lists one pair per copy, primary first. */
+TEST_F(MeshMapBakeTest, slot_overrides_and_plan_cover_every_copy)
+{
+  Material *ma = add_material("MapsMat");
+  ma->mesh_map_settings.resolution = 64;
+  ma->mesh_map_settings.samples = 16;
+  ma->mesh_map_settings.margin = 8.0f;
+  ma->mesh_map_settings.use_denoise = 0;
+
+  MaterialMeshMapSlot *primary = BKE_mesh_maps_slot_ensure(*ma, MA_MESH_MAP_AO);
+  ASSERT_NE(primary, nullptr);
+  MaterialMeshMapSlot *copy = BKE_mesh_maps_slot_new(*ma, MA_MESH_MAP_AO, "AO Copy");
+  ASSERT_NE(copy, nullptr);
+
+  copy->flag |= MA_MESH_MAP_SLOT_USE_RESOLUTION;
+  copy->resolution_override = 512;
+  copy->flag |= MA_MESH_MAP_SLOT_USE_SAMPLES;
+  copy->samples_override = 64;
+  copy->flag |= MA_MESH_MAP_SLOT_USE_MARGIN;
+  copy->margin_override = 32.0f;
+  copy->flag |= MA_MESH_MAP_SLOT_USE_DENOISE;
+  copy->denoise_override = 1;
+
+  /* The source resolver reads the primary, whose overrides are not set: the shared settings. */
+  EXPECT_EQ(BKE_mesh_maps_bake_slot_resolution(*ma, MA_MESH_MAP_AO), 64);
+  EXPECT_EQ(BKE_mesh_maps_bake_slot_samples(*ma, MA_MESH_MAP_AO), 16);
+  EXPECT_FLOAT_EQ(BKE_mesh_maps_bake_slot_margin(*ma, MA_MESH_MAP_AO), 8.0f);
+  EXPECT_FALSE(BKE_mesh_maps_bake_slot_denoise(*ma, MA_MESH_MAP_AO));
+
+  /* The copy's own values still resolve by uid. */
+  EXPECT_EQ(copy->resolution_override, 512);
+  EXPECT_EQ(copy->samples_override, 64);
+  EXPECT_FLOAT_EQ(copy->margin_override, 32.0f);
+  EXPECT_EQ(copy->denoise_override, 1);
+
+  Mesh *mesh = add_quad_two_uv("PlanMesh");
+  Object *ob = add_simple_object("PlanOb", mesh, ma);
+  Vector<MeshMapBakePair> pairs;
+  BKE_mesh_maps_bake_plan_pairs(
+      *bmain, ob, *ma, MA_MESH_MAP_BAKE_ACTIVE_OBJECT, 1u << MA_MESH_MAP_AO, pairs);
+  ASSERT_GE(pairs.size(), 2);
+  EXPECT_EQ(pairs[0].type, MA_MESH_MAP_AO);
+  EXPECT_EQ(pairs[0].slot_uid, 0);
+  EXPECT_EQ(pairs[1].type, MA_MESH_MAP_AO);
+  EXPECT_EQ(pairs[1].slot_uid, copy->uid);
+}
+
 }  // namespace blender::bke::tests

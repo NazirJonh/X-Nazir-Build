@@ -10,7 +10,9 @@
  */
 
 #include "BKE_mesh_maps.hh"
+#include "BKE_mesh_maps_bake.hh"
 
+#include <algorithm>
 #include <cstddef>
 
 #include "BLI_array.hh"
@@ -20,6 +22,7 @@
 #include "BLI_hash_mm2a.hh"
 #include "BLI_listbase.h"
 #include "BLI_math_matrix.hh"
+#include "BLI_string.h"
 #include "BLI_string_ref.hh"
 #include "MEM_guardedalloc.h"
 
@@ -42,9 +45,9 @@
 
 namespace blender {
 
-/* The appended tail of #MaterialMeshMapSettings and the tail pad of #Material are one layout
- * contract: the settings grow by appending, and #Material's `_pad_tail[4]` keeps closing it on
- * the pointer boundary. The asserts fail to compile the day the pads drift. */
+/* The appended tail of #MaterialMeshMapSettings and the tail of #Material are one layout
+ * contract: the settings grow by appending, and #Material's closing int closes it on the pointer
+ * boundary. The asserts fail to compile the day the pads drift. */
 static_assert(sizeof(MaterialMeshMapSettings) == 36,
               "MaterialMeshMapSettings DNA layout changed");
 static_assert(offsetof(MaterialMeshMapSettings, cpu_rays) == 24,
@@ -55,8 +58,8 @@ static_assert(offsetof(MaterialMeshMapSettings, use_directx_normal) == 29,
               "MaterialMeshMapSettings DNA layout changed");
 static_assert(offsetof(Material, mesh_map_settings) % 8 == 0,
               "Material mesh_map_settings must stay pointer-aligned");
-static_assert(offsetof(Material, _pad_tail) + 4 == sizeof(Material),
-              "Material must end on its explicit tail pad without compiler padding");
+static_assert(offsetof(Material, mesh_map_slot_uid_next) + 4 == sizeof(Material),
+              "Material must end on its explicit tail int without compiler padding");
 
 bool BKE_mesh_maps_pair_renders(const Material &ma, const int8_t type)
 {
@@ -233,14 +236,28 @@ void mesh_map_source_add_collection(const Collection &collection,
 
 }  // namespace
 
+/* Bake sources rely on the find below for the primary-source rule: the Curvature Normal Filter
+ * resolves its source atlas through it, so it must name the type's primary (uid 0) atlas and
+ * never a copy while the primary stands. The uid-0 slot normally sits first, because it is
+ * ensured before any copy is appended; the scan still prefers it wherever it sits, so the rule
+ * keeps holding whatever order later edits leave behind. A type with no uid-0 slot at all falls
+ * back to its first remaining slot -- the same slot the ensure below reuses, so ensure never
+ * appends a second slot of the type behind a copy. */
 MaterialMeshMapSlot *BKE_mesh_maps_slot_find(Material &ma, const int8_t type)
 {
+  MaterialMeshMapSlot *first_of_type = nullptr;
   for (MaterialMeshMapSlot &slot : ma.mesh_map_slots) {
-    if (slot.type == type) {
+    if (slot.type != type) {
+      continue;
+    }
+    if (slot.uid == 0) {
       return &slot;
     }
+    if (first_of_type == nullptr) {
+      first_of_type = &slot;
+    }
   }
-  return nullptr;
+  return first_of_type;
 }
 
 const MaterialMeshMapSlot *BKE_mesh_maps_slot_find(const Material &ma, const int8_t type)
@@ -262,6 +279,76 @@ MaterialMeshMapSlot *BKE_mesh_maps_slot_ensure(Material &ma, const int8_t type)
   return slot;
 }
 
+/* A linear scan keyed on the exact uid: holes left by removed copies are fine, and a removed
+ * uid resolves to null, so its readers go empty instead of silently reading another copy's
+ * atlas. Nothing ever indexes slots by uid as a position. */
+MaterialMeshMapSlot *BKE_mesh_maps_slot_find_uid(Material &ma, const int8_t type, const int32_t uid)
+{
+  for (MaterialMeshMapSlot &slot : ma.mesh_map_slots) {
+    if (slot.type == type && slot.uid == uid) {
+      return &slot;
+    }
+  }
+  return nullptr;
+}
+
+const MaterialMeshMapSlot *BKE_mesh_maps_slot_find_uid(const Material &ma,
+                                                       const int8_t type,
+                                                       const int32_t uid)
+{
+  for (const MaterialMeshMapSlot &slot : ma.mesh_map_slots) {
+    if (slot.type == type && slot.uid == uid) {
+      return &slot;
+    }
+  }
+  return nullptr;
+}
+
+/* Uids only ever grow: a removed copy's value is not reused, so a state or a MESH_MAP row keyed
+ * on it can never come back pointing at a different copy. Holes from removals are expected. */
+MaterialMeshMapSlot *BKE_mesh_maps_slot_new(Material &ma, const int8_t type, const char *name)
+{
+  if (!mesh_map_type_valid(type)) {
+    return nullptr;
+  }
+  MaterialMeshMapSlot *slot = MEM_new<MaterialMeshMapSlot>(__func__);
+  slot->type = type;
+  slot->uid = std::max(ma.mesh_map_slot_uid_next, 1);
+  ma.mesh_map_slot_uid_next = slot->uid + 1;
+  if (name != nullptr) {
+    STRNCPY(slot->name, name);
+  }
+  BLI_addtail(&ma.mesh_map_slots, slot);
+  return slot;
+}
+
+/* Removing a copy touches its slot record and its Image user alone. The per-object states and
+ * the MESH_MAP rows keyed on the copy's uid are left as they are: they stop resolving (the
+ * find-by-uid above returns null), so a reader goes empty rather than rebinding to another
+ * copy, and the next clear of the type resets the stale state alongside the live ones. */
+bool BKE_mesh_maps_slot_remove(Material &ma, MaterialMeshMapSlot *slot)
+{
+  if (slot == nullptr) {
+    return false;
+  }
+  bool found = false;
+  for (MaterialMeshMapSlot &candidate : ma.mesh_map_slots) {
+    if (&candidate == slot) {
+      found = true;
+      break;
+    }
+  }
+  if (!found) {
+    return false;
+  }
+  if (slot->image != nullptr) {
+    id_us_min(&slot->image->id);
+  }
+  BLI_remlink(&ma.mesh_map_slots, slot);
+  MEM_delete(slot);
+  return true;
+}
+
 bool BKE_mesh_maps_slot_image_set(Material &ma, const int8_t type, Image *image)
 {
   MaterialMeshMapSlot *slot = BKE_mesh_maps_slot_find(ma, type);
@@ -271,15 +358,20 @@ bool BKE_mesh_maps_slot_image_set(Material &ma, const int8_t type, Image *image)
     }
     slot = BKE_mesh_maps_slot_ensure(ma, type);
   }
-  if (slot->image == image) {
+  return BKE_mesh_maps_slot_image_set_slot(*slot, image);
+}
+
+bool BKE_mesh_maps_slot_image_set_slot(MaterialMeshMapSlot &slot, Image *image)
+{
+  if (slot.image == image) {
     return true;
   }
-  if (slot->image != nullptr) {
-    id_us_min(&slot->image->id);
+  if (slot.image != nullptr) {
+    id_us_min(&slot.image->id);
   }
-  slot->image = image;
-  if (slot->image != nullptr) {
-    id_us_plus(&slot->image->id);
+  slot.image = image;
+  if (slot.image != nullptr) {
+    id_us_plus(&slot.image->id);
   }
   return true;
 }
@@ -332,6 +424,44 @@ ObjectMeshMapState *BKE_mesh_maps_object_state_ensure(Object &ob,
   ObjectMeshMapState *state = MEM_new<ObjectMeshMapState>(__func__);
   state->material = &ma;
   state->type = type;
+  state->status = OB_MESH_MAP_STATUS_NONE;
+  BLI_addtail(&ob.mesh_map_states, state);
+  return state;
+}
+
+/* The per-copy states key on (material, type, slot_uid): every atlas copy of one type carries
+ * its own validity and hash, so baking a copy never flips the primary's status. A state whose
+ * copy has been removed stays behind keyed on the dead uid -- inert, since nothing resolves to
+ * it anymore -- until the next clear of the type resets it or the object is freed. */
+ObjectMeshMapState *BKE_mesh_maps_object_state_find_uid(Object &ob,
+                                                        const Material &ma,
+                                                        const int8_t type,
+                                                        const int32_t slot_uid)
+{
+  BKE_mesh_maps_object_states_prune(ob);
+  for (ObjectMeshMapState &state : ob.mesh_map_states) {
+    if (state.material == &ma && state.type == type && state.slot_uid == slot_uid) {
+      return &state;
+    }
+  }
+  return nullptr;
+}
+
+ObjectMeshMapState *BKE_mesh_maps_object_state_ensure_uid(Object &ob,
+                                                          Material &ma,
+                                                          const int8_t type,
+                                                          const int32_t slot_uid)
+{
+  if (!mesh_map_type_valid(type)) {
+    return nullptr;
+  }
+  if (ObjectMeshMapState *existing = BKE_mesh_maps_object_state_find_uid(ob, ma, type, slot_uid)) {
+    return existing;
+  }
+  ObjectMeshMapState *state = MEM_new<ObjectMeshMapState>(__func__);
+  state->material = &ma;
+  state->type = type;
+  state->slot_uid = slot_uid;
   state->status = OB_MESH_MAP_STATUS_NONE;
   BLI_addtail(&ob.mesh_map_states, state);
   return state;
@@ -516,17 +646,20 @@ void BKE_mesh_maps_object_hash(const Object &ob_eval,
     h = mesh_map_hash_mix(h, 0x9E3779B97F4A7C15ull);
   }
 
-  /* Material settings that shape this type's bake. Resolution and margin are used by every merge;
+  /* Material settings that shape this type's bake. Resolution and margin come from the slot's
+   * effective values (a slot can override them per map) and are used by every merge;
    * samples/denoise belong to the ray-traced maps, ao_distance to AO and edge_radius to Edge. The
    * margin kind moves every merge, and the position and tangent encodings move their own types. */
-  h = mesh_map_hash_mix(h, uint64_t(uint32_t(ma.mesh_map_settings.resolution)));
-  h = mesh_map_hash_bytes(h, &ma.mesh_map_settings.margin, sizeof(float));
+  const uint32_t effective_resolution = uint32_t(BKE_mesh_maps_bake_slot_resolution(ma, type));
+  const float effective_margin = BKE_mesh_maps_bake_slot_margin(ma, type);
+  h = mesh_map_hash_mix(h, uint64_t(effective_resolution));
+  h = mesh_map_hash_bytes(h, &effective_margin, sizeof(float));
   h = mesh_map_hash_mix(h, uint64_t(uint8_t(ma.mesh_map_settings.margin_type)));
   /* The dilation pushes every merge's result further into the background. */
   h = mesh_map_hash_mix(h, uint64_t(uint8_t(ma.mesh_map_settings.dilate_iterations)));
   if (ELEM(type, MA_MESH_MAP_AO, MA_MESH_MAP_CURVATURE, MA_MESH_MAP_EDGE)) {
-    h = mesh_map_hash_mix(h, uint64_t(uint32_t(ma.mesh_map_settings.samples)));
-    h = mesh_map_hash_mix(h, uint64_t(ma.mesh_map_settings.use_denoise != 0 ? 1 : 0));
+    h = mesh_map_hash_mix(h, uint64_t(uint32_t(BKE_mesh_maps_bake_slot_samples(ma, type))));
+    h = mesh_map_hash_mix(h, uint64_t(BKE_mesh_maps_bake_slot_denoise(ma, type) ? 1 : 0));
   }
   if (BKE_mesh_maps_pair_renders(ma, type)) {
     /* The engine rasterizes at the supersampled size before the commit boxes down. */
@@ -557,9 +690,12 @@ void BKE_mesh_maps_object_hash(const Object &ob_eval,
     const Object *ob_orig = DEG_get_original(&ob_eval);
     ObjectMeshMapState *tangent_state = nullptr;
     if (ob_orig != nullptr) {
-      tangent_state = BKE_mesh_maps_object_state_find(const_cast<Object &>(*ob_orig),
-                                                      ma,
-                                                      MA_MESH_MAP_NORMAL_TANGENT);
+      /* The filter reads the type's primary (uid 0) Tangent Normal atlas, so its freshness is
+       * gated by the primary's state; a copy's bake never makes the filter's source valid. */
+      tangent_state = BKE_mesh_maps_object_state_find_uid(const_cast<Object &>(*ob_orig),
+                                                          ma,
+                                                          MA_MESH_MAP_NORMAL_TANGENT,
+                                                          0);
     }
     /* The filter composes over the baked Tangent Normal atlas, so the curvature's freshness
      * inherits the source slot's: while the atlas is not the valid baked one, the curvature claim
@@ -775,6 +911,7 @@ void BKE_mesh_maps_material_slots_copy(Material &ma_dst, const Material &ma_src)
   ma_dst.mesh_map_settings.curvature_method = ma_src.mesh_map_settings.curvature_method;
   ma_dst.mesh_map_settings.supersampling = ma_src.mesh_map_settings.supersampling;
   ma_dst.mesh_map_settings.curvature_radius = ma_src.mesh_map_settings.curvature_radius;
+  ma_dst.mesh_map_slot_uid_next = ma_src.mesh_map_slot_uid_next;
   ma_dst.mesh_map_slots = {nullptr, nullptr};
   for (const MaterialMeshMapSlot &src : ma_src.mesh_map_slots) {
     MaterialMeshMapSlot *dst = MEM_dupalloc(&src);

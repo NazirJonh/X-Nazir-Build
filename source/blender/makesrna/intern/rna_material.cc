@@ -3527,6 +3527,13 @@ static int rna_MaterialPaintLayer_mesh_map_type_editable(const PointerRNA *ptr,
   return layer->source == MA_PAINT_LAYER_SOURCE_MESH_MAP ? int(PROP_EDITABLE) : 0;
 }
 
+static int rna_MaterialPaintLayer_mesh_map_slot_uid_editable(const PointerRNA *ptr,
+                                                             const char ** /*r_info*/)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer->source == MA_PAINT_LAYER_SOURCE_MESH_MAP ? int(PROP_EDITABLE) : 0;
+}
+
 static void rna_MaterialPaintLayer_fill_color_get(PointerRNA *ptr, float *value)
 {
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
@@ -8652,6 +8659,16 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
                               nullptr);
   RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_mesh_map_type_editable");
   RNA_def_property_ui_text(prop, "Mesh Map", "The geometry map the row reads from the atlas");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "mesh_map_slot_uid", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "mesh_map_slot_uid");
+  RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_mesh_map_slot_uid_editable");
+  RNA_def_property_ui_text(
+      prop,
+      "Mesh Map Copy",
+      "The atlas copy the row reads: zero is the map's primary atlas, another value names a copy "
+      "by its UID; a removed copy leaves the row empty rather than reading another atlas");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   /* Read-only: the row is a Gradient generator, so the Gradient panel below applies. */

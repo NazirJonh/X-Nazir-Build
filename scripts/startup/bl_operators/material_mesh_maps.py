@@ -10,7 +10,7 @@ operators; everything goes through the layered material's active slot, the same 
 and the C++ bake job pick."""
 
 import bpy
-from bpy.props import EnumProperty, StringProperty
+from bpy.props import EnumProperty, IntProperty, StringProperty
 from bpy.types import Operator
 
 from bl_operators.material_paint_layers import context_material
@@ -92,6 +92,13 @@ class MATERIAL_OT_mesh_map_add_layer(Operator):
         items=lambda self, context: mesh_map_type_items(mesh_map_owner(context)),
     )
 
+    slot_uid: IntProperty(
+        name="Atlas Copy",
+        description="The atlas copy the layer reads; zero is the primary",
+        default=0,
+        min=0,
+    )
+
     @classmethod
     def poll(cls, context):
         return mesh_map_owner(context) is not None
@@ -103,8 +110,77 @@ class MATERIAL_OT_mesh_map_add_layer(Operator):
             self.report({'ERROR'}, "Cannot add Mesh Map layer")
             return {'CANCELLED'}
         layer.mesh_map_type = self.type
+        layer.mesh_map_slot_uid = self.slot_uid
         mat.paint_layers.active = layer
         return {'FINISHED'}
+
+
+class MATERIAL_OT_mesh_map_slot_new(Operator):
+    """Append a new copy of a map type: it gets its own atlas and bakes on its own"""
+
+    bl_idname = "material.mesh_map_slot_new"
+    bl_label = "Add Map Copy"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    type: EnumProperty(
+        name="Map Type",
+        items=lambda self, context: mesh_map_type_items(mesh_map_owner(context)),
+    )
+    name: StringProperty(
+        name="Name",
+        description="The copy's name; empty uses the type",
+        maxlen=64,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return mesh_map_owner(context) is not None
+
+    def invoke(self, context, _event):
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, _context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.prop(self, "name")
+
+    def execute(self, context):
+        mat = mesh_map_owner(context)
+        slot = mat.mesh_map_slots.new(type=self.type, name=self.name)
+        if slot is None:
+            self.report({'ERROR'}, "Cannot create the atlas copy")
+            return {'CANCELLED'}
+        self.report({'INFO'}, "Added atlas copy {:d}".format(slot.uid))
+        return {'FINISHED'}
+
+
+class MATERIAL_OT_mesh_map_slot_remove(Operator):
+    """Remove an atlas copy; layers reading it stay but sample nothing"""
+
+    bl_idname = "material.mesh_map_slot_remove"
+    bl_label = "Remove Map Copy"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    type: EnumProperty(
+        name="Map Type",
+        items=lambda self, context: mesh_map_type_items(mesh_map_owner(context)),
+    )
+    slot_uid: IntProperty(name="Atlas Copy", default=0, min=0)
+
+    @classmethod
+    def poll(cls, context):
+        return mesh_map_owner(context) is not None
+
+    def execute(self, context):
+        mat = mesh_map_owner(context)
+        slot = next((candidate for candidate in mat.mesh_map_slots
+                     if candidate.type == self.type and candidate.uid == self.slot_uid), None)
+        if slot is None:
+            return {'CANCELLED'}
+        if mat.mesh_map_slots.remove(slot=slot):
+            self.report({'INFO'}, "Removed the atlas copy")
+            return {'FINISHED'}
+        return {'CANCELLED'}
 
 
 class OBJECT_OT_mesh_map_source_add(Operator):
@@ -458,6 +534,8 @@ def mesh_map_summary_status(ob, mat):
 classes = (
     OBJECT_OT_mesh_map_refresh,
     MATERIAL_OT_mesh_map_add_layer,
+    MATERIAL_OT_mesh_map_slot_new,
+    MATERIAL_OT_mesh_map_slot_remove,
     OBJECT_OT_mesh_map_source_add,
     OBJECT_OT_mesh_map_source_remove,
     OBJECT_OT_mesh_map_source_match_by_name,

@@ -163,28 +163,93 @@ class LAYER_MATERIAL_PT_mesh_maps(LayerMaterialButtonsPanel, Panel):
                 )
 
     def _draw_map_row(self, layout, mat, map_type, type_label, states):
-        row = layout.row(align=True)
-        row.label(text=type_label)
-        state = states.get(map_type)
-        if state is None:
-            status_label, status_icon = mesh_map_status_ui('NONE')
-        else:
-            status_label, status_icon = mesh_map_status_ui(state.status)
-        row.label(text=status_label, icon=status_icon)
-        slot = mat.mesh_map_slots.find(type=map_type)
-        image = slot.image if slot is not None else None
-        row.label(text=image.name if image is not None else "\u2014")
+        """One expandable baker per map type: a header with the primary's status and a quick bake
+        over every copy, then one sub-row per atlas copy with its own bake and overrides."""
+        primary_state = states.get((map_type, 0))
+        status = primary_state.status if primary_state is not None else 'NONE'
+        status_label, status_icon = mesh_map_status_ui(status)
 
-        row.operator_context = 'INVOKE_DEFAULT'
-        bake = row.operator("object.mesh_map_bake", text="Bake", icon='RENDER_STILL')
+        baker_header, baker = layout.panel(
+            "mesh_map_baker_" + map_type.lower(), default_closed=(status == 'NONE'))
+        baker_header.label(text=type_label)
+        baker_header.label(text=status_label, icon=status_icon)
+        baker_header.operator_context = 'INVOKE_DEFAULT'
+        bake = baker_header.operator("object.mesh_map_bake", text="", icon='RENDER_STILL')
         bake.type = map_type
         bake.material_index = 0
-        row.operator_context = 'EXEC_DEFAULT'
+        baker_header.operator_context = 'EXEC_DEFAULT'
 
-        # No "Add Mask" here: a Mesh Map mask needs the mask-correction RNA to accept the
-        # Mesh Map source, which this build does not do yet.
-        row.operator(
-            "material.mesh_map_add_layer", text="Add Layer", icon='ADD').type = map_type
+        if not baker:
+            return
+
+        type_slots = [slot for slot in mat.mesh_map_slots if slot.type == map_type]
+        if not type_slots:
+            # No slot yet: the type's bake still works (it ensures the primary). Offer the
+            # primary layer so a fresh material is usable without a bake first.
+            placeholder = baker.row(align=True)
+            placeholder.label(text=type_label, icon='DOT')
+            placeholder.operator(
+                "material.mesh_map_add_layer", text="Add Layer", icon='ADD').type = map_type
+        for type_slot in type_slots:
+            slot_state = states.get((map_type, type_slot.uid))
+            slot_status = slot_state.status if slot_state is not None else 'NONE'
+            slot_status_label, slot_status_icon = mesh_map_status_ui(slot_status)
+            display = type_slot.name if type_slot.name else (
+                type_label + ("" if type_slot.uid == 0 else " (copy)"))
+
+            slot_header, slot_body = baker.panel(
+                "mesh_map_slot_%s_%d" % (map_type.lower(), type_slot.uid),
+                default_closed=(type_slot.uid != 0))
+            slot_header.label(
+                text=display,
+                icon='IMAGE_DATA' if type_slot.image is not None else 'DOT',
+            )
+            slot_header.label(text=slot_status_label, icon=slot_status_icon)
+            slot_header.operator_context = 'INVOKE_DEFAULT'
+            slot_bake = slot_header.operator(
+                "object.mesh_map_bake_all", text="", icon='RENDER_STILL')
+            slot_bake.types = {map_type}
+            slot_bake.slot_uid = type_slot.uid
+            slot_bake.material_index = 0
+            slot_header.operator_context = 'EXEC_DEFAULT'
+            if type_slot.uid != 0:
+                remove_slot = slot_header.operator(
+                    "material.mesh_map_slot_remove", text="", icon='X', emboss=False)
+                remove_slot.type = map_type
+                remove_slot.slot_uid = type_slot.uid
+
+            if slot_body:
+                # The per-map overrides: a copy can bake at its own resolution, sample count,
+                # merge margin and denoise state without touching the others.
+                slot_body.use_property_split = True
+                slot_body.prop(type_slot, "name")
+                override_col = slot_body.column(align=True)
+                override_col.prop(type_slot, "use_resolution_override")
+                if type_slot.use_resolution_override:
+                    override_col.prop(type_slot, "resolution_override")
+                override_col.prop(type_slot, "use_samples_override")
+                if type_slot.use_samples_override:
+                    override_col.prop(type_slot, "samples_override")
+                override_col.prop(type_slot, "use_margin_override")
+                if type_slot.use_margin_override:
+                    override_col.prop(type_slot, "margin_override")
+                override_col.prop(type_slot, "use_denoise_override")
+                if type_slot.use_denoise_override:
+                    override_col.prop(type_slot, "denoise_override")
+
+                action_row = slot_body.row(align=True)
+                add_layer = action_row.operator(
+                    "material.mesh_map_add_layer", text="Add Layer", icon='ADD')
+                add_layer.type = map_type
+                add_layer.slot_uid = type_slot.uid
+
+        add_copy = baker.operator(
+            "material.mesh_map_slot_new", text="Add Copy", icon='ADD')
+        add_copy.type = map_type
+
+        clear_row = baker.row(align=True)
+        clear_one = clear_row.operator("object.mesh_map_clear", text="Clear", icon='X')
+        clear_one.types = {map_type}
 
     def _draw_objects(self, layout, mat):
         objects = mesh_map_objects_for_material(mat)
@@ -218,7 +283,8 @@ class LAYER_MATERIAL_PT_mesh_maps(LayerMaterialButtonsPanel, Panel):
         self._draw_settings(layout, mat)
         self._draw_high_poly(layout, context, ob, mat)
 
-        states = {state.type: state for state in ob.mesh_map_states if state.material == mat}
+        states = {(state.type, state.slot_uid): state
+                  for state in ob.mesh_map_states if state.material == mat}
         for map_type, type_label, _description in mesh_map_type_items(mat):
             self._draw_map_row(layout, mat, map_type, type_label, states)
 

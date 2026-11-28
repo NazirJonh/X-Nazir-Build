@@ -62,12 +62,31 @@ class MeshMapToolsTest(unittest.TestCase):
             low_suffix="_low", high_suffix="_missing")
         self.assertEqual(result, {'CANCELLED'})
 
+    def test_match_by_name_replaces_a_collection_source_with_the_object_pair(self):
+        source = self.source()
+        collection = bpy.data.collections.new("Highs")
+        bpy.context.scene.collection.children.link(collection)
+        source.high_poly_collection = collection
+        self.assertIsNotNone(source.high_poly_collection)
+
+        result = bpy.ops.object.mesh_map_source_match_by_name(
+            low_suffix="_low", high_suffix="_high")
+        self.assertEqual(result, {'FINISHED'})
+        self.assertEqual(source.high_poly, self.high)
+        # The replaced collection source is cleared by the same object-XOR-collection rule.
+        self.assertIsNone(source.high_poly_collection)
+
     def test_cage_preview_toggles_and_load_post_resets_it(self):
         from bl_operators import material_mesh_maps as ops
 
         source = self.source()
         self.assertIsNotNone(source)
         source.cage = make_mesh_object("Cage", self.material)
+
+        # The cheap key reads the evaluated cage without building GPU batches; it must not raise.
+        key, cages = ops._mesh_map_cage_preview_geometry_key(bpy.context)
+        self.assertIsNotNone(key)
+        self.assertEqual(cages, (source.cage,))
 
         result = bpy.ops.object.mesh_map_cage_preview()
         self.assertEqual(result, {'FINISHED'})
@@ -81,12 +100,16 @@ class MeshMapToolsTest(unittest.TestCase):
         self.assertEqual(result, {'FINISHED'})
         self.assertTrue(ops.OBJECT_OT_mesh_map_cage_preview.is_running())
 
-        # Unregistering the module must not leave the draw handler or the load_post hook behind.
+        # Unregistering the module must not leave the draw handler or its hooks behind.
         ops.unregister()
         self.assertFalse(ops.OBJECT_OT_mesh_map_cage_preview.is_running())
         self.assertNotIn(ops._mesh_map_cage_preview_load_post, bpy.app.handlers.load_post)
+        self.assertNotIn(ops._mesh_map_cage_preview_depsgraph_update,
+                         bpy.app.handlers.depsgraph_update_post)
         ops.register()
         self.assertIn(ops._mesh_map_cage_preview_load_post, bpy.app.handlers.load_post)
+        self.assertIn(ops._mesh_map_cage_preview_depsgraph_update,
+                      bpy.app.handlers.depsgraph_update_post)
 
 
 if __name__ == "__main__":

@@ -114,7 +114,10 @@ static void cast_low_onto_highpoly(Mesh &low,
                                    const BakeRayLimits &ray_limits,
                                    MutableSpan<BakePixel> pixels_low,
                                    MutableSpan<BakePixel> pixels_high,
-                                   const int resolution)
+                                   const int resolution,
+                                   const float mat_low[4][4] = nullptr,
+                                   const float highpoly_obmat[4][4] = nullptr,
+                                   const float mat_cage[4][4] = nullptr)
 {
   populate_geometry_pixels(low, pixels_low, resolution, "UVMap", 1001);
 
@@ -128,8 +131,11 @@ static void cast_low_onto_highpoly(Mesh &low,
       {0.0f, 0.0f, 1.0f, 0.0f},
       {0.0f, 0.0f, 0.0f, 1.0f},
   };
-  copy_m4_m4(highpoly.obmat, identity);
-  copy_m4_m4(highpoly.imat, identity);
+  const float(*low_matrix)[4] = mat_low ? mat_low : identity;
+  const float(*high_matrix)[4] = highpoly_obmat ? highpoly_obmat : identity;
+  const float(*cage_matrix)[4] = mat_cage ? mat_cage : identity;
+  copy_m4_m4(highpoly.obmat, high_matrix);
+  invert_m4_m4(highpoly.imat, high_matrix);
 
   RE_bake_pixels_populate_from_objects(&low,
                                        pixels_low.data(),
@@ -140,8 +146,8 @@ static void cast_low_onto_highpoly(Mesh &low,
                                        is_custom_cage,
                                        cage_extrusion,
                                        ray_limits,
-                                       identity,
-                                       identity,
+                                       low_matrix,
+                                       cage_matrix,
                                        cage);
 }
 
@@ -165,6 +171,17 @@ static void translate_quad(Mesh &mesh, const float dx, const float dz)
     position.x += dx;
     position.z += dz;
   }
+  mesh.tag_positions_changed();
+}
+
+/** Put a quad's corners on the plane x + z = 0, whose normal is (1, 0, 1). */
+static void tilt_quad_on_the_diagonal_plane(Mesh &mesh)
+{
+  MutableSpan<float3> positions = mesh.vert_positions_for_write();
+  positions[0] = {0.0f, 0.0f, 0.0f};
+  positions[1] = {0.0f, 1.0f, 0.0f};
+  positions[2] = {-1.0f, 1.0f, 1.0f};
+  positions[3] = {-1.0f, 0.0f, 1.0f};
   mesh.tag_positions_changed();
 }
 
@@ -1067,7 +1084,156 @@ TEST_F(MeshMapBakeTest, populate_skew_bends_the_custom_cage_projection)
   EXPECT_GT(max_difference, 0.2f);
 }
 
-/** The default AO (global off) keeps the local flag: the bake traces the object alone. */
+/**
+ * A skew of ~0.5 between a cage direction and an opposing low-poly normal interpolates to a zero
+ * vector. The cast must fall back to the cage's unbent direction instead of silently losing the
+ * texel to a zero-direction ray.
+ */
+TEST_F(MeshMapBakeTest, populate_degenerate_skew_keeps_the_cage_direction)
+{
+  Material *ma = add_material("MapsMat");
+  Mesh *low = add_quad_two_uv("LowQuad");
+  Mesh *high = add_quad_two_uv("HighQuad");
+  translate_quad(*high, 0.0f, 0.2f);
+  Object *high_ob = add_simple_object("High", high, ma);
+  /* The cage sits below the surface: its cast direction points up, the low-poly normal down. */
+  Mesh *cage = add_quad_two_uv("CageQuad");
+  translate_quad(*cage, 0.0f, -0.1f);
+
+  const int resolution = 4;
+  Array<BakePixel> pixels_low(resolution * resolution);
+  Array<BakePixel> pixels_high(resolution * resolution);
+
+  BakeRayLimits limits;
+  limits.max_ray_distance = 1.0f;
+  limits.skew = 0.5f;
+  cast_low_onto_highpoly(
+      *low, *high, *high_ob, true, cage, 0.0f, limits, pixels_low, pixels_high, resolution);
+  EXPECT_GT(count_cast_hits(pixels_high), 0);
+}
+
+/**
+ * An auto-cage (cage mesh present, `is_custom_cage` false) classifies frontal/rear hits against the
+ * low-poly surface, not the cage's own normal. The cage here is deliberately flipped: if its
+ * normal were used, the hit above it would count as rear and the short rear limit would drop it.
+ */
+TEST_F(MeshMapBakeTest, populate_auto_cage_classifies_with_the_low_poly_normal)
+{
+  Material *ma = add_material("MapsMat");
+  Mesh *low = add_quad_two_uv("LowQuad");
+  Mesh *high = add_quad_two_uv("HighQuad");
+  translate_quad(*high, 0.0f, 0.4f);
+  Object *high_ob = add_simple_object("High", high, ma);
+
+  Mesh *cage = add_quad_two_uv("CageQuad");
+  translate_quad(*cage, 0.0f, 0.2f);
+  MutableSpan<int> corner_verts = cage->corner_verts_for_write();
+  std::swap(corner_verts[1], corner_verts[3]);
+  cage->tag_topology_changed();
+
+  const int resolution = 4;
+  Array<BakePixel> pixels_low(resolution * resolution);
+  Array<BakePixel> pixels_high(resolution * resolution);
+
+  BakeRayLimits limits;
+  limits.max_ray_distance = 1.0f;
+  limits.max_rear_ray_distance = 0.1f;
+  cast_low_onto_highpoly(
+      *low, *high, *high_ob, false, cage, 0.0f, limits, pixels_low, pixels_high, resolution);
+  EXPECT_GT(count_cast_hits(pixels_high), 0);
+}
+
+/**
+ * Normals are transformed by the inverse transpose, so a non-uniformly scaled high-poly still
+ * reports its true face normal to the backface filter. The low-poly and the high-poly lie on the
+ * plane x + z = 0, scaled 2x on X; the custom cage casts along (1, 0, -1) on that plane. The plain
+ * mat3 transform would turn the face normal to (2, 0, 1) and wrongly call this a backface.
+ */
+TEST_F(MeshMapBakeTest, populate_backfacing_uses_inverse_transpose_for_non_uniform_scale)
+{
+  Material *ma = add_material("MapsMat");
+  Mesh *low = add_quad_two_uv("LowQuad");
+  Mesh *high = add_quad_two_uv("HighQuad");
+  Mesh *cage = add_quad_two_uv("CageQuad");
+  tilt_quad_on_the_diagonal_plane(*low);
+  tilt_quad_on_the_diagonal_plane(*high);
+  tilt_quad_on_the_diagonal_plane(*cage);
+  Object *high_ob = add_simple_object("High", high, ma);
+
+  const float scale_x2[4][4] = {
+      {2.0f, 0.0f, 0.0f, 0.0f},
+      {0.0f, 1.0f, 0.0f, 0.0f},
+      {0.0f, 0.0f, 1.0f, 0.0f},
+      {0.0f, 0.0f, 0.0f, 1.0f},
+  };
+  /* Shift the cage by half the (1, 0, -1)/sqrt(2) cast direction, so rays run along that diagonal
+   * and start outside the surface. */
+  const float cage_matrix[4][4] = {
+      {2.0f, 0.0f, 0.0f, 0.0f},
+      {0.0f, 1.0f, 0.0f, 0.0f},
+      {0.0f, 0.0f, 1.0f, 0.0f},
+      {-0.35355339f, 0.0f, 0.35355339f, 1.0f},
+  };
+
+  const int resolution = 8;
+  Array<BakePixel> pixels_low(resolution * resolution);
+  Array<BakePixel> pixels_high(resolution * resolution);
+
+  BakeRayLimits limits;
+  limits.max_ray_distance = 1.0f;
+  limits.ignore_backfacing = true;
+  cast_low_onto_highpoly(*low,
+                         *high,
+                         *high_ob,
+                         true,
+                         cage,
+                         0.0f,
+                         limits,
+                         pixels_low,
+                         pixels_high,
+                         resolution,
+                         scale_x2,
+                         scale_x2,
+                         cage_matrix);
+  EXPECT_GT(count_cast_hits(pixels_high), 0);
+}
+
+/** A mirrored low-poly matrix still casts front hits: the normal keeps its direction, not a flip. */
+TEST_F(MeshMapBakeTest, populate_mirrored_low_matrix_keeps_the_cast)
+{
+  Material *ma = add_material("MapsMat");
+  Mesh *low = add_quad_two_uv("LowQuad");
+  Mesh *high = add_quad_two_uv("HighQuad");
+  Object *high_ob = add_simple_object("High", high, ma);
+
+  const float mirror_x[4][4] = {
+      {-1.0f, 0.0f, 0.0f, 0.0f},
+      {0.0f, 1.0f, 0.0f, 0.0f},
+      {0.0f, 0.0f, 1.0f, 0.0f},
+      {0.0f, 0.0f, 0.0f, 1.0f},
+  };
+
+  const int resolution = 4;
+  Array<BakePixel> pixels_low(resolution * resolution);
+  Array<BakePixel> pixels_high(resolution * resolution);
+
+  BakeRayLimits limits;
+  limits.max_ray_distance = 1.0f;
+  limits.ignore_backfacing = true;
+  cast_low_onto_highpoly(*low,
+                         *high,
+                         *high_ob,
+                         false,
+                         nullptr,
+                         0.2f,
+                         limits,
+                         pixels_low,
+                         pixels_high,
+                         resolution,
+                         mirror_x,
+                         mirror_x);
+  EXPECT_GT(count_cast_hits(pixels_high), 0);
+}
 TEST_F(MeshMapBakeTest, emit_tree_default_ao_sets_the_local_flag)
 {
   Material *ma = add_material("MapsMat");

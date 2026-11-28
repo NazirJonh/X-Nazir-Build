@@ -160,7 +160,13 @@ def mesh_map_objects_for_material(mat):
 
 
 class OBJECT_OT_mesh_map_source_match_by_name(Operator):
-    """Pair high-poly objects to the low-poly ones of this material by name suffixes"""
+    """Pair high-poly objects to the low-poly ones of this material by name suffixes
+
+    The high-poly object is looked up with `bpy.data.objects.get`, i.e. across the whole file, not
+    just the current scene: a matching object from another scene or a linked library is paired
+    too. An existing collection source on the low-poly object is replaced by the object pair; the
+    report counts those replacements so the overwrite is not silent.
+    """
 
     bl_idname = "object.mesh_map_source_match_by_name"
     bl_label = "Match by Name"
@@ -196,6 +202,7 @@ class OBJECT_OT_mesh_map_source_match_by_name(Operator):
             self.report({'ERROR'}, "No object of this material to pair")
             return {'CANCELLED'}
         paired = 0
+        replaced_collections = 0
         unmatched = []
         for low in lows:
             # A high-poly object of the same material is a source, not a low-poly target: its name
@@ -214,17 +221,22 @@ class OBJECT_OT_mesh_map_source_match_by_name(Operator):
                 unmatched.append(low.name)
                 continue
             # The RNA setters keep the object-XOR-collection invariant; setting both makes the
-            # result the same whichever form a previous assignment used.
+            # result the same whichever form a previous assignment used. A collection source is
+            # replaced by the object pair, which is reported below instead of happening silently.
+            if source.high_poly_collection is not None:
+                replaced_collections += 1
             source.high_poly = high
             source.high_poly_collection = None
             paired += 1
+        report_set = {'WARNING'} if (unmatched or replaced_collections) else {'INFO'}
+        message = "Paired {:d} object(s)".format(paired)
+        if replaced_collections:
+            message += "; replaced {:d} collection source(s) with object pairs".format(
+                replaced_collections)
+        if unmatched:
+            message += "; without a high-poly match: {}".format(", ".join(unmatched))
         if paired:
-            if unmatched:
-                self.report({'WARNING'},
-                            "Paired {:d} object(s); without a high-poly match: {}".format(
-                                paired, ", ".join(unmatched)))
-            else:
-                self.report({'INFO'}, "Paired {:d} object(s)".format(paired))
+            self.report(report_set, message)
             return {'FINISHED'}
         self.report({'WARNING'},
                     "No match for: {}".format(", ".join(unmatched) if unmatched else "any object"))
@@ -240,16 +252,19 @@ _MESH_MAP_CAGE_PREVIEW_COLOR = (1.0, 0.3, 0.3, 0.9)
 _mesh_map_cage_preview_handle = None
 _mesh_map_cage_preview_batch = None
 _mesh_map_cage_preview_key = None
+_mesh_map_cage_preview_cages = ()
 
 
 def _mesh_map_cage_preview_stop():
     """Remove the preview overlay and its cached batches; safe to call when nothing is shown."""
     global _mesh_map_cage_preview_handle, _mesh_map_cage_preview_batch, _mesh_map_cage_preview_key
+    global _mesh_map_cage_preview_cages
     if _mesh_map_cage_preview_handle is not None:
         bpy.types.SpaceView3D.draw_handler_remove(_mesh_map_cage_preview_handle, 'WINDOW')
         _mesh_map_cage_preview_handle = None
         _mesh_map_cage_preview_batch = None
         _mesh_map_cage_preview_key = None
+        _mesh_map_cage_preview_cages = ()
 
 
 def _mesh_map_cage_preview_load_post(_scene, _depsgraph):
@@ -258,17 +273,69 @@ def _mesh_map_cage_preview_load_post(_scene, _depsgraph):
     _mesh_map_cage_preview_stop()
 
 
+def _mesh_map_cage_preview_depsgraph_update(_scene, _depsgraph):
+    """Invalidate the cached overlay when the scene updates, and drop it if its owner vanished.
+
+    Runs outside the draw callback, so it is a safe place to touch the handler and the cache.
+    Clearing the key here also catches a cage whose vertices changed without its counts or matrix
+    changing; the next redraw rebuilds the batches once.
+    """
+    global _mesh_map_cage_preview_key
+    _mesh_map_cage_preview_key = None
+    if _mesh_map_cage_preview_handle is None:
+        return
+    try:
+        if mesh_map_owner(bpy.context) is None:
+            _mesh_map_cage_preview_stop()
+    except Exception:
+        _mesh_map_cage_preview_stop()
+
+
+def _mesh_map_cage_preview_geometry_key(context):
+    """The cheap identity of every previewed cage, plus the cage objects themselves.
+
+    Only names, evaluated counts and matrices are read: no `to_mesh()` and no batches. This runs on
+    every redraw, so the expensive work stays behind the key comparison in
+    #_mesh_map_cage_preview_batches. Returns `(None, ())` when there is nothing to draw.
+    """
+    mat = mesh_map_owner(context)
+    if mat is None:
+        return None, ()
+    depsgraph = context.evaluated_depsgraph_get()
+    key_parts = []
+    cages = []
+    for ob in mesh_map_objects_for_material(mat):
+        for source in ob.mesh_map_sources:
+            if source.material != mat or source.cage is None:
+                continue
+            cage_eval = source.cage.evaluated_get(depsgraph)
+            mesh = cage_eval.data
+            if mesh is None or not mesh.vertices or not mesh.edges:
+                continue
+            matrix = cage_eval.matrix_world
+            key_parts.append((source.cage.name, len(mesh.vertices), len(mesh.edges),
+                              matrix.translation.copy(), matrix.to_quaternion().copy(),
+                              matrix.to_scale().copy()))
+            cages.append(source.cage)
+    return (tuple(key_parts) if key_parts else None), tuple(cages)
+
+
 def _mesh_map_cage_preview_batches(context):
     """The line batches of every cage of the owner material, keyed by what built them."""
     global _mesh_map_cage_preview_batch, _mesh_map_cage_preview_key
+    global _mesh_map_cage_preview_cages
+    key, cages = _mesh_map_cage_preview_geometry_key(context)
+    if key is None:
+        return None
+    if key == _mesh_map_cage_preview_key and _mesh_map_cage_preview_batch is not None:
+        _mesh_map_cage_preview_cages = cages
+        return _mesh_map_cage_preview_batch
+
     import gpu
     from gpu_extras import batch as gpu_batch
 
     mat = mesh_map_owner(context)
-    if mat is None:
-        return None
     depsgraph = context.evaluated_depsgraph_get()
-    key_parts = []
     batches = []
     for ob in mesh_map_objects_for_material(mat):
         for source in ob.mesh_map_sources:
@@ -286,9 +353,6 @@ def _mesh_map_cage_preview_batches(context):
             if not verts or not edges:
                 continue
             matrix = cage_eval.matrix_world
-            key_parts.append((source.cage.name, len(verts), len(edges),
-                              matrix.translation.copy(), matrix.to_quaternion().copy(),
-                              matrix.to_scale().copy()))
             coords = []
             for a, b in edges:
                 coords.append(matrix @ verts[a])
@@ -297,11 +361,10 @@ def _mesh_map_cage_preview_batches(context):
             batches.append(gpu_batch.batch_for_shader(shader, 'LINES', {"pos": coords}))
     if not batches:
         return None
-    key = tuple(key_parts)
-    if key != _mesh_map_cage_preview_key or _mesh_map_cage_preview_batch is None:
-        _mesh_map_cage_preview_key = key
-        _mesh_map_cage_preview_batch = batches
-    return _mesh_map_cage_preview_batch
+    _mesh_map_cage_preview_key = key
+    _mesh_map_cage_preview_batch = batches
+    _mesh_map_cage_preview_cages = cages
+    return batches
 
 
 def _mesh_map_cage_preview_draw():
@@ -309,6 +372,11 @@ def _mesh_map_cage_preview_draw():
     global _mesh_map_cage_preview_batch, _mesh_map_cage_preview_key
     import gpu
     try:
+        if mesh_map_owner(bpy.context) is None:
+            # The owner can vanish between redraws. Removing a draw handler from inside its own
+            # callback is unsafe, so the depsgraph handler (or the next toggle/load_post) removes
+            # it; here we only skip the work and leave the viewport intact.
+            return
         batches = _mesh_map_cage_preview_batches(bpy.context)
     except Exception:
         # A vanished owner or cage just stops the preview; it must never break the viewport.
@@ -362,11 +430,15 @@ class OBJECT_OT_mesh_map_cage_preview(Operator):
 def register():
     if _mesh_map_cage_preview_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_mesh_map_cage_preview_load_post)
+    if _mesh_map_cage_preview_depsgraph_update not in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.append(_mesh_map_cage_preview_depsgraph_update)
 
 
 def unregister():
     if _mesh_map_cage_preview_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_mesh_map_cage_preview_load_post)
+    if _mesh_map_cage_preview_depsgraph_update in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.remove(_mesh_map_cage_preview_depsgraph_update)
     # A draw handler left behind would keep calling into this module after it is gone.
     _mesh_map_cage_preview_stop()
 

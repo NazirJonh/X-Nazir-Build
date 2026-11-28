@@ -394,7 +394,9 @@ static bool cast_ray_highpoly(bke::BVHTreeFromMesh *treeData,
         const int primitive_id_high = hits[i].index;
         const TriTessFace *triangle_high = &triangles[i][primitive_id_high];
         float hit_normal[3];
-        mul_v3_mat3_m4v3(hit_normal, highpoly[i].obmat, triangle_high->normal);
+        copy_v3_v3(hit_normal, triangle_high->normal);
+        /* Inverse transpose: correct for normals under a non-uniform object scale. */
+        mul_transposed_mat3_m4_v3(highpoly[i].imat, hit_normal);
         normalize_v3(hit_normal);
         if (dot_v3v3(hit_normal, dir) > 0.0f) {
           hits[i].index = -1;
@@ -613,11 +615,11 @@ bool RE_bake_pixels_populate_from_objects(Mesh *me_low,
     me_eval_low = BKE_mesh_copy_for_eval(*me_low);
     tris_low = mesh_calc_tri_tessface(me_low, true, me_eval_low);
   }
-  else if (is_custom_cage) {
-    tris_low = mesh_calc_tri_tessface(me_low, false, nullptr);
-    tris_cage = mesh_calc_tri_tessface(me_cage, false, nullptr);
-  }
   else {
+    /* Every cage only supplies the ray's origin: frontal/rear classification always reads the
+     * low-poly surface itself. Build its triangles for the auto-cage too, otherwise the
+     * classification would silently fall back to the cage's own normals. */
+    tris_low = mesh_calc_tri_tessface(me_low, false, nullptr);
     tris_cage = mesh_calc_tri_tessface(me_cage, false, nullptr);
   }
 
@@ -664,12 +666,21 @@ bool RE_bake_pixels_populate_from_objects(Mesh *me_low,
           /* Skew bends the cage's projection direction toward the low-poly's own normal, the
            * direction an auto-cage casts along: 0 keeps the cage skew, 1 straightens fully. The
            * low-poly triangle is read from `tris_low`, not the cage `tri_low` points at. */
+          float cage_dir[3];
           float surface_dir[3];
-          mul_v3_mat3_m4v3(surface_dir, mat_low, tris_low[primitive_id].normal);
+          copy_v3_v3(cage_dir, dir);
+          copy_v3_v3(surface_dir, tris_low[primitive_id].normal);
+          mul_transposed_mat3_m4_v3(imat_low, surface_dir);
           normalize_v3(surface_dir);
           negate_v3(surface_dir);
           interp_v3_v3v3(dir, dir, surface_dir, ray_limits.skew);
-          normalize_v3(dir);
+          if (normalize_v3(dir) < 1e-6f) {
+            /* At skew ~0.5 a cage direction nearly opposite to the low-poly normal interpolates to
+             * a zero vector. A zero cast direction silently loses the texel, so keep the cage's
+             * unbent direction instead. */
+            copy_v3_v3(dir, cage_dir);
+            normalize_v3(dir);
+          }
         }
       }
       else if (is_cage) {
@@ -683,13 +694,13 @@ bool RE_bake_pixels_populate_from_objects(Mesh *me_low,
         tri_low = &tris_low[primitive_id];
       }
 
-      /* The low-poly surface normal in world space decides frontal from rear hits. The custom
-       * cage keeps its own triangles in `tris_low`, so the classification is against the actual
-       * low-poly surface, not the cage. */
-      const TriTessFace *face_for_front_normal = tris_low != nullptr ? &tris_low[primitive_id] :
-                                                                       tri_low;
+      /* The low-poly surface normal in world space decides frontal from rear hits. `tris_low`
+       * holds the low-poly triangles for every cage kind; the cage only supplies the ray origin.
+       * The inverse transpose is the correct transform for a normal under a non-uniform scale. */
+      const TriTessFace *face_for_front_normal = &tris_low[primitive_id];
       float front_normal[3];
-      mul_v3_mat3_m4v3(front_normal, mat_low, face_for_front_normal->normal);
+      copy_v3_v3(front_normal, face_for_front_normal->normal);
+      mul_transposed_mat3_m4_v3(imat_low, front_normal);
       normalize_v3(front_normal);
 
       /* cast ray */

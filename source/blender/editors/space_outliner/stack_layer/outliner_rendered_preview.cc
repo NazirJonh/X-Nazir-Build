@@ -36,6 +36,7 @@
 #include "BLI_math_color.h"
 #include "BLI_math_vector.h"
 #include "BLI_path_utils.hh"
+#include "BLI_rect.h"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_string_utils.hh"
@@ -497,7 +498,7 @@ static bool rendered_preview_id_draw(const bContext *C,
                      false,
                      nullptr,
                      false,
-                     OUTLINER_STACK_PREVIEW_SCALE);
+                     outliner_stack_slot_icon_scale(preview_rect));
     rendered_preview_frame_draw(preview_rect, alpha_fac);
     return true;
   }
@@ -537,7 +538,7 @@ static bool rendered_preview_sphere_draw(const bContext *C,
                        false,
                        nullptr,
                        false,
-                       OUTLINER_STACK_PREVIEW_SCALE);
+                       outliner_stack_slot_icon_scale(preview_rect));
       rendered_preview_frame_draw(preview_rect, alpha_fac);
       return true;
     }
@@ -606,7 +607,7 @@ static bool rendered_preview_material_draw(const bContext *C,
                        false,
                        nullptr,
                        false,
-                       OUTLINER_STACK_PREVIEW_SCALE);
+                       outliner_stack_slot_icon_scale(preview_rect));
       rendered_preview_frame_draw(preview_rect, alpha_fac);
       return true;
     }
@@ -629,7 +630,7 @@ static bool rendered_preview_material_draw(const bContext *C,
                      false,
                      nullptr,
                      false,
-                     OUTLINER_STACK_PREVIEW_SCALE);
+                     outliner_stack_slot_icon_scale(preview_rect));
     rendered_preview_frame_draw(preview_rect, alpha_fac);
     return true;
   }

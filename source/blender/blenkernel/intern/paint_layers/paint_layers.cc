@@ -5300,6 +5300,23 @@ Material *BKE_paint_layers_material_source_make_local(Main &bmain,
   return local;
 }
 
+bool BKE_paint_layers_material_source_ensure_local(Main &bmain,
+                                                   Material &ma,
+                                                   MaterialPaintLayer *layer,
+                                                   ReportList *reports)
+{
+  if (!BKE_paint_layers_material_source_can_make_local(ma, layer)) {
+    return true;
+  }
+  if (BKE_paint_layers_material_source_make_local(bmain, ma, layer) != nullptr) {
+    return true;
+  }
+  BKE_report(reports,
+             RPT_WARNING,
+             "The linked source material could not be made local; its preview stays unavailable");
+  return false;
+}
+
 void BKE_paint_layers_base_color_get(const MaterialPaintLayer &layer, float r_color[4])
 {
   const MaterialPaintLayerChannel *record = paint_layer_channel_find(

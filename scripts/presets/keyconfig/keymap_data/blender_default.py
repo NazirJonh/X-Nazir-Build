@@ -5330,10 +5330,8 @@ def km_image_paint(params):
         ("brush.scale_size", {"type": 'RIGHT_BRACKET', "value": 'PRESS', "repeat": True},
          {"properties": [("scalar", 1.0 / 0.9)]}),
         *_template_paint_radial_control("image_paint", color=True, zoom=True, rotation=True, secondary_rotation=True),
-        # Ahead of the stencil bindings on purpose: this one polls false unless the Combined
-        # preview is the pass on screen, so Shift-RMB keeps scaling the stencil everywhere else.
-        # Only while that preview is shown does the light take the gesture.
-        ("image.combined_light_rotate", {"type": 'RIGHTMOUSE', "value": 'PRESS', "shift": True}, None),
+        # The Combined preview's light drag lives in "Image Paint Canvas", which is alive with every
+        # Image Editor paint tool; "Image Paint" is only alive while a brush tool is active.
         ("brush.stencil_control", {"type": 'RIGHTMOUSE', "value": 'PRESS'},
          {"properties": [("mode", 'TRANSLATION')]}),
         ("brush.stencil_control", {"type": 'RIGHTMOUSE', "value": 'PRESS', "shift": True},
@@ -5395,6 +5393,13 @@ def km_image_paint_canvas(params):
     )
 
     items.extend([
+        # The Combined preview's light drag: Shift-RMB, like the Sculpt Mode light gesture
+        # (#paint.scene_light_rotate), so the two editors share one key for it. It sits in this
+        # keymap rather than in "Image Paint" because that one is only alive while a brush tool is
+        # active, and the light has to turn with the Gradient, Shape and selection tools too. The
+        # operator polls false unless the Combined preview is the pass on screen, so Shift-RMB keeps
+        # scaling the stencil everywhere else.
+        ("image.combined_light_rotate", {"type": 'RIGHTMOUSE', "value": 'PRESS', "shift": True}, None),
         # Cycle the shown canvas through the active material's texture paint slots (PBR paint).
         ("paint.material_canvas_cycle", {"type": 'C', "value": 'PRESS'},
          {"properties": [("reverse", False), ("keep_view", True)]}),
@@ -5740,9 +5745,10 @@ def km_sculpt(params):
         *_template_paint_radial_control("sculpt", rotation=True),
         # Scene Light rotation (PBR Paint): the 3D Viewport counterpart of the Image Editor's
         # light drag. Ahead of the stencil and `sculpt.cursor_set` Shift-RMB bindings on purpose: this
-        # one polls false without a viewport-enabled scene light, so Shift-RMB keeps setting the
-        # sculpt cursor / moving the stencil everywhere else, and is taken over only while a light
-        # drag is possible.
+        # one polls false without a viewport-enabled scene light, so Shift-RMB keeps moving the
+        # stencil, and is taken over only while a light drag is possible. In the Paint display group
+        # `sculpt.cursor_set` itself refuses placement (see its invoke), so the key never falls
+        # through to the regular 3D cursor there.
         ("paint.scene_light_rotate", {"type": 'RIGHTMOUSE', "value": 'PRESS', "shift": True}, None),
         # Paint selection mask: temporary lasso of the Paint toolbar group, ahead of the stencil
         # bindings on purpose (they share Ctrl-RMB). The operator polls false while the Sculpt
@@ -5762,7 +5768,8 @@ def km_sculpt(params):
          {"properties": [("mode", 'SCALE'), ("texmode", 'SECONDARY')]}),
         ("brush.stencil_control", {"type": 'RIGHTMOUSE', "value": 'PRESS', "ctrl": True, "alt": True},
          {"properties": [("mode", 'ROTATION'), ("texmode", 'SECONDARY')]}),
-        # Sculpt Cursor: place the sculpt 3D cursor on the surface from any tool.
+        # Sculpt Cursor: place the sculpt 3D cursor on the surface from any Sculpt-group tool.
+        # The Paint group keeps the key for the scene light rotation and swallows it.
         ("sculpt.cursor_set", {"type": 'RIGHTMOUSE', "value": 'PRESS', "shift": True}, None),
         # Menus
         ("wm.context_menu_enum", {"type": 'E', "value": 'PRESS', "alt": True},
@@ -9460,7 +9467,8 @@ def km_3d_view_tool_sculpt_curves_edit(params):
 
 
 def km_3d_view_tool_sculpt_cursor(params):
-    # Shift+RMB placement comes from the global sculpt keymap, so it works in every tool.
+    # Shift+RMB placement comes from the global sculpt keymap, so it works in every Sculpt-group
+    # tool. The Paint display group swallows it for the scene light rotation.
     items = [
         ("sculpt.cursor_set", {"type": params.tool_mouse, "value": 'PRESS'}, None),
     ]

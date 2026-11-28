@@ -22,6 +22,7 @@ from bl_ui.properties_paint_common import (
     _MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS,
     _MATERIAL_PAINT_CHANNEL_TOGGLE_UI_UNITS_X,
     _MATERIAL_PAINT_CHANNEL_UI_ORDER,
+    curve_patch_layer_active_row,
     material_paint_color_channels,
     MaterialPaintChannelView,
     _draw_channel_panel,
@@ -80,16 +81,13 @@ class LayerMaterialButtonsPanel:
     @staticmethod
     def _curve_patch_subject(context):
         """The row whose Curve Patch panel is shown: the active mask item when it is one, else
-        the active row. A mask Curve Patch hangs on its layer, so `paint_layers.active` answers
-        the layer and the item has to be asked for through the shown mask item."""
+        the active row. The resolver is shared with the 3D View's Curve Patch Curves panel so both
+        answer the same row."""
         owner, layer = LayerMaterialButtonsPanel._active_layer(context)
         if owner is None:
             return None, None
-        item = LayerMaterialButtonsPanel._shown_mask_item(context, owner, layer)
-        if (item is not None and item.source == 'CURVE_PATCH' and
-                item.curve_patch is not None):
-            return owner, item
-        return owner, layer
+        subject = curve_patch_layer_active_row(context)
+        return owner, subject if subject is not None else layer
 
     @staticmethod
     def _object_mask_editing(context):
@@ -244,7 +242,7 @@ def _draw_layer_channel_source_preview(layout, _context, record, locked=False):
         )
 
 
-def _draw_layer_channel_source(panel, _context, record, locked=False, is_correction=False):
+def _draw_layer_channel_source(panel, _context, record, locked=False):
     """The layer channel's source row: a "Drop image" picker writing the record's own image.
 
     `locked` draws it read-only, so the map owned by a Paint row can be seen but not swapped.
@@ -265,13 +263,8 @@ def _draw_layer_channel_source(panel, _context, record, locked=False, is_correct
     if record.channel == 'NORMAL' and not locked:
         space_row = panel.row(align=True)
         space_row.prop(record, "normal_space", text="Tangent Space", expand=True)
-    # What the map stores, which the stack reads as the channel's value. A glossiness or a
-    # specular colour reads converted everywhere, and the choice is inert while the record has no
-    # map, so it only shows for one that carries it. A correction's map is read by the correction
-    # chain in the channel's own scale, so it has no encoding to choose.
-    if (record.channel in {'ROUGHNESS', 'SPECULAR'} and record.image is not None
-            and not locked and not is_correction):
-        panel.prop(record, "map_encoding", text="Map Encoding")
+    # What the map stores is set in the channel's socket menu (`PAINT_MT_material_layer_channel_socket`),
+    # not beside the picker.
 
 
 def _layer_color_eyedropper_path(record):
@@ -317,8 +310,7 @@ def _layer_channel_view(layer, record, channel_id, name):
         socket_context_set=(("material_paint_layer_channel", record),
                             ("material_paint_layer_owner", layer)),
         source_draw=lambda panel, ctx, enabled: _draw_layer_channel_source(
-            panel, ctx, record, locked=_layer_images_locked(layer),
-            is_correction=layer.is_correction),
+            panel, ctx, record, locked=_layer_images_locked(layer)),
         source_preview=lambda layout, ctx: _draw_layer_channel_source_preview(
             layout, ctx, record, locked=_layer_images_locked(layer)),
         source_has=lambda: record.image is not None,
@@ -349,11 +341,12 @@ def draw_material_mask_item(layout, context, item):
     gradient slider while it lays a flat grey.
 
     A Fill correction lays a flat grey while it has no map and takes a map the user assigns. The
-    base mask and a Paint correction own their map instead -- the Mask brush writes it -- so their
-    slot is a debug view that Developer Extras reveals, and only a Fill correction is offered a
-    Mapping panel (see #BKE_paint_layers_mapping_available). The base mask has no subpanel of its
-    own either, unless it still holds a flat grey: everything inside it is that debug view. Invert
-    reads the grey as `1 - value`, the map's or the flat one.
+    base mask and a Paint or Curve Patch correction own their map instead -- the Mask brush or the
+    curves write it -- so their slot is a debug view that Developer Extras reveals, and only a Fill
+    correction is offered a Mapping panel (see #BKE_paint_layers_mapping_available). With Developer
+    Extras off no such subpanel is drawn (the base mask keeps it only while it still holds a flat
+    grey, where that grey is edited). Invert reads the grey as `1 - value`, the map's or the flat
+    one; a map the stack owns has it under Contrast, a Fill correction's beside its map slot.
     """
     # The state every branch below reads; what each field means is #_mask_item_ui_state's.
     state = _mask_item_ui_state(context, item)
@@ -374,17 +367,20 @@ def draw_material_mask_item(layout, context, item):
     opacity_row.prop(item, "locked", text="", icon='LOCKED' if item.locked else 'UNLOCKED')
     col.separator()
     col.prop(item, "mask_contrast", text="Contrast", slider=True)
-    if base and record is not None:
-        # The base mask's slot is a debug view (see below), so its Invert is offered here, where it
-        # stays reachable with Developer Extras off.
-        col.prop(record, "invert", text="Invert", toggle=True)
     if record is None:
         return
+    # Invert reads the grey as `1 - value`. A map the user assigns (a Fill correction's) keeps its
+    # toggle beside the map slot below; every map the stack owns -- the base mask's, a Paint or a
+    # Curve Patch correction's -- has it here, under Contrast, where it stays reachable with
+    # Developer Extras off.
+    if not assignable:
+        col.prop(record, "invert", text="Invert", toggle=True)
 
-    # The base mask's subpanel holds the stack's own map, so it is a debug view like its slot: with
-    # Developer Extras off it is drawn only while the mask has no map at all, where the flat grey
-    # is the mask's whole content.
-    if base and has_map and not _developer_ui_enabled(context):
+    # The sub-panel is the stack's own map, so it is a debug view: with Developer Extras off it is
+    # not drawn for a row that owns its map (the base mask included), nor for a correction at all --
+    # only the base mask keeps it while the flat grey is the mask's whole content, where that grey
+    # is edited.
+    if not assignable and not _developer_ui_enabled(context) and (has_map or not base):
         return
 
     header, panel = layout.panel("material_paint_mask_item", default_closed=False)
@@ -435,22 +431,20 @@ def draw_material_mask_item(layout, context, item):
             invert.scale_y = 2.0
             invert.prop(record, "invert", text="", icon='ARROW_LEFTRIGHT', toggle=True)
     elif has_map:
-        # The base mask and a Paint correction own their map: it is shown read-only, and only while
-        # Developer Extras is on. The base mask's Invert sits with its own settings, above.
+        # The base mask and a Paint or Curve Patch correction own their map: it is shown
+        # read-only, and only while Developer Extras is on. Their Invert sits with the item's
+        # settings, above.
         row = panel.row(align=True)
         if show_map:
             sub = row.row(align=True)
             sub.enabled = False
             sub.template_ID_browser(record, "image", compact=True, image_filter='PAINT_SOURCE')
-        if not base:
-            row.prop(record, "invert", text="", icon='ARROW_LEFTRIGHT', toggle=True)
     elif not base:
         panel.label(text="The first stroke creates the map", icon='INFO')
 
     # A mask that lays a flat grey edits it where the map will be once it has one: the gradient
     # value slider sits in the body, with the item's own invert beside it.
     if not has_map and flat_value:
-        panel.separator()
         row = panel.row(align=True)
         row.template_material_paint_value_slider(item, "mask_value", index=0)
         if not base:
@@ -580,14 +574,149 @@ def draw_material_update_now(layout, owner):
     row.operator("material.paint_layers_bake_now", text="Update Now", icon='FILE_REFRESH')
 
 
-def draw_material_layer_fill_source(layout, layer):
-    """The Maps | Material switch of a Fill: its own channel maps and values, or a material.
+def draw_material_layer_fill_source(layout, layer, *, text="Fill Source"):
+    """The Fill Source dropdown of a Fill/Material row, like the Render Engine selector.
 
-    Drawn above the channel switches, where the brush panel draws the same pair for the brush. The
-    choice keeps the other side's content in the row -- the material with its scope, its row marker
-    and its canvas settings included -- so switching back restores it.
+    Drawn at the top of the Layer body: it selects what the row lays (its own channel maps, or a
+    material) before the channel switches and the source slot that follow from the choice.
     """
-    layout.prop(layer, "fill_source", expand=True)
+    layout.prop(layer, "fill_source", text=text)
+
+
+def _draw_mapping_transform(layout, row, label_wrap):
+    """The offset, scale and rotation a mapping moves by, with the wrap it ends at."""
+    col = layout.column()
+    col.enabled = row.mapping_enabled
+    col.prop(row, "mapping_offset", text="Offset")
+    sub = col.row(align=True)
+    # The tile-holding RNA properties follow the offset so the tile stays put.
+    sub.prop(row, "tile_scale", text="Scale")
+    sub.prop(row,
+             "tile_scale_lock",
+             text="",
+             icon='LOCKED' if row.tile_scale_lock else 'UNLOCKED',
+             icon_only=True)
+    col.prop(row, "tile_rotation", text="Rotation")
+    col.prop(row, "mapping_wrap", text=label_wrap)
+    return col
+
+
+def _draw_mapping_projection(layout, context, row):
+    """The main fields of a projected row: place, preset, frame size, roll and the limits."""
+    place_row = layout.row(align=True)
+    place_row.operator("paint.layer_projection_place",
+                       text="Place on Surface",
+                       icon='RESTRICT_SELECT_OFF')
+    sculpt = context.tool_settings.sculpt
+    if sculpt is not None:
+        place_row.prop(sculpt, "show_projection_gizmo", text="Show Gizmo", toggle=1)
+    # The Decal space unfolds the surface around its center: its depth limit and facing fade are
+    # not read, so the preset (clip, depth and facing) and those fields stay out of its panel.
+    is_decal = row.mapping_space == 'DECAL'
+    if not is_decal:
+        layout.prop(row, "projection_preset", text="Preset")
+
+    row_size = layout.row(align=True)
+    row_size.prop(row, "projection_size", index=0, text="Size X")
+    row_size.prop(row, "projection_size", index=1, text="Y")
+    row_size.prop(row, "projection_size_lock",
+                  text="",
+                  icon='LOCKED' if row.projection_size_lock else 'UNLOCKED')
+    layout.prop(row, "projection_roll", text="Roll")
+    if not is_decal:
+        # A volume kind bounds all three axes by the clip itself and has no single projection
+        # direction, so the Limit toggle and the facing fade stay Planar-only; the Depth field
+        # is the frame's Size Z and stays for every space.
+        # A volume space projects from every side, so the facing fade and the depth limit have
+        # no single direction to act along and the projection ignores them.
+        volume_space = row.projection_is_volume
+        depth_row = layout.row(align=True)
+        if not volume_space:
+            depth_row.prop(row, "projection_depth", text="Limit", toggle=1)
+        depth_row.prop(row, "projection_depth_size", text="Depth")
+
+        if not volume_space:
+            facing_row = layout.row(align=True)
+            facing_row.prop(row, "projection_facing", text="Facing Fade")
+            angle_col = facing_row.column()
+            angle_col.enabled = row.projection_facing
+            angle_col.prop(row, "projection_angle", text="Angle")
+            flip_col = facing_row.column()
+            flip_col.enabled = row.projection_facing
+            flip_col.prop(row, "projection_facing_invert", text="Flip", toggle=1)
+
+        layout.separator()
+
+
+def draw_material_layer_mapping(layout, context, row):
+    """The Mapping & Projection controls of one row, shared by the Layer tab's sub-panel and the
+    inline block a Fill draws after its channel switches."""
+    layout.use_property_split = True
+    layout.use_property_decorate = False
+
+    if row.is_transform_effect:
+        # The effect moves where its layer reads its map: in UV, or in a Decal frame of its
+        # own. On a projected layer the effect keeps acting in that projection, and the Decal
+        # choice is disabled with that explanation (the RNA editable callback).
+        layout.prop(row, "mapping_space", text="Space")
+        if (row.mapping_space == 'DECAL' and not row.effect_decal_applies):
+            col = layout.column(align=True)
+            col.enabled = False
+            col.label(text="The layer projects: the effect acts in that projection",
+                      icon='INFO')
+        elif row.mapping_space == 'DECAL' and row.kind_needs_bake:
+            # The viewport shows a Decal effect through the layer's bake, like a Blur.
+            draw_material_update_now(layout, row.id_data)
+    else:
+        layout.prop(row, "mapping_space", text="Projection")
+
+    # An effect in Decal has no frame to place: it is derived from the Mirror center / pivot, the
+    # same handle as in UV, so only a row's own projection shows the frame fields.
+    if row.mapping_space != 'UV' and not row.is_transform_effect:
+        _draw_mapping_projection(layout, context, row)
+
+    if row.is_transform_effect:
+        # The effect's step is its parameter set in both spaces: a Mirror reads only the fold's
+        # axes and center, so the transform sliders would promise a move it never makes. In
+        # Decal the same offset (in UV units at the center), scale, rotation and pivot act in
+        # the plane of the surface around the center.
+        is_mirror_effect = row.filter_type == 'MIRROR'
+        layout.prop(row, "mapping_enabled", text="Enabled")
+        if not is_mirror_effect:
+            col = _draw_mapping_transform(
+                layout, row, "Wrap" if row.mapping_space == 'DECAL' else "UV Wrap")
+            # Scale and Rotation turn about the pivot; moving it keeps what the effect shows.
+            col.prop(row, "mapping_pivot", text="Pivot")
+    elif row.mapping_space == 'UV':
+        layout.prop(row, "mapping_enabled", text="UV Adjust")
+        _draw_mapping_transform(layout, row, "UV Wrap")
+
+        # Only a live whole-material row reads the source's graph through its UV wrapper: a
+        # canvas row reads its baked maps like a Fill reads a texture, so the note has no say
+        # there, and neither has the source's main-shader-path limit.
+        if (row.mapping_enabled and row.source == 'MATERIAL' and
+                row.material_scope == 'MATERIAL' and row.material_canvas_mode == 'LIVE'):
+            # The wrapper moves the active UV layer (TexCoord UV and open Image Textures) of the
+            # source tree and of the groups on the path to its Principled BSDF; a coordinate-driven
+            # procedural texture, a named UV Map node and a group beside that path keep their own input.
+            note = layout.column(align=True)
+            note.enabled = False
+            note.label(text="Only the active UV of the main shader path is mapped",
+                       icon='BLANK1')
+            note.label(text="Procedural, named-UV and side-group textures are not",
+                       icon='BLANK1')
+    else:
+        # A projected row is addressed by its frame: the wrap and the tiling are the only mapping
+        # it follows, an offset or rotation would move the lookup away from the frame. The
+        # tiling is the row's mapping scale, applied to the UV only, so the footprint stays put.
+        sub = layout.row(align=True)
+        sub.prop(row, "mapping_scale", text="Tiling")
+        sub.prop(row,
+                 "tile_scale_lock",
+                 text="",
+                 icon='LOCKED' if row.tile_scale_lock else 'UNLOCKED',
+                 icon_only=True)
+        layout.prop(row, "mapping_wrap", text="UV Wrap")
 
 
 def draw_material_layer_source_row(layout, context, layer, *, draw_fold=True):
@@ -716,13 +845,15 @@ def draw_material_layer_source_row(layout, context, layer, *, draw_fold=True):
             layout.label(text="Select a source row", icon='INFO')
         else:
             status = layer.source_status
-            if status != 'OK':
+            # "Updating..." would push every panel below it down while a render runs: the row's
+            # state is already visible in the source area, so that transient line stays out.
+            if status not in {'OK', 'UPDATING'}:
                 # The words come from BKE's one table (through the read-only RNA property), so
                 # adding a status is a change there, not a second copy here.
                 text = layer.source_status_text
                 if status == 'TOO_LARGE':
                     text = "{} (max {:d} px)".format(text, layer.material_canvas_max_side)
-                layout.label(text=text, icon='TIME' if status == 'UPDATING' else 'ERROR')
+                layout.label(text=text, icon='ERROR')
 
 
 def draw_material_channel_mixer(layout, mixer):
@@ -1027,6 +1158,17 @@ def draw_material_effect_image_slot(layout, item):
     draw_material_kind_params(layout, item.kind_params)
 
 
+def material_layer_has_height_controls(material, layer):
+    """Whether `draw_material_layer_height` has anything to draw for \a layer.
+
+    The one condition shared by the drawing helper and the Layer tab's Advanced panel, so the panel
+    is not shown empty and a change to when Height applies updates both.
+    """
+    if not material.paint_layers_channel_in_set(channel='HEIGHT'):
+        return False
+    return any(entry.channel == 'HEIGHT' for entry in layer.channel_settings)
+
+
 def draw_material_layer_height(layout, material, layer):
     """Draw a layer's Height record controls, on the channel they belong to.
 
@@ -1037,12 +1179,9 @@ def draw_material_layer_height(layout, material, layer):
     write switch suppresses a record the row already holds -- on a row with none it would be a flag
     waiting to silence a map added later -- so it is drawn only where it acts.
     """
-    if not material.paint_layers_channel_in_set(channel='HEIGHT'):
+    if not material_layer_has_height_controls(material, layer):
         return
     settings = next((entry for entry in layer.channel_settings if entry.channel == 'HEIGHT'), None)
-    if settings is None:
-        return
-    layout.separator()
     col = layout.column(align=True)
     col.prop(settings, "height_blend_type", text="Height Blend")
     if settings.height_blend_type != 'INHERIT':
@@ -1051,7 +1190,22 @@ def draw_material_layer_height(layout, material, layer):
         col.prop(settings, "height_write", text="Write Height")
 
 
-def draw_material_layer_channels(layout, context, material, layer):
+def draw_material_layer_mapping_panel(layout, context, layer):
+    """A layer's inline Mapping & Projection panel, above the controls it places.
+
+    Used by a Fill above its channel switches (the map slots are its content) and by a Fill that
+    reads a material above its Source Material slot. Collapsed by default, like the registered
+    `LAYER_MATERIAL_PT_mapping` panel that serves every other mapped row.
+    """
+    header, panel = layout.panel("material_layer_mapping_fill", default_closed=True)
+    header.label(text="Mapping & Projection")
+    header.menu("LAYER_MT_mapping_reset", text="", icon='RECOVER_LAST')
+    if panel:
+        draw_material_layer_mapping(panel, context, layer)
+
+
+def draw_material_layer_channels(layout, context, material, layer, *,
+                                 draw_buttons=True, draw_details=True):
     """Draw a stack layer's channels with the shared PBR Paint channel widget.
 
     The same fixed channel order and toggle buttons as the brush panel, but each channel's value
@@ -1076,7 +1230,8 @@ def draw_material_layer_channels(layout, context, material, layer):
         # A tangent normal is not a ramp a generator can produce either.
         channel_ids = [channel_id for channel_id in channel_ids if channel_id != 'NORMAL']
     if not channel_ids:
-        layout.label(text="No channels", icon='INFO')
+        if draw_buttons:
+            layout.label(text="No channels", icon='INFO')
         return
 
     records = {record.channel: record for record in layer.channels}
@@ -1084,11 +1239,13 @@ def draw_material_layer_channels(layout, context, material, layer):
     # and the subpanels below), read through the RNA rather than mirrored here.
     colour_channels = material_paint_color_channels(context.tool_settings.paint_mode)
 
+    # The switches are one group, apart from the per-channel map and value panels below; the Layer
+    # tab keeps them unlabelled, the PBR Paint panel carries the Channels heading.
     flow = layout.grid_flow(row_major=True, columns=0, even_columns=False, even_rows=False,
                             align=False)
     flow.use_property_split = False
     flow.use_property_decorate = False
-    for channel_id in channel_ids:
+    for channel_id in (channel_ids if draw_buttons else ()):
         record = records.get(channel_id)
         enabled = record is not None and record.use
         col = flow.column(align=False)
@@ -1144,6 +1301,15 @@ def draw_material_layer_channels(layout, context, material, layer):
         op.channel = channel_id
         op.enable = not enabled
 
+    if not draw_details:
+        return
+
+    # A Fill's mapping sits above the channel map slots it places: the slots are the content, the
+    # mapping decides where that content is read.
+    if layer.source == 'CONSTANT' and (layer.mapping_available or layer.projection_supported):
+        draw_material_layer_mapping_panel(layout, context, layer)
+        layout.separator()
+
     if switches_only:
         # The switches are the whole choice: no map or value per channel.
         return
@@ -1153,14 +1319,10 @@ def draw_material_layer_channels(layout, context, material, layer):
         # channel shows the row's ColorRamp inside it; a scalar channel shows its own value ramp,
         # whose grey stops are edited with the gradient value slider the Mask Base uses.
         channel_col = layout.column(align=False)
-        first = True
         for channel_id in channel_ids:
             record = records.get(channel_id)
             if record is None or not record.use:
                 continue
-            if not first:
-                channel_col.separator()
-            first = False
             header, panel = channel_col.panel(
                 "material_paint_gradient_{:s}".format(channel_id.lower()),
                 default_closed=False,
@@ -1208,7 +1370,6 @@ def draw_material_layer_channels(layout, context, material, layer):
         )
 
     channel_col = layout.column(align=False)
-    first = True
     for channel_id in channel_ids:
         record = records.get(channel_id)
         if record is None or not record.use:
@@ -1218,9 +1379,6 @@ def draw_material_layer_channels(layout, context, material, layer):
         # (AO starts without one). The channel switch above stays either way.
         if _layer_channel_subpanel_hidden(context, layer, record):
             continue
-        if not first:
-            channel_col.separator()
-        first = False
         _draw_channel_panel(
             channel_col,
             context,

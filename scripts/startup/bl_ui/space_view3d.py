@@ -7620,6 +7620,13 @@ class VIEW3D_PT_active_tool(Panel, ToolActivePanelHelper):
             brush = context.tool_settings.sculpt.brush
             if brush and brush.sculpt_brush_type == 'TEXTURE_FILL':
                 draw_image_paint_fill_expand(self.layout, context, brush)
+            if brush is not None:
+                paint_mode = context.tool_settings.paint_mode
+                draw_material_paint_channels(
+                    context, self.layout, brush, context.tool_settings.sculpt, paint_mode,
+                    show_custom=(paint_mode.canvas_source == 'MATERIAL_PAINT'),
+                    draw_source=True,
+                )
 
 
 # FIXME(campbell): remove this second panel once 'HIDE_HEADER' works with category tabs,
@@ -7641,6 +7648,13 @@ class VIEW3D_PT_active_tool_duplicate(Panel, ToolActivePanelHelper):
             brush = context.tool_settings.sculpt.brush
             if brush and brush.sculpt_brush_type == 'TEXTURE_FILL':
                 draw_image_paint_fill_expand(self.layout, context, brush)
+            if brush is not None:
+                paint_mode = context.tool_settings.paint_mode
+                draw_material_paint_channels(
+                    context, self.layout, brush, context.tool_settings.sculpt, paint_mode,
+                    show_custom=(paint_mode.canvas_source == 'MATERIAL_PAINT'),
+                    draw_source=True,
+                )
 
 
 class VIEW3D_PT_view3d_properties(Panel):

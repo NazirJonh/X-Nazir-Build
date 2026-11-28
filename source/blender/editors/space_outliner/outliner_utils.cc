@@ -10,6 +10,7 @@
 #include <cstring>
 
 #include "BLI_listbase.h"
+#include "BLI_rect.h"
 #include "BLI_utildefines.h"
 
 #include "DNA_action_types.h"
@@ -513,6 +514,31 @@ float outliner_stack_preview_size()
   return ICON_DEFAULT_HEIGHT * OUTLINER_STACK_PREVIEW_SCALE * UI_SCALE_FAC;
 }
 
+float outliner_stack_preview_gap()
+{
+  return UI_UNIT_X * 0.25f;
+}
+
+float outliner_stack_leading_icon_width(const bool leading_icon)
+{
+  return leading_icon ? UI_UNIT_X + 4.0f * UI_UNIT_X / 20.0f : 0.0f;
+}
+
+float outliner_stack_slot_icon_scale(const rctf &slot_rect)
+{
+  return BLI_rctf_size_y(&slot_rect) / (ICON_DEFAULT_HEIGHT * UI_SCALE_FAC);
+}
+
+bool outliner_stack_rows_big(const SpaceOutliner &space_outliner)
+{
+  return (space_outliner.stack_layers_flag & SO_SL_SMALL_ROWS) == 0;
+}
+
+float outliner_stack_preview_slot_size(const SpaceOutliner &space_outliner)
+{
+  return outliner_stack_rows_big(space_outliner) ? outliner_stack_preview_size() : UI_UNIT_X;
+}
+
 static rctf outliner_stack_preview_rect_impl(const float row_x,
                                              const float content_y,
                                              const int slot_index,
@@ -520,8 +546,8 @@ static rctf outliner_stack_preview_rect_impl(const float row_x,
 {
   const float preview_size = outliner_stack_preview_size();
   /* Gap between multiple previews. */
-  const float preview_gap = UI_UNIT_X * 0.25f;
-  const float leading_icon_width = has_leading_icon ? UI_UNIT_X + 4.0f * UI_UNIT_X / 20.0f : 0.0f;
+  const float preview_gap = outliner_stack_preview_gap();
+  const float leading_icon_width = outliner_stack_leading_icon_width(has_leading_icon);
 
   rctf rect;
   rect.xmin = row_x + UI_UNIT_X + leading_icon_width +
@@ -532,16 +558,63 @@ static rctf outliner_stack_preview_rect_impl(const float row_x,
   return rect;
 }
 
-rctf outliner_stack_row_preview_rect(const StackRow &row,
-                                     const float row_x,
-                                     const float content_y,
-                                     const int slot_index)
+/**
+ * The compact row's preview geometry: one slot per unit icon, at the same height as the row's own
+ * icon. The simplified-mode row is only one unit tall, so the two-unit slot of a Large row would
+ * overflow it; this variant keeps the slot square by shrinking it to the icon it stands in for.
+ */
+static rctf outliner_stack_compact_preview_rect_impl(const float row_x,
+                                                     const float content_y,
+                                                     const int slot_index,
+                                                     const bool has_leading_icon)
+{
+  const float slot_size = UI_UNIT_X;
+  const float preview_gap = outliner_stack_preview_gap();
+  const float leading_icon_width = outliner_stack_leading_icon_width(has_leading_icon);
+
+  rctf rect;
+  rect.xmin = row_x + UI_UNIT_X + leading_icon_width + slot_index * (slot_size + preview_gap);
+  rect.xmax = rect.xmin + slot_size;
+  rect.ymin = content_y + (UI_UNIT_Y - slot_size) * 0.5f;
+  rect.ymax = rect.ymin + slot_size;
+  return rect;
+}
+
+rctf outliner_stack_row_compact_preview_rect(const StackRow &row,
+                                             const float row_x,
+                                             const float content_y,
+                                             const int slot_index)
+{
+  /* Same leading-icon rule as the Large row: a slot that keeps the row's own icon pushes every
+   * slot past that icon, so draw and hit-test shift together. */
+  const bool has_leading_icon = !row.preview_slots.is_empty() &&
+                                row.preview_slots[0].keeps_row_icon;
+  return outliner_stack_compact_preview_rect_impl(
+      row_x, content_y, slot_index, has_leading_icon);
+}
+
+static rctf outliner_stack_row_preview_rect(const StackRow &row,
+                                            const float row_x,
+                                            const float content_y,
+                                            const int slot_index)
 {
   /* The row's own icon is drawn ahead of the first slot when that slot says so; the geometry
    * follows it, so every consumer shifts by the same amount without computing it again. */
   const bool has_leading_icon = !row.preview_slots.is_empty() &&
                                 row.preview_slots[0].keeps_row_icon;
   return outliner_stack_preview_rect_impl(row_x, content_y, slot_index, has_leading_icon);
+}
+
+rctf outliner_stack_row_preview_rect(const SpaceOutliner &space_outliner,
+                                     const StackRow &row,
+                                     const float row_x,
+                                     const float content_y,
+                                     const int slot_index)
+{
+  const bool big_rows = outliner_stack_rows_big(space_outliner);
+  return big_rows ? outliner_stack_row_preview_rect(row, row_x, content_y, slot_index) :
+                    outliner_stack_row_compact_preview_rect(
+                        row, row_x, content_y, slot_index);
 }
 
 rctf outliner_stack_slot_preview_rect(const float row_x,

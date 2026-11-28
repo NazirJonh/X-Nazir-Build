@@ -74,8 +74,14 @@ static bool scene_light_rotate_poll(bContext *C)
    * operator tool is active (see #material_view_pass_cycle_poll for the same reasoning). */
   const bToolRef *tref = WM_toolsystem_ref_from_context(C);
   if (tref == nullptr || tref->runtime == nullptr ||
-      (tref->runtime->flag & TOOLREF_FLAG_USE_BRUSHES) == 0 || !paint_pbr_brush_type_active(C))
+      !ed::sculpt_paint::paint_sculpt_tool_display_is_paint(C))
   {
+    return false;
+  }
+  /* A brush tool must still be a PBR paint brush: another brush keeps its own Shift-RMB use. An
+   * operator tool (Color Gradient, Select Box, Shape, Curve Edit) has no brush of its own, so the
+   * Paint group alone is its answer. */
+  if ((tref->runtime->flag & TOOLREF_FLAG_USE_BRUSHES) != 0 && !paint_pbr_brush_type_active(C)) {
     return false;
   }
   /* Only where the shading's own light takes the rotation: elsewhere the drag would move a value

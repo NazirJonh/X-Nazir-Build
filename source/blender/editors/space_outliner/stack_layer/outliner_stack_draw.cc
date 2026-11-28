@@ -37,6 +37,7 @@
 #include "BLI_math_color.h"
 #include "BLI_math_vector.h"
 #include "BLI_path_utils.hh"
+#include "BLI_rect.h"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_string_utils.hh"
@@ -132,6 +133,9 @@ namespace ed::outliner {
  */
 void stack_preview_empty_draw(const rctf &preview_rect, const int icon, const float alpha_fac)
 {
+  /* The slot's own height decides the icon's scale, so a unit slot fills its square and a Large
+   * slot keeps its familiar preview size. */
+  const float icon_scale = outliner_stack_slot_icon_scale(preview_rect);
   ui::icon_draw_ex(preview_rect.xmin,
                    preview_rect.ymin,
                    icon,
@@ -142,7 +146,7 @@ void stack_preview_empty_draw(const rctf &preview_rect, const int icon, const fl
                    false,
                    nullptr,
                    false,
-                   OUTLINER_STACK_PREVIEW_SCALE);
+                   icon_scale);
 
   float preview_border[4];
   ui::theme::get_color_blend_4f(TH_TEXT, TH_BACK, 0.9f, preview_border);
@@ -234,10 +238,32 @@ bool stack_preview_slot_rendered_draw(const bContext *C,
 float outliner_stack_preview_row_width(const bool leading_icon, const int num_previews)
 {
   const int slots = std::max(1, num_previews);
-  const float leading_icon_width = leading_icon ? UI_UNIT_X + 4.0f * (UI_UNIT_X / 20.0f) : 0.0f;
-  const float preview_gap = UI_UNIT_X * 0.25f;
+  const float leading_icon_width = outliner_stack_leading_icon_width(leading_icon);
+  const float preview_gap = outliner_stack_preview_gap();
   return leading_icon_width + slots * outliner_stack_preview_size() + (slots - 1) * preview_gap +
          2.0f * OUTLINER_STACK_PREVIEW_FRAME_MARGIN * UI_SCALE_FAC;
+}
+
+/**
+ * The compact-row twin of #outliner_stack_preview_row_width: the same span with unit-square slots.
+ * It carries the same frame margin, so the active-section frame cannot overlap the name.
+ */
+float outliner_stack_compact_preview_row_width(const bool leading_icon, const int num_previews)
+{
+  const int slots = std::max(1, num_previews);
+  const float leading_icon_width = outliner_stack_leading_icon_width(leading_icon);
+  const float preview_gap = outliner_stack_preview_gap();
+  return leading_icon_width + slots * UI_UNIT_X + (slots - 1) * preview_gap +
+         2.0f * OUTLINER_STACK_PREVIEW_FRAME_MARGIN * UI_SCALE_FAC;
+}
+
+float outliner_stack_preview_row_width(const SpaceOutliner &space_outliner,
+                                       const bool leading_icon,
+                                       const int num_previews)
+{
+  const bool big_rows = outliner_stack_rows_big(space_outliner);
+  return big_rows ? outliner_stack_preview_row_width(leading_icon, num_previews) :
+                    outliner_stack_compact_preview_row_width(leading_icon, num_previews);
 }
 
 /**
@@ -292,7 +318,7 @@ int stack_child_start_x(const SpaceOutliner &space_outliner,
        * there is nothing to line up with. */
       const StringRefNull aux_section = stack_aux_section_id(space_outliner);
       if (!aux_section.is_empty() && row->parent_section_id == aux_section &&
-          child.parent != nullptr && (space_outliner.stack_layers_flag & SO_SL_SMALL_ROWS) == 0)
+          child.parent != nullptr)
       {
         const TreeStoreElem *parent_tselem = TREESTORE(child.parent);
         const StackRow *parent_row = (parent_tselem->type == TSE_STACK_LAYER) ?
@@ -303,7 +329,7 @@ int stack_child_start_x(const SpaceOutliner &space_outliner,
           for (const int slot_index : parent_row->preview_slots.index_range()) {
             if (parent_row->preview_slots[slot_index].section_id == aux_section) {
               const rctf mask_rect = outliner_stack_row_preview_rect(
-                  *parent_row, float(parent_startx), 0.0f, slot_index);
+                  space_outliner, *parent_row, float(parent_startx), 0.0f, slot_index);
               return int(mask_rect.xmin) - int(UI_UNIT_X);
             }
           }

@@ -2948,6 +2948,21 @@ Material *BKE_paint_layers_material_source_make_local(Main &bmain,
                                                       Material &ma,
                                                       MaterialPaintLayer *layer);
 
+/**
+ * Localize the linked source material \a layer reads when there is one to localize, reporting the
+ * warning that its preview stays unavailable if that fails.
+ *
+ * The one entry point every caller that assigns or re-points a source uses: it folds the
+ * can-make-local test, the localization and the user-facing warning into one place.
+ *
+ * \return true when there was nothing to localize or the source is now local, false when the
+ *         linked source was refused by #BKE_paint_layers_material_source_make_local.
+ */
+bool BKE_paint_layers_material_source_ensure_local(Main &bmain,
+                                                   Material &ma,
+                                                   MaterialPaintLayer *layer,
+                                                   ReportList *reports);
+
 /* -------------------------------------------------------------------- */
 /** \name Material rows: maps rendered from the source
  *

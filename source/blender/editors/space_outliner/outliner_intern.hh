@@ -794,6 +794,17 @@ constexpr float OUTLINER_STACK_PREVIEW_SCALE = 1.5f;
 
 /** The pixel size of one preview slot, at the current interface scale. */
 float outliner_stack_preview_size();
+/** The gap between two preview slots. */
+float outliner_stack_preview_gap();
+/** Width a slot's leading row icon takes, or zero when the first slot replaces it. */
+float outliner_stack_leading_icon_width(bool leading_icon);
+/** One icon/placeholder scale for a slot, derived from the slot's own height. Large slots give
+ * 1.5, compact unit slots fill their square. */
+float outliner_stack_slot_icon_scale(const rctf &slot_rect);
+/** The size of one preview slot in the space's current row mode. */
+float outliner_stack_preview_slot_size(const SpaceOutliner &space_outliner);
+/** Whether the space draws its stack rows Large (the default) rather than compact. */
+bool outliner_stack_rows_big(const SpaceOutliner &space_outliner);
 
 /**
  * The exact rectangle the draw paints the row's preview slot \a slot_index into, in window
@@ -801,8 +812,9 @@ float outliner_stack_preview_size();
  *
  * Geometry shared by the draw that paints it, the tooltips that cover it and the hit-test that
  * reads the cursor against it: all three have to agree to the pixel, so the formula lives in
- * exactly one place. When the row's first slot keeps the row's own icon, every slot's rectangle
- * sits one icon further right, past that icon.
+ * exactly one place. The space decides between the Large slot and the compact unit slot. When the
+ * row's first slot keeps the row's own icon, every slot's rectangle sits one icon further right,
+ * past that icon.
  *
  * \param row_x: where the row's own content starts, and \a content_y its one-unit content line.
  * Both are passed rather than read off \a te, because #TreeElement.xs and #TreeElement.ys are
@@ -810,10 +822,17 @@ float outliner_stack_preview_size();
  * hold the previous layout's numbers, and nothing at all the first time a rebuilt tree is drawn.
  * The draw hands over its running position; the passes that run after it read the layout.
  */
-rctf outliner_stack_row_preview_rect(const ed::outliner::StackRow &row,
+rctf outliner_stack_row_preview_rect(const SpaceOutliner &space_outliner,
+                                     const ed::outliner::StackRow &row,
                                      float row_x,
                                      float content_y,
                                      int slot_index);
+
+/** The same slot at compact-row size: one unit square, for a row drawn without Large Rows. */
+rctf outliner_stack_row_compact_preview_rect(const ed::outliner::StackRow &row,
+                                             float row_x,
+                                             float content_y,
+                                             int slot_index);
 
 /** The rectangle a preview-shaped placeholder -- an object row's or an empty slot's -- draws into:
  * the first slot's geometry, without a leading icon. */
@@ -842,6 +861,12 @@ constexpr float OUTLINER_STACK_COLUMN_STACKED_GAP = 3.2f;
 
 /** Width a Stack Layers row's preview slots occupy, from the leading icon to the last frame. */
 float outliner_stack_preview_row_width(bool leading_icon, int num_previews);
+/** The same width for compact rows, whose slots are one unit square rather than preview sized. */
+float outliner_stack_compact_preview_row_width(bool leading_icon, int num_previews);
+/** The row width in the space's current row mode: Large or compact. */
+float outliner_stack_preview_row_width(const SpaceOutliner &space_outliner,
+                                       bool leading_icon,
+                                       int num_previews);
 /** Where the one-unit-tall content of a row whose bottom is \a row_bottom sits. */
 int stack_row_content_offset(int row_bottom, int row_height);
 /** The content line of \a te, from the layout the draw pass wrote. */

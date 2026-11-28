@@ -88,14 +88,18 @@ static const StackRowPreview *outliner_stack_preview_slot_from_cursor(
     std::string &r_section_id)
 {
   const TreeStoreElem *tselem = TREESTORE(&te);
-  if (tselem->type != TSE_STACK_LAYER ||
-      (space_outliner.stack_layers_flag & SO_SL_SMALL_ROWS) != 0)
-  {
+  if (tselem->type != TSE_STACK_LAYER) {
     return nullptr;
   }
 
   const StackRow *row = outliner_stack_row_find(space_outliner, tselem->nr);
   if (row == nullptr || row->preview_slots.is_empty()) {
+    return nullptr;
+  }
+  /* A per-row compact row draws no slots (see the `stack_row_compact` gate in
+   * `outliner_draw_tree_element`), so its rectangles must not be hit either: they would overlap
+   * the row's name and buttons. */
+  if (row->compact) {
     return nullptr;
   }
 
@@ -105,7 +109,7 @@ static const StackRowPreview *outliner_stack_preview_slot_from_cursor(
    * te.ys, which the finished draw has written, is as good a line as any here. */
   for (const int slot_index : row->preview_slots.index_range()) {
     const rctf preview_rect = outliner_stack_row_preview_rect(
-        *row, float(te.xs), float(te.ys), slot_index);
+        space_outliner, *row, float(te.xs), float(te.ys), slot_index);
     if (view_x < preview_rect.xmin || view_x > preview_rect.xmax) {
       continue;
     }

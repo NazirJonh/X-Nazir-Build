@@ -331,75 +331,6 @@ void paint_source_status_slot_append(const Material &material,
 }
 
 /**
- * The compact source controls a Material correction or mask item carries in the stack view: the
- * scope, the live-or-canvas mode, the canvas size and the update setting. They are cycle buttons --
- * the row has one value and one mode column, both already carrying the correction's own settings,
- * and no room for four enums -- and each calls a `material.paint_layer_source_*` operator that
- * resolves the row again from the owner's session uid and the row's marker. An identity, not a
- * pointer: the row can be rebuilt, or the DNA moved by undo, between this build and the click.
- *
- * Every Material row chooses its mode; a narrowed row's render is the referenced row whole in
- * either one. The size only means something once the row reads a canvas, so that button appears
- * with the state it acts on. The tooltip names the state the row is in and what the click switches
- * it to.
- */
-void paint_source_controls_append(StackRow &row,
-                                  const Material &material,
-                                  const MaterialPaintLayer &item)
-{
-  if (item.source != MA_PAINT_LAYER_SOURCE_MATERIAL || item.material == nullptr) {
-    return;
-  }
-  const bool narrowed = BKE_paint_layers_material_row_narrowed(item);
-  const bool canvas = BKE_paint_layers_material_row_is_canvas(item);
-  const bool manual = item.source_refresh == MA_PAINT_LAYER_SOURCE_REFRESH_MANUAL;
-  /* A session uid names the owner while the row sits in the tree; the int property carries its
-   * bits, an id pointer would be stale after the next undo. */
-  const int owner_uid = int(material.id.session_uid);
-  const auto add = [&](const char *operator_idname,
-                       const int icon,
-                       const bool pressed,
-                       std::string tooltip) {
-    StackRowButton button;
-    button.operator_idname = operator_idname;
-    button.icon = icon;
-    button.pressed = pressed;
-    button.int_prop = "session_uid";
-    button.int_value = owner_uid;
-    button.tooltip = std::move(tooltip);
-    row.buttons.append(std::move(button));
-  };
-  add("MATERIAL_OT_paint_layer_source_scope_toggle",
-      narrowed ? ICON_LAYER_ACTIVE : ICON_MATERIAL,
-      narrowed,
-      narrowed ? TIP_("Source: one row of the material. Click for the whole material") :
-                 TIP_("Source: the whole material. Click for one row of its stack"));
-  /* A narrowed row has both modes too: its source is the referenced row rendered whole, and the
-   * mode decides whether that render is read at the row's UV or laid on a canvas. */
-  add("MATERIAL_OT_paint_layer_source_canvas_toggle",
-      canvas ? ICON_IMAGE_DATA : ICON_UV,
-      canvas,
-      canvas ?
-          TIP_("Source: rendered to a canvas, with the Mapping and the projections. Click for "
-               "Live UV") :
-          TIP_("Source: read at the active UV. Click to render it to a canvas"));
-  if (canvas) {
-    const std::string size = (item.material_canvas_size == 0) ?
-                                 TIP_("Inherit") :
-                                 fmt::format("{:d} px", int(item.material_canvas_size));
-    add("MATERIAL_OT_paint_layer_source_size_cycle",
-        ICON_IMAGE,
-        false,
-        fmt::format(fmt::runtime(TIP_("Canvas size: {}. Click for the next size")), size));
-  }
-  add("MATERIAL_OT_paint_layer_source_refresh_toggle",
-      manual ? ICON_HAND : ICON_FILE_REFRESH,
-      manual,
-      manual ? TIP_("Update: manual, waits for Update Now. Click to follow the source") :
-               TIP_("Update: follows the source. Click to wait for Update Now"));
-}
-
-/**
  * Point the value column at the per-channel opacity of \a layer for \a channel, so the header's
  * channel cursor edits that channel alone. Every row has one, a folder and a correction included,
  * whether or not it has a record for the channel.
@@ -535,12 +466,10 @@ StackRow paint_correction_row_build(const Material &material,
      * as for a Material layer. A reader shows the slice its point publishes. */
     if (from_material) {
       /* A Material correction carries its source's state the way the panel's source block would
-       * show it: the row warns when its maps are behind, refused or sourceless, its compact
-       * buttons step the scope, the canvas mode and size and the update setting, and its action
+       * show it: the row warns when its maps are behind, refused or sourceless, and its action
        * button is the Update Now the panel's button is. Everything that needs a value stays in
        * the panel; the row is the at-a-glance state and the one-click render. */
       paint_source_status_slot_append(material, effect, row);
-      paint_source_controls_append(row, material, effect);
       row.action_icon = ICON_FILE_REFRESH;
       row.action_tooltip = TIP_(
           "Update Now: re-render the maps of this correction from its source, whatever the update "
@@ -669,10 +598,9 @@ StackRow paint_mask_item_row_build(const Material &material,
     /* Its grey is its source's Base Color (or the slice it reads) and it owns no map: nothing to
      * preview or paint. A reader's issues (a bad reference, a UDIM slice) are shown here. */
     if (from_material) {
-      /* The mask form gets the same compact source controls and status as a content correction:
-       * its canvas, scope and update setting are its own record's. */
+      /* The mask form gets the same source status as a content correction; its canvas, scope and
+       * update setting are edited in the Layer panel. */
       paint_source_status_slot_append(material, item, row);
-      paint_source_controls_append(row, material, item);
       row.action_icon = ICON_FILE_REFRESH;
       row.action_tooltip = TIP_(
           "Update Now: re-render the maps of this mask from its source, whatever the update "
@@ -3203,6 +3131,10 @@ class PaintLayersStackSource final : public StackSource,
       }
       return -1;
     }
+    /* A Material row reads its source, and the preview system skips linked IDs: localize the
+     * source with the Add, the way a material dropped on the stack is imported local. */
+    BKE_paint_layers_material_source_ensure_local(
+        *CTX_data_main(&C), material, created, CTX_wm_reports(&C));
     /* A live Curve Patch session owns the tool while it runs; the Add makes another row the active
      * one (or enters a new effect's tool right away), so it commits first -- otherwise the
      * effect's snapshot brush would stay in the hand after the new row took over. */

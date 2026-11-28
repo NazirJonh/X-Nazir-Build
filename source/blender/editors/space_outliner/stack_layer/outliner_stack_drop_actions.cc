@@ -1029,6 +1029,11 @@ class MaterialToAttachedSourceAction final : public StackDropAction {
     if (row == nullptr || !BKE_paint_layers_set_material(material, row, source)) {
       return false;
     }
+    /* A mask or a correction reads its source the way a Material row does: a linked source cannot
+     * show its preview, and its graph is not regenerated under a linked ID. Localize it with the
+     * re-point, as the Add and the Layer panel's slot assignment do. */
+    BKE_paint_layers_material_source_ensure_local(
+        *CTX_data_main(&C), material, row, CTX_wm_reports(&C));
     if (BKE_paint_layers_material_row_narrowed(*row) &&
         BLI_uuid_is_nil(row->material_row_marker))
     {

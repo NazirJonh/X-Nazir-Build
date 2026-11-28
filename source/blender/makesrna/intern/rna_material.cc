@@ -2105,6 +2105,11 @@ static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
     layer->source = MA_PAINT_LAYER_SOURCE_NODE_GROUP;
     layer->kind_subtype = 0;
   }
+  /* A linked source cannot be previewed: the preview system skips linked IDs. Localize it with the
+   * Add, the same way the other Add paths and the asset drop do. */
+  if (bmain != nullptr) {
+    BKE_paint_layers_material_source_ensure_local(*bmain, *ma, layer, reports);
+  }
   /* A fresh row becomes the cursor, mirroring what the UI does when it adds one, unless the caller
    * builds a stack unattended and passes make_active=False to leave the cursor alone. */
   if (make_active) {
@@ -2199,6 +2204,12 @@ static void rna_Material_paint_layer_add_material_do(bContext *C,
                             "That material cannot be read here: it is this material, or it "
                             "already reads it");
     return;
+  }
+  Main *bmain = (C != nullptr) ? CTX_data_main(C) : nullptr;
+  /* A null Main leaves the source linked: there is nothing to own the local copy. */
+  if (bmain != nullptr) {
+    BKE_paint_layers_material_source_ensure_local(
+        *bmain, *ma, layer, (C != nullptr) ? CTX_wm_reports(C) : nullptr);
   }
   BKE_paint_layers_active_set(*ma, layer->marker);
   /* The popover assignment shows the new row: follow it with the Projection Frame tool, like the
@@ -3468,6 +3479,26 @@ static bool rna_MaterialPaintLayer_material_poll(PointerRNA *ptr, PointerRNA val
   const Material *source = static_cast<const Material *>(value.data);
   return owner == nullptr || source == nullptr ||
          !BKE_paint_layers_material_depends_on(*source, *owner);
+}
+
+static void rna_MaterialPaintLayer_material_update(bContext *C, PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  Material *ma = rna_paint_layer_material(ptr, layer);
+  Main *bmain = (C != nullptr) ? CTX_data_main(C) : nullptr;
+  if (ma == nullptr) {
+    return;
+  }
+  if (bmain != nullptr) {
+    /* The preview system skips linked IDs, and the source's graph cannot be regenerated under a
+     * linked ID either: a source assigned to a row is made local with it, as the asset drop path
+     * does. */
+    BKE_paint_layers_material_source_ensure_local(
+        *bmain, *ma, layer, (C != nullptr) ? CTX_wm_reports(C) : nullptr);
+  }
+  /* The property's old update callback was #rna_Material_update, which also redrew the editors:
+   * the BKE edit only tags the depsgraph, so the notifier is this path's to send. */
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
 }
 
 static int rna_MaterialPaintLayer_source_get(PointerRNA *ptr)
@@ -8804,10 +8835,14 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
                                  "rna_MaterialPaintLayer_material_set",
                                  nullptr,
                                  "rna_MaterialPaintLayer_material_poll");
-  RNA_def_property_flag(prop, PROP_EDITABLE);
+  /* The update callback takes the context: it localizes a linked source, which needs the Main of
+   * the file the row lives in. Without this flag makesrna emits the plain update signature and the
+   * generated call cannot be cast to #UpdateFunc. */
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_CONTEXT_UPDATE);
   RNA_def_property_ui_text(
       prop, "Material", "The material a Material layer reads; none for every other source");
-  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+  RNA_def_property_update(
+      prop, NC_MATERIAL | ND_SHADING, "rna_MaterialPaintLayer_material_update");
 
   prop = RNA_def_property(srna, "material_scope", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_material_paint_layer_material_scope_items);

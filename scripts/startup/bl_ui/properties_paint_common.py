@@ -869,35 +869,41 @@ def draw_mask_texture_panel(layout, context, brush, *, is_popover=False, show_gr
 
 
 def draw_pbr_mask_slot(layout, context, brush):
-    """The Mask slot as its own channel-style panel.
+    """The Mask slot with its label row, its always-shown slot and the transform sub-panel.
 
-    Same shape as a PBR channel: a header carrying the slot's socket menu, then the slot source
-    row with its New/Open/Unlink buttons and the placement settings. The overlay opacity and
-    visibility live in the Cursor panel, shared with every other brush. Drawn after the channel rows, never above them: the channels are what a PBR texture
-    set is dropped on, and a Mask widget placed first used to take those drops.
+    Same shape as a PBR channel: the label row carries the slot's socket menu and the assigned
+    source, the slot row is always drawn (the mask texture is dropped there), and the placement
+    settings fold into Mask Transform Settings. The overlay opacity and visibility live in the
+    Cursor panel, shared with every other brush. Drawn after the channel rows, never above them:
+    the channels are what a PBR texture set is dropped on, and a Mask widget placed first used to
+    take those drops.
     """
-    header, panel = layout.panel("pbr_paint_mask", default_closed=False)
-    header.use_property_split = True
-    header.use_property_decorate = False
-    row = header.row(align=True)
-    # Match UI_ITEM_PROP_SEP_DIVIDE (0.4) used by the PBR channel headers.
-    split = row.split(factor=0.4, align=True)
+    label_row = layout.row(align=True)
+    label_row.use_property_split = True
+    label_row.use_property_decorate = False
+    split = label_row.split(factor=0.4, align=True)
     split.label(text="Mask")
     controls = split.row(align=True)
     controls.context_pointer_set("paint_mask_brush", brush)
     controls.template_node_socket(
         color=(0.32, 0.32, 0.32, 1.0), menu="PAINT_MT_material_paint_mask_socket",
     )
-    # Same affordance as a channel header: the assigned source stays reachable while the panel is
-    # collapsed, and clicking it opens the image browser for the slot.
+    # Same affordance as a channel header: the assigned source stays reachable, and clicking it
+    # opens the image browser for the slot.
     if brush.mask_texture is not None:
         controls.template_ID_browser(
             brush.mask_texture_slot, "texture", compact=True,
             open="brush.texture_image_open", image_filter='PAINT_SOURCE',
             browse_images=True, use_users=False,
         )
-    if not panel:
-        return
+    else:
+        # An empty slot still needs a visible target beside the socket: the compact preview draws
+        # nothing without an ID, so the empty state uses the regular browser field.
+        controls.template_ID_browser(
+            brush.mask_texture_slot, "texture",
+            text="", open="brush.texture_image_open", image_filter='PAINT_SOURCE',
+            browse_images=True, use_users=False,
+        )
 
     material_paint = brush.material_paint
     use_grid = material_paint is not None and material_paint.use_mask_grid_source_picker
@@ -908,15 +914,15 @@ def draw_pbr_mask_slot(layout, context, brush):
         # The grid template draws the slot row itself (browse / open / unlink and its own collapse
         # arrow), exactly like the stock Texture Mask panel, so no second slot row is drawn here.
         draw_brush_texture_image_grid(
-            panel, brush.mask_texture_slot, mask_texture_grid_display_mode(context),
+            layout, brush.mask_texture_slot, mask_texture_grid_display_mode(context),
             is_popover=False,
         )
         if texture is not None:
             # The template owns its row, so the mirror toggle sits right under it.
-            panel.prop(brush, "use_mask_texture_invert", text="Invert",
-                       icon='ARROW_LEFTRIGHT', toggle=True)
+            layout.prop(brush, "use_mask_texture_invert", text="Invert",
+                        icon='ARROW_LEFTRIGHT', toggle=True)
     else:
-        row = draw_texture_drop_row(panel, brush.mask_texture_slot, "texture", "Mask")
+        row = draw_texture_drop_row(layout, brush.mask_texture_slot, "texture", "Mask")
         # `template_ID_browser` scales its own row to two units, so match it or the buttons would
         # sit half as tall beside it. Unaligned so they keep their rounded corners.
         if broken_image_slot:
@@ -933,13 +939,15 @@ def draw_pbr_mask_slot(layout, context, brush):
     if material_paint is not None and paint_mask_target_active(context):
         # Shortcuts to the Mask-target stroke settings (same properties as the PBR Paint panel
         # above); they act on strokes that paint the Mask, not on this clip texture.
-        panel.separator()
-        panel.prop(material_paint, "mask_source")
+        layout.separator()
+        layout.prop(material_paint, "mask_source")
         if material_paint.mask_source_has_texture:
-            panel.prop(material_paint, "use_mask_source_invert", text="Invert Source")
+            layout.prop(material_paint, "use_mask_source_invert", text="Invert Source")
 
-    panel.separator()
-    draw_mask_texture_panel(panel, context, brush, show_grid=False, show_invert=False)
+    header, panel = layout.panel("pbr_paint_mask_transform", default_closed=True)
+    header.label(text="Mask Transform Settings")
+    if panel:
+        draw_mask_texture_panel(panel, context, brush, show_grid=False, show_invert=False)
 
 
 class TextureMaskPanel(BrushPanel):
@@ -1947,7 +1955,18 @@ def brush_settings(layout, context, brush, popover=False):
                 row.operator("paint.brush_colors_flip", icon='FILE_REFRESH', text="", emboss=False)
                 row.prop(ups, "use_unified_color", text="", icon='BRUSHES_ALL')
             if not is_erase_mask:
-                layout.prop(brush, "blend", text="Blend Mode")
+                # Only in Source: Material mode does the PBR brush read the Base Color channel's
+                # blend; it takes the Blend Mode slot instead of the brush-level blend, which is
+                # not what drives such a stroke.
+                base_channel = None
+                if material_paint is not None and material_paint.source_mode == 'MATERIAL':
+                    base_channel = next(
+                        (channel for channel in material_paint.channels
+                         if channel.channel == 'BASE_COLOR'), None)
+                if base_channel is not None:
+                    layout.prop(base_channel, "blend", text="Blend Mode")
+                else:
+                    layout.prop(brush, "blend", text="Blend Mode")
 
         # Per sculpt tool options.
 
@@ -2803,13 +2822,16 @@ def _draw_channel_panel(layout, context, view, *, source_enabled=True):
             panel.separator()
         if view.source_draw is not None:
             view.source_draw(panel, context, source_enabled)
+            # Base Color and Normal keep a separator under their Drop image slot; the other
+            # channels read right with the slot and their value widget stacked tight.
+            if view.channel_id in {'BASE_COLOR', 'NORMAL'}:
+                panel.separator()
         return
 
     panel.separator()
     if view.source_draw is not None:
         view.source_draw(panel, context, source_enabled)
     if not has_source and is_scalar:
-        panel.separator()
         data, prop = view.scalar
         row = panel.row(align=True)
         row.template_material_paint_value_slider(data, prop, index=0)
@@ -2891,9 +2913,9 @@ def _brush_channel_view(channel, channel_id, material_paint):
     value_panel = None
     blend = None
     if channel_id == 'BASE_COLOR':
-        # Base Color's color is the brush paint's own, not the channel's.
+        # Base Color's color is the brush paint's own, not the channel's. Its blend is drawn with
+        # the brush settings (it replaces the brush-level Blend Mode there), not in this panel.
         color = (material_paint, "base_color")
-        blend = (channel, "blend")
     elif channel_id == 'NORMAL':
         color = (channel, "normal_color")
     elif channel_id in ('EMISSION', 'SPECULAR_TINT'):
@@ -3548,8 +3570,52 @@ def draw_mask_alpha_swatches(layout, context, brush):
     return True
 
 
+# Fold state of the brush's Material source: Source Layout and Bake Size are tuning, so they stay
+# behind a chevron like the layer source's Source Settings.
+bpy.types.WindowManager.material_paint_source_settings_expanded = bpy.props.BoolProperty(
+    name="Source Settings",
+    description="Show the source layout and bake size of the brush's material source",
+    default=False,
+)
+
+
+def draw_material_paint_brush_source(layout, material_paint):
+    """The Brush Source Maps | Material switch, labelled the way the Layer tab labels Fill Source.
+
+    Drawn in the Active Tool panel: the source mode is a property of the active brush, not of the
+    channel list the PBR Paint panel edits.
+    """
+    split = layout.split(factor=0.4, align=True)
+    split.label(text="Brush Source")
+    row = split.row(align=True)
+    for mode_id, mode_label in (('MAPS', "Maps"), ('MATERIAL', "Material")):
+        row.operator(
+            "paint.material_paint_source_mode_set",
+            text=mode_label,
+            depress=material_paint.source_mode == mode_id,
+        ).mode = mode_id
+
+
+def _draw_material_paint_image_transform(layout, context, material_paint, *,
+                                         show_source_mapping, has_source_mapping):
+    """The shared source placement, drawn last, after every channel sub-panel."""
+    if not show_source_mapping:
+        return
+    header, panel = layout.panel("material_paint_transform", default_closed=True)
+    header.label(text="Image Transform Settings")
+    if panel:
+        panel.active = has_source_mapping
+        shape_tool = paint_shape_tool_active(context)
+        _draw_material_paint_shared_mapping(
+            panel,
+            material_paint,
+            show_map_mode=not shape_tool,
+        )
+    layout.separator()
+
+
 def draw_material_paint_channels(
-        context, layout, brush, paint, paint_mode, *, show_custom):
+        context, layout, brush, paint, paint_mode, *, show_custom, draw_source=False):
     """Draw Material / Material Paint channel enable + value rows.
 
     Used by View3D Canvas and Image Editor Paint Canvas panels. Only Base Color has a blend
@@ -3570,6 +3636,8 @@ def draw_material_paint_channels(
 
     material_paint = brush.material_paint
     if material_paint is None:
+        if not draw_source:
+            return
         # Resolution only matters for images not created yet; once channels exist, this control
         # does nothing (there is no live-resize), so it is offered alongside the button that
         # creates them instead of as a permanent row above. The Material Paint (vertex color)
@@ -3587,20 +3655,15 @@ def draw_material_paint_channels(
 
     is_erase_brush = brush.sculpt_brush_type == 'ERASE'
     channels = {channel.channel: channel for channel in material_paint.channels}
-
-    # Drawn as operator buttons rather than a plain enum: switching to Material has to make a
-    # linked brush local first, because a linked data-block may not reference a local material and
-    # the selector would not even list one. See #PAINT_OT_material_paint_source_mode_set.
-    row = layout.row(align=True)
-    for mode_id, mode_label in (('MAPS', "Maps"), ('MATERIAL', "Material")):
-        row.operator(
-            "paint.material_paint_source_mode_set",
-            text=mode_label,
-            depress=material_paint.source_mode == mode_id,
-        ).mode = mode_id
-
     source_maps_enabled = material_paint.source_mode == 'MAPS'
-    if not source_maps_enabled:
+    is_mask_target = paint_mask_target_active(context)
+
+    if draw_source:
+        # The source mode is a brush property, shown in the Active Tool panel; the channel list
+        # below follows its mode.
+        draw_material_paint_brush_source(layout, material_paint)
+
+    if draw_source and not source_maps_enabled:
         col = layout.column()
         # Normally unreachable: the operator above makes the brush local on the way in. It can
         # still be hit by a file saved in Material mode with a linked brush, so report the reason
@@ -3611,11 +3674,15 @@ def draw_material_paint_channels(
         sub = col.column()
         sub.enabled = not brush_is_linked
         sub.prop(material_paint, "material_source_kind", expand=True)
+        wm = context.window_manager
+        expanded = wm.material_paint_source_settings_expanded
         if material_paint.material_source_kind == 'DEFAULT':
             # Same control as the per-channel image slots (see #_draw_material_paint_source_texture):
             # passing text gives the paint-slot layout, a labelled drop button while empty and a
-            # preview row once assigned. Browse and Unlink come with the template.
-            sub.template_ID_browser(
+            # preview row once assigned. Browse and Unlink come with the template. The Source
+            # Settings chevron shares the row, at its right edge, like the Layer tab's source slot.
+            row = sub.row(align=True)
+            row.template_ID_browser(
                 material_paint,
                 "source_material",
                 text=iface_("Drop material"),
@@ -3623,14 +3690,21 @@ def draw_material_paint_channels(
                 # data-block manager.
                 use_users=False,
             )
+            fold = _slot_row_button(row)
+            fold.prop(wm, "material_paint_source_settings_expanded", text="",
+                      icon='DOWNARROW_HLT' if expanded else 'RIGHTARROW', emboss=False)
         else:
-            sub.template_ID_browser(
+            row = sub.row(align=True)
+            row.template_ID_browser(
                 material_paint,
                 "source_layer_owner",
                 text=iface_("Drop layer material"),
                 filter_type="PAINT_IDF_layer_material",
                 use_users=False,
             )
+            fold = _slot_row_button(row)
+            fold.prop(wm, "material_paint_source_settings_expanded", text="",
+                      icon='DOWNARROW_HLT' if expanded else 'RIGHTARROW', emboss=False)
             layer_owner = material_paint.source_layer_owner
             if layer_owner is None:
                 sub.label(text="Pick a layered material", icon='INFO')
@@ -3669,8 +3743,17 @@ def draw_material_paint_channels(
                         text="Update Now",
                         icon='FILE_REFRESH',
                     )
-        sub.prop(material_paint, "source_layout")
-        sub.prop(material_paint, "source_bake_size")
+        if expanded:
+            sub.prop(material_paint, "source_layout")
+            sub.prop(material_paint, "source_bake_size")
+
+    if draw_source and is_mask_target:
+        layout.prop(material_paint, "mask_source")
+        if material_paint.mask_source_has_texture:
+            layout.prop(material_paint, "use_mask_source_invert", text="Invert Source")
+
+    if draw_source:
+        return
 
     if is_erase_brush:
         # Picking a mode applies its stock stroke parameters (falloff, antialiasing, pressure
@@ -3687,13 +3770,6 @@ def draw_material_paint_channels(
             draw_brush_texture_properties(
                 tex_col, brush, context.sculpt_object, default_closed=True,
             )
-    # The Mask reads this value from the brush, so the choice only matters while painting a mask.
-    is_mask_target = paint_mask_target_active(context)
-    if is_mask_target:
-        layout.prop(material_paint, "mask_source")
-        if material_paint.mask_source_has_texture:
-            layout.prop(material_paint, "use_mask_source_invert", text="Invert Source")
-    layout.separator()
 
     # Use one aligned grid_flow so channel toggles wrap when the panel is too narrow.
     # Labels may be clipped in very tight cells; the short labels below keep controls readable.
@@ -3752,21 +3828,6 @@ def draw_material_paint_channels(
         channels[channel_id].material_source_resolution in {'IMAGE', 'BAKED'}
         for channel_id in toggle_ids if channel_id != 'CUSTOM'
     )
-    if show_source_mapping:
-        header, panel = layout.panel(
-            "material_paint_transform",
-            default_closed=True,
-        )
-        header.label(text="Image Transform Settings")
-        if panel:
-            panel.active = has_source_mapping
-            shape_tool = paint_shape_tool_active(context)
-            _draw_material_paint_shared_mapping(
-                panel,
-                material_paint,
-                show_map_mode=not shape_tool,
-            )
-        layout.separator()
 
     # Wrapped rows of fixed-width toggles; see #_draw_material_paint_channel_toggles.
     if is_erase_brush:
@@ -3781,10 +3842,13 @@ def draw_material_paint_channels(
             erase_col.label(text="Channels to Erase")
             _draw_material_paint_channel_toggles(erase_col, channels, toggle_ids, toggle_labels)
     else:
+        # Section heading, like Sculpt's Symmetrize: the switches are one group, apart from the
+        # per-channel panels below.
+        layout.label(text="Channels")
         _draw_material_paint_channel_toggles(layout, channels, toggle_ids, toggle_labels)
 
     # Image maps: resolution only matters while at least one enabled channel still needs a map.
-    if not show_custom and paint_mode is not None:
+    if source_maps_enabled and not show_custom and paint_mode is not None:
         missing_maps = material_paint_missing_map_channels(
             getattr(context, "active_object", None), brush, paint, paint_mode,
         )
@@ -3801,12 +3865,24 @@ def draw_material_paint_channels(
         # The per-channel value/blend editors are hidden while erasing: an erase stroke removes
         # coverage, it does not paint channel values; configure the values with a Paint brush.
         layout.separator()
+        _draw_material_paint_image_transform(
+            layout, context, material_paint,
+            show_source_mapping=show_source_mapping,
+            has_source_mapping=has_source_mapping)
         draw_pbr_mask_slot(layout, context, brush)
         return
 
-    if any(channels[channel_id].use for channel_id in toggle_ids):
-        layout.separator()
+    if not source_maps_enabled:
+        # Material mode reads the source material's channels; the per-channel value and source
+        # editors below configure brush maps the stroke never reads, so they stay out entirely.
+        _draw_material_paint_image_transform(
+            layout, context, material_paint,
+            show_source_mapping=show_source_mapping,
+            has_source_mapping=has_source_mapping)
+        return
 
+    # The separator after the channel switches is already drawn above; another one here would
+    # double the gap before the Base Color sub-panel.
     # layout.panel() sections need a non-aligned column: align=True sets space_y to 0, so
     # consecutive panel headers/bodies stack with no gap (unlike bl_parent_id sub-panels).
     channel_col = layout.column(align=False)
@@ -3880,8 +3956,12 @@ def draw_material_paint_channels(
             row.prop(paint_mode, "channel_custom_range", text="Range")
 
     # Last, so the channel rows keep their position and stay the drop target a PBR texture set is
-    # aimed at.
+    # aimed at. Image Transform Settings comes right before the Mask label.
     layout.separator()
+    _draw_material_paint_image_transform(
+        layout, context, material_paint,
+        show_source_mapping=show_source_mapping,
+        has_source_mapping=has_source_mapping)
     draw_pbr_mask_slot(layout, context, brush)
 
 
@@ -5661,11 +5741,22 @@ class PAINTVECTOR_UL_curve_patches(bpy.types.UIList):
 
 
 def curve_patch_layer_active_row(context):
-    """The active material's active row, when it is a Curve Patch row (or effect)."""
-    ob = context.active_object
+    """The row whose Curve Patch controls are shown: the active mask item when it is a Curve
+    Patch, else the active row.
+
+    A mask Curve Patch is not `paint_layers.active` -- that answers the layer it hangs on -- so it
+    is asked for through `active_mask_item`, exactly the row the C operators resolve
+    (#BKE_paint_layers_active_curve_patch_row_get). The Layer tab's `_shown_mask_item` fallback to
+    the first mask item while Mask is the target mode is deliberately not repeated here: the C
+    operators do not resolve that item, so offering its curves would be inert.
+    """
+    ob = getattr(context, "active_object", None) or getattr(context, "object", None)
     ma = ob.active_material if ob is not None else None
     if ma is None or not hasattr(ma, "paint_layers"):
         return None
+    item = ma.paint_layers.active_mask_item
+    if (item is not None and item.source == 'CURVE_PATCH' and item.curve_patch is not None):
+        return item
     row = ma.paint_layers.active
     if row is None or row.curve_patch is None:
         return None
@@ -5751,6 +5842,77 @@ class CURVE_PATCH_LAYER_PT_opacity_options(bpy.types.Panel):
         layout.prop(session, "active_point_opacity_falloff", text="Opacity Falloff", slider=True)
 
 
+def draw_curve_patch_curves(layout, context, row_data):
+    """The curve elements of a Curve Patch row, for the row's tool panel or the Layer tab.
+
+    The list with add/remove/duplicate and the Solo toggle, then the active curve's width, opacity,
+    external Curve object, point opacity and its own Mirror axes. Shared so a mask Curve Patch
+    offers exactly the controls a content effect does.
+    """
+    pv = row_data.curve_patch.vectors if (row_data is not None and
+                                          row_data.curve_patch is not None) else None
+    if pv is None:
+        layout.label(text="No Curve Patch effect active", icon='INFO')
+        return
+
+    layout.separator()
+    row = layout.row()
+    row.template_list("PAINTVECTOR_UL_curve_patches", "", pv, "elements", pv, "active_item")
+    col = row.column(align=True)
+    col.operator("paint.curve_patch_layer_curve_move", text="",
+                 icon='TRIA_UP').direction = 'UP'
+    col.operator("paint.curve_patch_layer_curve_move", text="",
+                 icon='TRIA_DOWN').direction = 'DOWN'
+    col.separator()
+    col.operator("paint.curve_patch_layer_curve_add", text="", icon='ADD')
+    col.operator("paint.curve_patch_layer_curve_remove", text="", icon='REMOVE')
+    col.operator("paint.curve_patch_layer_curve_duplicate", text="", icon='DUPLICATE')
+    col.separator()
+    # The icon names the mode the click switches to: Solo shows only the selected curve.
+    col.prop(pv, "show_all_curves", text="",
+             icon='ONIONSKIN_OFF' if pv.show_all_curves else 'ONIONSKIN_ON')
+
+    if pv.elements and 0 <= pv.active_item < len(pv.elements):
+        active = pv.elements[pv.active_item]
+        # The look is the container item's: it edits (and bakes) without any editor open, and a
+        # running 3D or 2D session follows it. Only the per-point values belong to a session.
+        look = (context.object.curve_patch_layer_look
+                if context.object is not None else None)
+        if active.type == 'CURVE_PATCH':
+            col = layout.column(align=True)
+            col.prop(active, "opacity", slider=True)
+            col.prop(active, "width", slider=True)
+            col.separator()
+            # An external Curves object can replace this curve's own control curve: the object
+            # is the curve's source of truth while set, and shape edits are written back into it.
+            col.prop(active, "curve_object", text="Curve Object")
+            if active.curve_object is not None:
+                col.prop(active, "curve_object_spline", text="Spline")
+            col.separator()
+            # The per-point value is the curve-wide Opacity's multiplier for one control point;
+            # it needs an active control point, which exists only while a session (either
+            # space) edits the curve. The falloff lives in the popover.
+            point_row = col.row(align=True)
+            point_row.active = look is not None and look.active_point >= 0
+            if look is not None:
+                point_row.prop(look, "active_point_opacity", text="Point Opacity", slider=True)
+            else:
+                point_row.label(text="Point Opacity (edit the curve to set)")
+            point_row.popover(
+                panel="CURVE_PATCH_LAYER_PT_opacity_options",
+                text="",
+                icon='SMOOTHCURVE',
+            )
+            # Per curve, and added to the mesh's own symmetry rather than replacing it.
+            col.separator()
+            symm_col = col.column(align=True)
+            symm_col.label(text="Mirror")
+            symm_row = symm_col.row(align=True)
+            symm_row.prop(active, "use_symmetry_x", text="X", toggle=True)
+            symm_row.prop(active, "use_symmetry_y", text="Y", toggle=True)
+            symm_row.prop(active, "use_symmetry_z", text="Z", toggle=True)
+
+
 class CURVE_PATCH_LAYER_PT_curves(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
@@ -5759,6 +5921,11 @@ class CURVE_PATCH_LAYER_PT_curves(Panel):
 
     @classmethod
     def poll(cls, context):
+        # 3D View sidebar only: the Tool tab of the Properties editor shares these tool panels,
+        # where this curve list would sit beside the Layer Material tab's own Curve Patch block.
+        space = getattr(context, "space_data", None)
+        if space is None or space.type != 'VIEW_3D':
+            return False
         ob = context.active_object
         if ob is None or ob.type != 'MESH':
             return False
@@ -5769,72 +5936,12 @@ class CURVE_PATCH_LAYER_PT_curves(Panel):
     def draw(self, context):
         layout = self.layout
         row_data = curve_patch_layer_active_row(context)
-        pv = row_data.curve_patch.vectors if row_data is not None else None
-        if pv is None:
+        if row_data is None:
             layout.label(text="No Curve Patch effect active", icon='INFO')
             return
-
-        # The effect's tool state: a private snapshot, replaced (never shared) by assignment. The
-        # field takes a brush dropped from the Asset Shelf or the Asset Browser, or picked from its
-        # dropdown; either way the effect gets a duplicate of that brush.
-        draw_curve_patch_brush_drop_row(layout, row_data.curve_patch)
-
-        layout.separator()
-        row = layout.row()
-        row.template_list("PAINTVECTOR_UL_curve_patches", "", pv, "elements", pv, "active_item")
-        col = row.column(align=True)
-        col.operator("paint.curve_patch_layer_curve_move", text="",
-                     icon='TRIA_UP').direction = 'UP'
-        col.operator("paint.curve_patch_layer_curve_move", text="",
-                     icon='TRIA_DOWN').direction = 'DOWN'
-        col.separator()
-        col.operator("paint.curve_patch_layer_curve_add", text="", icon='ADD')
-        col.operator("paint.curve_patch_layer_curve_remove", text="", icon='REMOVE')
-        col.operator("paint.curve_patch_layer_curve_duplicate", text="", icon='DUPLICATE')
-        col.separator()
-        # The icon names the mode the click switches to: Solo shows only the selected curve.
-        col.prop(pv, "show_all_curves", text="",
-                 icon='ONIONSKIN_OFF' if pv.show_all_curves else 'ONIONSKIN_ON')
-
-        if pv.elements and 0 <= pv.active_item < len(pv.elements):
-            active = pv.elements[pv.active_item]
-            # The look is the container item's: it edits (and bakes) without any editor open, and a
-            # running 3D or 2D session follows it. Only the per-point values belong to a session.
-            look = (context.object.curve_patch_layer_look
-                    if context.object is not None else None)
-            if active.type == 'CURVE_PATCH':
-                col = layout.column(align=True)
-                col.prop(active, "opacity", slider=True)
-                col.prop(active, "width", slider=True)
-                col.separator()
-                # An external Curves object can replace this curve's own control curve: the object
-                # is the curve's source of truth while set, and shape edits are written back into it.
-                col.prop(active, "curve_object", text="Curve Object")
-                if active.curve_object is not None:
-                    col.prop(active, "curve_object_spline", text="Spline")
-                col.separator()
-                # The per-point value is the curve-wide Opacity's multiplier for one control point;
-                # it needs an active control point, which exists only while a session (either
-                # space) edits the curve. The falloff lives in the popover.
-                point_row = col.row(align=True)
-                point_row.active = look is not None and look.active_point >= 0
-                if look is not None:
-                    point_row.prop(look, "active_point_opacity", text="Point Opacity", slider=True)
-                else:
-                    point_row.label(text="Point Opacity (edit the curve to set)")
-                point_row.popover(
-                    panel="CURVE_PATCH_LAYER_PT_opacity_options",
-                    text="",
-                    icon='SMOOTHCURVE',
-                )
-                # Per curve, and added to the mesh's own symmetry rather than replacing it.
-                col.separator()
-                symm_col = col.column(align=True)
-                symm_col.label(text="Mirror")
-                symm_row = symm_col.row(align=True)
-                symm_row.prop(active, "use_symmetry_x", text="X", toggle=True)
-                symm_row.prop(active, "use_symmetry_y", text="Y", toggle=True)
-                symm_row.prop(active, "use_symmetry_z", text="Z", toggle=True)
+        # The brush slot belongs to the Layer Material tab's Curve Patch controls; here the panel
+        # is only the curve list and the active curve's settings.
+        draw_curve_patch_curves(layout, context, row_data)
 
 
 classes = (

@@ -312,6 +312,60 @@ class StackLayersOutlinerTest(unittest.TestCase):
                 self.space.show_stack_layer_value = value_column
                 self.redraw_window()
 
+    def test_paint_layer_with_mask_draws_in_both_row_sizes(self):
+        # The compact row draws the same slots as the large one: a mask adds its button in
+        # either mode, and drawing must not fault.
+        object, material = self.add_layered_material_object("MaskSlots")
+        material.paint_layers[0].mask_add(value=1.0)
+        self.focus_and_pin_stack(object)
+        for big_rows in (True, False):
+            self.space.use_stack_layer_big_rows = big_rows
+            self.redraw_window()
+
+    def test_rows_without_slots_draw_in_compact_mode(self):
+        # Shape-key rows carry no preview slots; the compact draw keeps their plain icon.
+        object = self.add_object_with_shape_keys()
+        self.focus_and_draw_stack(object)
+        self.space.use_stack_layer_big_rows = False
+        self.redraw_window()
+
+    def test_linked_material_source_is_made_local_on_assignment(self):
+        # The preview system skips linked IDs, so a source assigned to a Material row must be
+        # localized with the assignment (both through the Add and through the source property).
+        import os
+        import shutil
+        import tempfile
+
+        library_dir = tempfile.mkdtemp()
+        library_path = os.path.join(library_dir, "linked_source.blend")
+        source_add = bpy.data.materials.new("LinkedAdd")
+        source_assign = bpy.data.materials.new("LinkedAssign")
+        bpy.data.libraries.write(library_path, {source_add, source_assign}, fake_user=True)
+        bpy.data.materials.remove(source_add)
+        bpy.data.materials.remove(source_assign)
+        try:
+            with bpy.data.libraries.load(library_path, link=True) as (data_from, data_to):
+                data_to.materials = ["LinkedAdd", "LinkedAssign"]
+            linked_add, linked_assign = data_to.materials
+            self.assertIsNotNone(linked_add.library)
+            self.assertIsNotNone(linked_assign.library)
+
+            owner = bpy.data.materials.new("LinkedOwner")
+            added = owner.paint_layers.new(name="AddedSource", source='MATERIAL',
+                                           material=linked_add)
+            self.assertIsNotNone(added)
+            self.assertIsNotNone(added.material)
+            self.assertIsNone(added.material.library)
+
+            local_source = bpy.data.materials.new("LocalSource")
+            assigned = owner.paint_layers.new(name="AssignedSource", source='MATERIAL',
+                                              material=local_source)
+            assigned.material = linked_assign
+            self.assertIsNotNone(assigned.material)
+            self.assertIsNone(assigned.material.library)
+        finally:
+            shutil.rmtree(library_dir, ignore_errors=True)
+
     def test_stack_operators_are_registered(self):
         for name in (
             "stack_layer_focus",

@@ -59,9 +59,14 @@
 #include "RNA_define.hh"
 #include "RNA_prototypes.hh"
 
+#include "../paint_intern.hh"
+
 #include "sculpt_intern.hh"
 
 namespace blender::ed::sculpt_paint::cursor {
+
+/** The `3D Cursor` tool's identifier, read here and in the Paint-group key-swallow check. */
+constexpr const char *SCULPT_CURSOR_TOOL_ID = "builtin.sculpt_cursor";
 
 /* Calculate rotation for sculpt cursor based on the requested orientation. */
 static void calc_sculpt_cursor_rotation(bContext *C,
@@ -324,7 +329,7 @@ static void sculpt_cursor_set_props_from_tool(bContext *C, wmOperator *op)
 
   PointerRNA tool_ptr;
   if (!WM_toolsystem_ref_properties_get_from_operator_for_tool(
-          tref, "builtin.sculpt_cursor", op->type, &tool_ptr))
+          tref, SCULPT_CURSOR_TOOL_ID, op->type, &tool_ptr))
   {
     return;
   }
@@ -346,9 +351,33 @@ static void sculpt_cursor_set_props_from_tool(bContext *C, wmOperator *op)
   }
 }
 
+/**
+ * Whether placing the cursor must be swallowed because the Paint toolbar group owns Shift+RMB.
+ *
+ * That group uses the key for the scene light rotation (#PAINT_OT_scene_light_rotate), and those
+ * tools have no use for the cursor. The `3D Cursor` tool itself keeps placing it with its own key.
+ */
+static bool sculpt_cursor_set_paint_display_blocked(const bContext *C)
+{
+  const bToolRef *tref = WM_toolsystem_ref_from_context(C);
+  if (tref != nullptr && tref->idname != nullptr &&
+      STREQ(tref->idname, SCULPT_CURSOR_TOOL_ID))
+  {
+    return false;
+  }
+  return paint_sculpt_tool_display_is_paint(C);
+}
+
 /* Invoke: Set cursor position on mouse click */
 static wmOperatorStatus sculpt_cursor_set_invoke(bContext *C, wmOperator *op, const wmEvent *event)
 {
+  /* Consume the key in the Paint display group instead of placing the cursor. The keymap entry
+   * must still take the event (returning finished), otherwise it would fall through to the regular
+   * 3D cursor binding of the generic 3D View keymap. */
+  if (sculpt_cursor_set_paint_display_blocked(C)) {
+    return OPERATOR_FINISHED;
+  }
+
   Scene *scene = CTX_data_scene(C);
   ViewLayer *view_layer = CTX_data_view_layer(C);
 

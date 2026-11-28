@@ -3842,12 +3842,12 @@ static void outliner_draw_tree_element(ui::Block *block,
       float indicator_maxy = float(*starty) + UI_UNIT_Y;
       /* A preview stands in for the row's icon and is larger than the unit square the indicator
        * normally frames. Cover the preview instead, so the highlight matches what it marks. */
-      if (stack_row != nullptr && stack_big_rows && !stack_row_compact &&
+      if (stack_row != nullptr && !stack_row_compact &&
           !stack_row->preview_slots.is_empty() &&
           !stack_row->preview_slots[0].keeps_row_icon)
       {
         const rctf preview_rect = outliner_stack_row_preview_rect(
-            *stack_row, float(startx), float(*starty), 0);
+            *space_outliner, *stack_row, float(startx), float(*starty), 0);
         /* #outliner_draw_active_indicator insets vertically by one ufac, so add it back. */
         const float ufac = outliner_row_inset();
         indicator_minx = preview_rect.xmin;
@@ -3898,22 +3898,23 @@ static void outliner_draw_tree_element(ui::Block *block,
     int preview_slots_drawn = 0;
     bool icon_drawn = false;
     bool preview_drawn = false;
-    if (tselem->type == TSE_STACK_LAYER && stack_big_rows && !stack_row_compact) {
+    if (tselem->type == TSE_STACK_LAYER && !stack_row_compact) {
       const StackRow *row = stack_row;
       if (row == nullptr) {
         /* The row is gone from the model; the placeholder icon below stands in for it. */
       }
       else if (row->preview_slots.is_empty()) {
         /* Nothing to preview: a plain group keeps its folder icon, and any other row without a
-         * slot gets the empty-texture placeholder. */
+         * slot gets the empty-texture placeholder -- but only in Large Rows mode, where the
+         * placeholder is preview sized. A compact row keeps its unit icon instead. */
         stack_row_is_group = row->can_hold_children;
-        draw_empty_texture = !stack_row_is_group;
+        draw_empty_texture = !stack_row_is_group && stack_big_rows;
       }
       else {
         /* The row's own icon is drawn ahead of the first slot when that slot says so -- a folder
          * with a mask stays a folder, a layer's preview stands in for its icon. */
         stack_row_is_group = row->preview_slots[0].keeps_row_icon;
-        const float preview_size = outliner_stack_preview_size();
+        const float preview_size = outliner_stack_preview_slot_size(*space_outliner);
         const float margin = OUTLINER_STACK_PREVIEW_FRAME_MARGIN * UI_SCALE_FAC;
         const bool is_active_stack_row = (tselem->flag & TSE_ACTIVE) != 0;
         /* Which section the row's content currently shows: the slot that names it draws its
@@ -3924,18 +3925,19 @@ static void outliner_draw_tree_element(ui::Block *block,
         for (const int slot_index : row->preview_slots.index_range()) {
           const StackRowPreview &slot = row->preview_slots[slot_index];
           const rctf preview_rect = outliner_stack_row_preview_rect(
-              *row, float(startx), float(*starty), slot_index);
+              *space_outliner, *row, float(startx), float(*starty), slot_index);
           /* A slot that names a rendered preview always draws at full alpha: it is a picture of
            * the material the row lays down, and the row's dimming would change its colours. */
           const float alpha = (slot.render_kind != StackRowPreviewRender::None) ? 1.0f :
                               (tselem->flag & TSE_HIGHLIGHTED_ICON) ? alpha_fac + 0.5f :
                                                                       alpha_fac;
+          const int slot_icon = stack_slot_icon_get(slot);
           /* A slot that names a rendered preview draws its pixels; while they are on their way it
            * draws its own stand-in, and when there is nothing to render at all it falls through
-           * to its other looks below. */
+           * to its other looks below. The same path serves compact rows: their slot is smaller,
+           * but a material's sphere or a Fill's render still says more than a flat icon does. */
           const bool slot_rendered = stack_preview_slot_rendered_draw(
               C, block, preview_rect, slot);
-          const int slot_icon = stack_slot_icon_get(slot);
           if (!slot_rendered && slot.is_color_swatch) {
             /* A row that is a colour shows the colour: no thumbnail to fetch, no icon that says
              * more than the swatch does. Drawn opaque whatever the row state or hover, so the
@@ -3952,6 +3954,9 @@ static void outliner_draw_tree_element(ui::Block *block,
           }
           else if (!slot_rendered) {
             const int icon_id = slot_icon;
+            /* The slot's own height decides the icon's scale: a Large slot gives the familiar
+             * 1.5, a compact unit slot fills its square. Anchoring at ymin then centers it. */
+            const float icon_scale = outliner_stack_slot_icon_scale(preview_rect);
             ui::icon_draw_ex(preview_rect.xmin,
                              preview_rect.ymin,
                              icon_id != 0 ? icon_id : stack_empty_icon,
@@ -3962,7 +3967,7 @@ static void outliner_draw_tree_element(ui::Block *block,
                              false,
                              nullptr,
                              false,
-                             OUTLINER_STACK_PREVIEW_SCALE);
+                             icon_scale);
           }
           /* A rendered picture says what the row lays down; the badge says which kind of row it
            * is -- a Material's icon over its sphere, a Fill's bucket over its render. */
@@ -4031,8 +4036,9 @@ static void outliner_draw_tree_element(ui::Block *block,
       icon_drawn = true;
     }
     if (preview_drawn) {
-      offsx += int(outliner_stack_preview_row_width(stack_row_is_group, preview_slots_drawn) +
-                   2 * ufac);
+      const float preview_width = outliner_stack_preview_row_width(
+          *space_outliner, stack_row_is_group, preview_slots_drawn);
+      offsx += int(preview_width + 2 * ufac);
     }
     else if (icon_drawn) {
       offsx += UI_UNIT_X + 4 * ufac;

@@ -98,6 +98,17 @@ class IMAGE_PT_active_tool(Panel, ToolActivePanelHelper):
     bl_region_type = 'UI'
     bl_category = "Tool"
 
+    def draw(self, context):
+        super().draw(context)
+        brush = context.tool_settings.image_paint.brush
+        if brush is not None:
+            paint_mode = context.tool_settings.paint_mode
+            draw_material_paint_channels(
+                context, self.layout, brush, context.tool_settings.image_paint, paint_mode,
+                show_custom=(paint_mode.canvas_source == 'MATERIAL_PAINT'),
+                draw_source=True,
+            )
+
 
 class IMAGE_MT_view(Menu):
     bl_label = "View"
